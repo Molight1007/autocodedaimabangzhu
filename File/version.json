@@ -1,0 +1,7 @@
+{
+  "version": "1.0.0",
+  "download_url": "https://example.com/download",
+  "notes": "更新：1. 修复代码编辑器回车缩进判断，使用 tokenize 严格识别注释后冒号场景。\n2. 优化补全确认后的自动括号：支持动态模块属性函数，并避免对常量补括号。\n3. 修复代码（generate_data）执行作用域问题：统一 exec 命名空间，支持函数内调用同文件辅助函数。\n4. 调整 generate_data 失败兜底逻辑：不再静默产出空 stdin，改为写入显式错误占位并在 meta 记录 generate_data_error。\n5. 加入agent模块，该模块下，AI会自己调度工具运行程序；使用agent后，难题的准确率会显著提高，但是会消耗更多的token。",
+  "mandatory": false,
+  "sha256": ""
+}

@@ -1,0 +1,921 @@
+"""双 Agent 代码生成（阶段 2.1）。
+
+仅负责：
+- 为两条算法路径创建独立 Agent 会话并发生成代码。
+- 复用现有 isolated_agent 自治修复流程，限制最大轮数。
+- 汇总每个 Agent 的生成结果与失败原因。
+
+不负责：
+- 不做对拍。
+- 不做交叉反馈。
+- 不做最终验证裁决。
+"""
+
+from __future__ import annotations
+
+import json
+from datetime import datetime
+from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
+from typing import Any, Callable, Dict, List, Optional
+
+from ...prompts.prompt_builders import get_agent_system_prompt
+from ..contracts.protocol import (
+    RESULT_GRAMMATICAL_ERROR,
+    RESULT_RIGHT,
+    RESULT_RUNTIME_ERROR,
+    RESULT_SYSTEM_ERROR,
+    RESULT_WRONG,
+    VERIFY_CONFIDENCE_LOW,
+    VERIFY_OUTPUT_ANY,
+    VERIFY_STRATEGY_BRUTE,
+    VERIFY_STRATEGY_CROSS,
+    VERIFY_STRATEGY_SKIP,
+)
+from ..runtime.executor import build_default_run_executor
+from ..session.state import AgentSessionState
+from .data_pool import prepare_cross_validation_pool
+
+
+@dataclass(frozen=True)
+class _SingleGenResult:
+    code: str
+    success: bool
+    rounds: int
+    error: str
+
+
+@dataclass(frozen=True)
+class _ExecOutcome:
+    run_type: str
+    output: str
+    error: str
+    is_timeout: bool
+
+
+def generate_dual_codes(
+    *,
+    problem: dict,
+    algorithms: list,  # 阶段一输出的 algorithms 数组前两个元素
+    llm_caller_factory: Callable[[str], Callable],
+    max_rounds: int = 30,
+    on_progress: Optional[Callable[[Dict[str, Any]], None]] = None,
+) -> dict:
+    """并发生成两份相互隔离的候选代码。
+
+    Args:
+        problem: 题目对象（dict）。
+        algorithms: 算法列表，至少 2 项，支持 dict/object/str 三种形态。
+        llm_caller_factory: 会话工厂，输入 session tag，返回该会话专属 llm_caller。
+        max_rounds: 每个 Agent 的最大自治轮数。
+
+    Returns:
+        {
+            "code_a": str,
+            "code_b": str,
+            "a_success": bool,
+            "b_success": bool,
+            "a_rounds": int,
+            "b_rounds": int,
+            "a_error": str,
+            "b_error": str
+        }
+    """
+    rounds = max(1, int(max_rounds or 30))
+    pb = dict(problem or {})
+    default_result = {
+        "code_a": "",
+        "code_b": "",
+        "a_success": False,
+        "b_success": False,
+        "a_rounds": 0,
+        "b_rounds": 0,
+        "a_error": "",
+        "b_error": "",
+    }
+
+    if not callable(llm_caller_factory):
+        default_result["a_error"] = "llm_caller_factory_not_callable"
+        default_result["b_error"] = "llm_caller_factory_not_callable"
+        return default_result
+
+    if len(list(algorithms or [])) < 2:
+        default_result["a_error"] = "algorithms_requires_at_least_2_items"
+        default_result["b_error"] = "algorithms_requires_at_least_2_items"
+        return default_result
+
+    algo_a = _normalize_algorithm(algorithms[0], fallback_name="algorithm_a")
+    algo_b = _normalize_algorithm(algorithms[1], fallback_name="algorithm_b")
+
+    if on_progress:
+        try:
+            on_progress({"stage": "dual_gen_start", "message": f"Agent-A[{algo_a['name']}] vs Agent-B[{algo_b['name']}] 并发生成中"})
+        except Exception:
+            pass
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        fut_a = pool.submit(
+            _run_single_agent,
+            problem=pb,
+            algorithm=algo_a,
+            llm_caller_factory=llm_caller_factory,
+            max_rounds=rounds,
+            slot="a",
+            on_progress=on_progress,
+        )
+        fut_b = pool.submit(
+            _run_single_agent,
+            problem=pb,
+            algorithm=algo_b,
+            llm_caller_factory=llm_caller_factory,
+            max_rounds=rounds,
+            slot="b",
+            on_progress=on_progress,
+        )
+        res_a = fut_a.result()
+        res_b = fut_b.result()
+    if on_progress:
+        try:
+            a_status = "通过" if res_a.success else f"失败({res_a.error})"
+            b_status = "通过" if res_b.success else f"失败({res_b.error})"
+            on_progress({"stage": "dual_gen_done", "message": f"Agent-A: {a_status} ({res_a.rounds}轮), Agent-B: {b_status} ({res_b.rounds}轮)"})
+        except Exception:
+            pass
+
+    return {
+        "code_a": res_a.code,
+        "code_b": res_b.code,
+        "a_success": res_a.success,
+        "b_success": res_b.success,
+        "a_rounds": res_a.rounds,
+        "b_rounds": res_b.rounds,
+        "a_error": res_a.error,
+        "b_error": res_b.error,
+    }
+
+
+def run_cross_validation(
+    *,
+    problem: dict,
+    analysis_result: dict,      # 阶段一输出
+    test_cases: list,           # 全部测试数据，每个元素含 stdin
+    llm_caller_factory: Callable,
+    max_rounds: int = 30,
+    on_progress: Optional[Callable[[Dict[str, Any]], None]] = None,
+) -> dict:
+    """执行双代码对拍与一次交叉反馈重试。"""
+    pb = dict(problem or {})
+    analysis = dict(analysis_result or {})
+    rounds = max(1, int(max_rounds or 30))
+    strategy = (
+        VERIFY_STRATEGY_BRUTE if bool(analysis.get("can_brute_force")) else VERIFY_STRATEGY_CROSS
+    )
+
+    _append_verifier_trace(
+        "cross_validation_start",
+        {
+            "strategy": strategy,
+            "max_rounds": rounds,
+            "test_case_count": len(list(test_cases or [])),
+            "confidence": str(analysis.get("confidence") or ""),
+            "output_type": str(analysis.get("output_type") or ""),
+        },
+    )
+
+    algorithms = list(analysis.get("algorithms") or [])
+    dual = generate_dual_codes(
+        problem=pb,
+        algorithms=algorithms[:2],
+        llm_caller_factory=llm_caller_factory,
+        max_rounds=rounds,
+        on_progress=on_progress,
+    )
+    _append_verifier_trace("dual_codes_generated", {"result": dict(dual or {})})
+
+    if not bool(dual.get("a_success")) or not bool(dual.get("b_success")):
+        return _build_degraded_verdict(
+            strategy=VERIFY_STRATEGY_SKIP,
+            analysis=analysis,
+            reason="dual_generation_failed",
+            total_cases=len(list(test_cases or [])),
+            matched_cases=0,
+            cases=(),
+            error=f"a_error={dual.get('a_error')}; b_error={dual.get('b_error')}",
+        )
+
+    if str(analysis.get("output_type") or "").strip() == VERIFY_OUTPUT_ANY:
+        return _build_degraded_verdict(
+            strategy=VERIFY_STRATEGY_SKIP,
+            analysis=analysis,
+            reason="output_not_unique",
+            total_cases=len(list(test_cases or [])),
+            matched_cases=0,
+            cases=(),
+        )
+
+    if str(analysis.get("confidence") or "").strip() == VERIFY_CONFIDENCE_LOW:
+        return _build_degraded_verdict(
+            strategy=VERIFY_STRATEGY_SKIP,
+            analysis=analysis,
+            reason="low_confidence",
+            total_cases=len(list(test_cases or [])),
+            matched_cases=0,
+            cases=(),
+        )
+
+    pool = prepare_cross_validation_pool(test_cases)
+    _append_verifier_trace(
+        "data_pool_filtered",
+        {
+            "total_original": pool.total_original,
+            "total_filtered_by_size": pool.total_filtered_by_size,
+            "total_dropped_by_cap": pool.total_dropped_by_cap,
+            "total_retained": pool.total_retained,
+        },
+    )
+    if pool.is_empty:
+        return _build_degraded_verdict(
+            strategy=strategy,
+            analysis=analysis,
+            reason="data_pool_empty",
+            total_cases=pool.total_original,
+            matched_cases=0,
+            cases=(),
+            error=f"filtered_by_size={pool.total_filtered_by_size}",
+        )
+
+    first_compare = _compare_codes_on_cases(
+        code_a=str(dual.get("code_a") or ""),
+        code_b=str(dual.get("code_b") or ""),
+        test_cases=pool.cases,
+        can_brute_force=bool(analysis.get("can_brute_force")),
+        on_progress=on_progress,
+    )
+    _append_verifier_trace("first_compare_done", {"summary": _clip_json(first_compare)})
+
+    terminated_reason = str(first_compare.get("terminated_reason") or "").strip()
+    if terminated_reason:
+        return _build_degraded_verdict(
+            strategy=strategy,
+            analysis=analysis,
+            reason=terminated_reason,
+            total_cases=int(first_compare.get("total_cases") or 0),
+            matched_cases=int(first_compare.get("matched_cases") or 0),
+            cases=tuple(first_compare.get("cases") or ()),
+            mismatch_cases=tuple(first_compare.get("mismatch_cases") or ()),
+        )
+
+    if bool(first_compare.get("all_match")):
+        return _build_success_verdict(
+            strategy=strategy,
+            analysis=analysis,
+            total_cases=int(first_compare.get("total_cases") or 0),
+            matched_cases=int(first_compare.get("matched_cases") or 0),
+            cases=tuple(first_compare.get("cases") or ()),
+            code_a=str(dual.get("code_a") or ""),
+            code_b=str(dual.get("code_b") or ""),
+            rounds_a=int(dual.get("a_rounds") or 0),
+            rounds_b=int(dual.get("b_rounds") or 0),
+        )
+
+    first_mismatch = dict(first_compare.get("first_mismatch") or {})
+    if not first_mismatch:
+        return _build_degraded_verdict(
+            strategy=strategy,
+            analysis=analysis,
+            reason="no_comparable_cases",
+            total_cases=int(first_compare.get("total_cases") or 0),
+            matched_cases=int(first_compare.get("matched_cases") or 0),
+            cases=tuple(first_compare.get("cases") or ()),
+        )
+
+    algo_a = _normalize_algorithm(algorithms[0], fallback_name="algorithm_a")
+    algo_b = _normalize_algorithm(algorithms[1], fallback_name="algorithm_b")
+
+    feedback = _build_feedback_payload(first_mismatch)
+    retry_a = _retry_single_agent_after_mismatch(
+        slot="a",
+        algorithm=algo_a,
+        problem=pb,
+        llm_caller_factory=llm_caller_factory,
+        current_code=str(dual.get("code_a") or ""),
+        used_rounds=int(dual.get("a_rounds") or 0),
+        max_rounds=rounds,
+        feedback=feedback,
+        on_progress=on_progress,
+    )
+    retry_b = _retry_single_agent_after_mismatch(
+        slot="b",
+        algorithm=algo_b,
+        problem=pb,
+        llm_caller_factory=llm_caller_factory,
+        current_code=str(dual.get("code_b") or ""),
+        used_rounds=int(dual.get("b_rounds") or 0),
+        max_rounds=rounds,
+        feedback=feedback,
+        on_progress=on_progress,
+    )
+    _append_verifier_trace(
+        "retry_done",
+        {
+            "retry_a": retry_a,
+            "retry_b": retry_b,
+        },
+    )
+
+    second_compare = _compare_codes_on_cases(
+        code_a=str(retry_a.get("code") or dual.get("code_a") or ""),
+        code_b=str(retry_b.get("code") or dual.get("code_b") or ""),
+        test_cases=pool.cases,
+        can_brute_force=bool(analysis.get("can_brute_force")),
+        on_progress=on_progress,
+    )
+    _append_verifier_trace("second_compare_done", {"summary": _clip_json(second_compare)})
+
+    terminated_reason = str(second_compare.get("terminated_reason") or "").strip()
+    if terminated_reason:
+        return _build_degraded_verdict(
+            strategy=strategy,
+            analysis=analysis,
+            reason=terminated_reason,
+            total_cases=int(second_compare.get("total_cases") or 0),
+            matched_cases=int(second_compare.get("matched_cases") or 0),
+            cases=tuple(second_compare.get("cases") or ()),
+            mismatch_cases=tuple(second_compare.get("mismatch_cases") or ()),
+        )
+
+    if bool(second_compare.get("all_match")):
+        return _build_success_verdict(
+            strategy=strategy,
+            analysis=analysis,
+            total_cases=int(second_compare.get("total_cases") or 0),
+            matched_cases=int(second_compare.get("matched_cases") or 0),
+            cases=tuple(second_compare.get("cases") or ()),
+            code_a=str(retry_a.get("code") or dual.get("code_a") or ""),
+            code_b=str(retry_b.get("code") or dual.get("code_b") or ""),
+            rounds_a=int(retry_a.get("rounds") or dual.get("a_rounds") or 0),
+            rounds_b=int(retry_b.get("rounds") or dual.get("b_rounds") or 0),
+        )
+
+    return _build_degraded_verdict(
+        strategy=strategy,
+        analysis=analysis,
+        reason="mismatch_after_retry",
+        total_cases=int(second_compare.get("total_cases") or 0),
+        matched_cases=int(second_compare.get("matched_cases") or 0),
+        cases=tuple(second_compare.get("cases") or ()),
+        mismatch_cases=tuple(second_compare.get("mismatch_cases") or ()),
+        code_a=str(retry_a.get("code") or dual.get("code_a") or ""),
+        code_b=str(retry_b.get("code") or dual.get("code_b") or ""),
+    )
+
+
+def _run_single_agent(
+    *,
+    problem: Dict[str, Any],
+    algorithm: Dict[str, str],
+    llm_caller_factory: Callable[[str], Callable],
+    max_rounds: int,
+    slot: str,
+    on_progress: Optional[Callable[[Dict[str, Any]], None]] = None,
+) -> _SingleGenResult:
+    session_tag = _build_session_tag(slot=slot, algorithm_name=str(algorithm.get("name") or "algorithm"))
+    try:
+        llm_caller = llm_caller_factory(session_tag)
+        if not callable(llm_caller):
+            return _SingleGenResult(
+                code="",
+                success=False,
+                rounds=0,
+                error="llm_caller_factory_returned_non_callable",
+            )
+
+        runtime_context = {
+            "problem": dict(problem or {}),
+            "data_samples": _extract_data_samples(problem),
+            "agent_system_prompt": _build_algorithm_system_prompt(
+                algorithm_name=algorithm["name"],
+                algorithm_desc=algorithm["description"],
+            ),
+        }
+
+        algo_name = str(algorithm.get("name") or "algorithm")
+
+        def _on_agent_step(step_info: Dict[str, Any]) -> None:
+            if on_progress is None:
+                return
+            try:
+                action = str((step_info or {}).get("action") or "unknown")
+                attempt = int((step_info or {}).get("attempt") or 0)
+                result_type = str((step_info or {}).get("type") or "")
+                on_progress({
+                    "stage": "agent_step",
+                    "slot": slot,
+                    "algorithm": algo_name,
+                    "action": action,
+                    "attempt": attempt,
+                    "result_type": result_type,
+                    "message": f"Agent-{slot.upper()}[{algo_name}] 第{attempt}轮 {action}" + (f" → {result_type}" if result_type else ""),
+                })
+            except Exception:
+                pass
+
+        result = _call_solve_with_agent(
+            problem=dict(problem or {}),
+            candidate_code=_bootstrap_candidate_code(),
+            llm_caller=llm_caller,
+            runtime_context=runtime_context,
+            max_attempts=max_rounds,
+            context_rounds=min(max_rounds, 30),
+            session_id=session_tag,
+            on_step_callback=_on_agent_step,
+        )
+        passed = bool((result or {}).get("passed"))
+        rounds = int((result or {}).get("attempts") or 0)
+        final_code = str((result or {}).get("final_code") or "")
+        if passed:
+            return _SingleGenResult(code=final_code, success=True, rounds=rounds, error="")
+
+        return _SingleGenResult(
+            code="",
+            success=False,
+            rounds=rounds,
+            error=_extract_failure_reason(result),
+        )
+    except Exception as exc:
+        return _SingleGenResult(
+            code="",
+            success=False,
+            rounds=0,
+            error=f"agent_exception: {exc}",
+        )
+
+
+def _normalize_algorithm(item: Any, *, fallback_name: str) -> Dict[str, str]:
+    if isinstance(item, dict):
+        name = str(item.get("name") or "").strip() or fallback_name
+        desc = str(item.get("description") or "").strip() or "no description provided"
+        return {"name": name, "description": desc}
+
+    name = str(getattr(item, "name", "") or "").strip()
+    desc = str(getattr(item, "description", "") or "").strip()
+    if name:
+        return {"name": name, "description": desc or "no description provided"}
+
+    raw = str(item or "").strip()
+    if raw:
+        return {"name": raw, "description": "no description provided"}
+    return {"name": fallback_name, "description": "no description provided"}
+
+
+def _extract_data_samples(problem: Dict[str, Any]) -> List[Dict[str, Any]]:
+    samples: List[Dict[str, Any]] = []
+    source = dict(problem or {})
+    for key in ("data_samples", "samples", "cases"):
+        value = source.get(key)
+        if isinstance(value, list):
+            for item in value:
+                normalized = _normalize_sample_item(item)
+                if normalized is not None:
+                    samples.append(normalized)
+
+    if any(k in source for k in ("stdin", "stdout", "vars", "meta")):
+        normalized = _normalize_sample_item(source)
+        if normalized is not None:
+            samples.append(normalized)
+    return samples
+
+
+def _normalize_sample_item(item: Any) -> Dict[str, Any] | None:
+    if isinstance(item, dict):
+        return {
+            "stdin": str(item.get("stdin") or ""),
+            "stdout": str(item.get("stdout") or ""),
+            "vars": dict(item.get("vars") or {}) if isinstance(item.get("vars"), dict) else {},
+            "meta": dict(item.get("meta") or {}) if isinstance(item.get("meta"), dict) else {},
+        }
+    if isinstance(item, str):
+        return {"stdin": item, "stdout": "", "vars": {}, "meta": {}}
+    return None
+
+
+def _build_algorithm_system_prompt(*, algorithm_name: str, algorithm_desc: str) -> str:
+    base = get_agent_system_prompt().strip()
+    extra = (
+        "\n\n"
+        "你当前处于一个独立会话。\n"
+        "本会话必须使用且仅使用以下算法路线：\n"
+        f"- 算法名称：{algorithm_name}\n"
+        f"- 算法描述：{algorithm_desc}\n"
+        "硬约束：\n"
+        "1) 禁止偏离上述算法路线，不要引入替代算法。\n"
+        "2) 目标仅为得到可运行且稳定的最终代码：消除语法错误/运行时错误，完成至少一次 self_test(all_stable=true) 后 finalize。\n"
+        "3) 输出协议仍必须严格遵守 JSON action 规范。"
+    )
+    return base + extra
+
+
+def _bootstrap_candidate_code() -> str:
+    # 提供最小可运行骨架，降低首轮语法错误概率。
+    return (
+        "def solve(problem: dict, data: dict) -> dict:\n"
+        "    _ = problem\n"
+        "    _stdin = str((data or {}).get('stdin') or '')\n"
+        "    _ = _stdin\n"
+        "    return {'stdout': '', 'meta': {}}\n"
+    )
+
+
+def _extract_failure_reason(result: Dict[str, Any]) -> str:
+    summary = dict((result or {}).get("summary") or {})
+    reason = str(summary.get("reason") or "").strip()
+    if reason:
+        return reason
+    error = str(summary.get("error") or "").strip()
+    if error:
+        return error
+    return "agent_generation_failed"
+
+
+def _build_session_tag(*, slot: str, algorithm_name: str) -> str:
+    clean = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "-" for ch in str(algorithm_name or "algorithm"))
+    clean = clean.strip("-_") or "algorithm"
+    return f"verify-{slot}-{clean}"
+
+
+def _call_solve_with_agent(**kwargs: Any) -> Dict[str, Any]:
+    # 延迟导入，避免 facade <-> cross_runner 顶层循环依赖。
+    from ..facade import solve_with_agent
+
+    return dict(solve_with_agent(**kwargs) or {})
+
+
+def _normalize_test_cases(test_cases: list) -> List[Dict[str, str]]:
+    out: List[Dict[str, str]] = []
+    for item in list(test_cases or []):
+        if isinstance(item, dict):
+            out.append({"stdin": str(item.get("stdin") or "")})
+            continue
+        if isinstance(item, str):
+            out.append({"stdin": item})
+    return out
+
+
+def _compare_codes_on_cases(
+    *,
+    code_a: str,
+    code_b: str,
+    test_cases: List[Dict[str, str]],
+    can_brute_force: bool,
+    on_progress: Optional[Callable[[Dict[str, Any]], None]] = None,
+) -> Dict[str, Any]:
+    timeout_a = 3.0 if bool(can_brute_force) else 2.0
+    timeout_b = 2.0
+
+    cases: List[Dict[str, Any]] = []
+    mismatch_cases: List[Dict[str, Any]] = []
+    matched_cases = 0
+    compared_cases = 0
+    terminated_reason = ""
+
+    for idx, case in enumerate(test_cases):
+        stdin_text = str((case or {}).get("stdin") or "")
+        out_a = _execute_code_once(code=code_a, stdin_text=stdin_text, timeout_sec=timeout_a)
+        if bool(can_brute_force) and out_a.is_timeout:
+            cases.append(
+                {
+                    "index": idx,
+                    "stdin": stdin_text,
+                    "out_a": "",
+                    "out_b": "",
+                    "match": True,
+                    "skipped": True,
+                    "skip_reason": "brute_timeout",
+                    "error_a": out_a.error,
+                    "error_b": "",
+                }
+            )
+            continue
+        if not bool(can_brute_force) and out_a.is_timeout:
+            terminated_reason = "optimized_timeout"
+            break
+        if out_a.run_type in {RESULT_GRAMMATICAL_ERROR, RESULT_RUNTIME_ERROR, RESULT_SYSTEM_ERROR}:
+            terminated_reason = "brute_execution_error" if bool(can_brute_force) else "optimized_execution_error"
+            break
+
+        out_b = _execute_code_once(code=code_b, stdin_text=stdin_text, timeout_sec=timeout_b)
+        if out_b.is_timeout:
+            terminated_reason = "optimized_timeout"
+            break
+        if out_b.run_type in {RESULT_GRAMMATICAL_ERROR, RESULT_RUNTIME_ERROR, RESULT_SYSTEM_ERROR}:
+            terminated_reason = "optimized_execution_error"
+            break
+
+        left = str(out_a.output or "").rstrip()
+        right = str(out_b.output or "").rstrip()
+        is_match = left == right
+        compared_cases += 1
+        if is_match:
+            matched_cases += 1
+        one = {
+            "index": idx,
+            "stdin": stdin_text,
+            "out_a": str(out_a.output or ""),
+            "out_b": str(out_b.output or ""),
+            "match": bool(is_match),
+            "error_a": str(out_a.error or ""),
+            "error_b": str(out_b.error or ""),
+        }
+        cases.append(one)
+        if not is_match:
+            mismatch_cases.append(one)
+            break  # 遇错即停：发现第一个不匹配用例后立即终止扫描
+        if on_progress and (compared_cases % 5 == 0 or compared_cases == len(test_cases)):
+            try:
+                on_progress({
+                    "stage": "compare_progress",
+                    "message": f"对拍: {compared_cases}/{len(test_cases)}, 已匹配 {matched_cases}",
+                    "current": compared_cases,
+                    "total": len(test_cases),
+                    "matched": matched_cases,
+                })
+            except Exception:
+                pass
+
+    all_match = (
+        not terminated_reason
+        and compared_cases > 0
+        and len(mismatch_cases) == 0
+    )
+    if on_progress:
+        try:
+            on_progress({
+                "stage": "compare_done",
+                "message": f"对拍完成: {compared_cases}/{len(test_cases)} 已比, {matched_cases} 匹配" + (f", 终止: {terminated_reason}" if terminated_reason else ""),
+            })
+        except Exception:
+            pass
+    return {
+        "all_match": all_match,
+        "total_cases": len(test_cases),
+        "matched_cases": matched_cases,
+        "compared_cases": compared_cases,
+        "cases": cases,
+        "mismatch_cases": mismatch_cases,
+        "first_mismatch": mismatch_cases[0] if mismatch_cases else {},
+        "terminated_reason": terminated_reason,
+    }
+
+
+def _execute_code_once(*, code: str, stdin_text: str, timeout_sec: float) -> _ExecOutcome:
+    executor = build_default_run_executor(timeout_sec=float(timeout_sec or 2.0))
+    state = AgentSessionState(
+        session_id="verifier-exec",
+        current_code=str(code or ""),
+        runtime_context={
+            "stdin": str(stdin_text or ""),
+            "expected_stdout": None,
+            "checker": None,
+            "timeout_sec": float(timeout_sec or 2.0),
+        },
+    )
+    result = dict(executor(str(code or ""), state) or {})
+    run_type = str(result.get("type") or "")
+    is_timeout = run_type == RESULT_RUNTIME_ERROR and "time" in result
+    if run_type == RESULT_RIGHT:
+        return _ExecOutcome(
+            run_type=run_type,
+            output=str(result.get("code") or ""),
+            error="",
+            is_timeout=is_timeout,
+        )
+    if run_type == RESULT_WRONG:
+        return _ExecOutcome(
+            run_type=run_type,
+            output=str(result.get("result") or ""),
+            error="",
+            is_timeout=is_timeout,
+        )
+    return _ExecOutcome(
+        run_type=run_type,
+        output="",
+        error=str(result.get("code") or result.get("result") or ""),
+        is_timeout=is_timeout,
+    )
+
+
+def _build_feedback_payload(first_mismatch: Dict[str, Any]) -> Dict[str, str]:
+    return {
+        "stdin": str(first_mismatch.get("stdin") or ""),
+        "out_a": str(first_mismatch.get("out_a") or ""),
+        "out_b": str(first_mismatch.get("out_b") or ""),
+    }
+
+
+def _retry_single_agent_after_mismatch(
+    *,
+    slot: str,
+    algorithm: Dict[str, str],
+    problem: Dict[str, Any],
+    llm_caller_factory: Callable,
+    current_code: str,
+    used_rounds: int,
+    max_rounds: int,
+    feedback: Dict[str, str],
+    on_progress: Optional[Callable[[Dict[str, Any]], None]] = None,
+) -> Dict[str, Any]:
+    extra_budget = min(5, max(0, int(max_rounds or 1) - int(used_rounds or 0)))
+    if extra_budget <= 0:
+        return {
+            "success": False,
+            "rounds": int(used_rounds or 0),
+            "code": str(current_code or ""),
+            "error": "retry_budget_exhausted",
+        }
+
+    session_tag = _build_session_tag(slot=slot, algorithm_name=str(algorithm.get("name") or "algorithm"))
+    llm_caller = llm_caller_factory(session_tag)
+    if not callable(llm_caller):
+        return {
+            "success": False,
+            "rounds": int(used_rounds or 0),
+            "code": str(current_code or ""),
+            "error": "llm_caller_factory_returned_non_callable",
+        }
+
+    problem_retry = dict(problem or {})
+    problem_retry["cross_feedback"] = {
+        "instruction": (
+            "【对拍反馈】你的输出与另一份参考代码的输出不一致。\n"
+            "注意：对方代码也可能错误。你的任务是判断谁的输出正确，而不是盲目修改。\n\n"
+            "你必须严格按以下步骤思考（内部推理，不输出）：\n"
+            "1. 仔细阅读题目描述，确定对于给定的输入，正确答案应该是什么？\n"
+            "2. 你的输出是否正确？\n"
+            "3. 对方输出是否正确？\n"
+            "4. 如果你的输出正确，直接输出 finalize，不要做任何修改。\n"
+            "5. 如果你的输出错误，分析错误原因，输出 modify 修复代码。\n"
+            "6. 如果你无法确定谁正确，输出 finalize（保持原样），让系统裁决。"
+        ),
+        "stdin": str(feedback.get("stdin") or ""),
+        "your_output": str(feedback.get(f"out_{slot}") or ""),
+        "peer_output": str(feedback.get("out_b" if slot == "a" else "out_a") or ""),
+    }
+
+    runtime_context = {
+        "problem": dict(problem_retry),
+        "data_samples": _extract_data_samples(problem_retry),
+        "agent_system_prompt": _build_algorithm_system_prompt(
+            algorithm_name=str(algorithm.get("name") or ""),
+            algorithm_desc=str(algorithm.get("description") or ""),
+        ),
+    }
+
+    algo_name = str(algorithm.get("name") or "algorithm")
+    if on_progress:
+        try:
+            on_progress({
+                "stage": "retry_start",
+                "message": f"Agent-{slot.upper()}[{algo_name}] 交叉修复中 (最多{extra_budget}轮)",
+            })
+        except Exception:
+            pass
+
+    def _on_retry_step(step_info: Dict[str, Any]) -> None:
+        if on_progress is None:
+            return
+        try:
+            action = str((step_info or {}).get("action") or "unknown")
+            attempt = int((step_info or {}).get("attempt") or 0)
+            result_type = str((step_info or {}).get("type") or "")
+            on_progress({
+                "stage": "agent_step",
+                "slot": slot,
+                "algorithm": algo_name,
+                "action": action,
+                "attempt": attempt,
+                "result_type": result_type,
+                "message": f"Agent-{slot.upper()}[{algo_name}] 修复第{attempt}轮 {action}" + (f" → {result_type}" if result_type else ""),
+            })
+        except Exception:
+            pass
+
+    result = _call_solve_with_agent(
+        problem=problem_retry,
+        candidate_code=str(current_code or ""),
+        llm_caller=llm_caller,
+        runtime_context=runtime_context,
+        max_attempts=extra_budget,
+        context_rounds=min(extra_budget, 30),
+        session_id=session_tag,
+        on_step_callback=_on_retry_step,
+    )
+    passed = bool((result or {}).get("passed"))
+    used = int(used_rounds or 0) + int((result or {}).get("attempts") or 0)
+    new_code = str((result or {}).get("final_code") or "")
+    if passed and new_code:
+        return {"success": True, "rounds": used, "code": new_code, "error": ""}
+    return {
+        "success": False,
+        "rounds": used,
+        "code": str(current_code or ""),
+        "error": _extract_failure_reason(result),
+    }
+
+
+def _build_success_verdict(
+    *,
+    strategy: str,
+    analysis: Dict[str, Any],
+    total_cases: int,
+    matched_cases: int,
+    cases: tuple[Dict[str, Any], ...],
+    code_a: str,
+    code_b: str,
+    rounds_a: int,
+    rounds_b: int,
+) -> Dict[str, Any]:
+    verdict = {
+        "strategy": str(strategy or VERIFY_STRATEGY_CROSS),
+        "passed": True,
+        "verification_passed": True,
+        "reason": "outputs_match",
+        "total_cases": int(total_cases or 0),
+        "matched_cases": int(matched_cases or 0),
+        "cases": list(cases),
+        "mismatch_cases": [],
+        "analysis": dict(analysis or {}),
+        "skip_reason": "",
+        "error": "",
+        "code_a": str(code_a or ""),
+        "code_b": str(code_b or ""),
+        "a_rounds": int(rounds_a or 0),
+        "b_rounds": int(rounds_b or 0),
+    }
+    _append_verifier_trace("cross_validation_success", {"summary": _clip_json(verdict)})
+    return verdict
+
+
+def _build_degraded_verdict(
+    *,
+    strategy: str,
+    analysis: Dict[str, Any],
+    reason: str,
+    total_cases: int,
+    matched_cases: int,
+    cases: tuple[Dict[str, Any], ...],
+    mismatch_cases: tuple[Dict[str, Any], ...] = (),
+    error: str = "",
+    code_a: str = "",
+    code_b: str = "",
+) -> Dict[str, Any]:
+    verdict = {
+        "strategy": str(strategy or VERIFY_STRATEGY_SKIP),
+        "passed": False,
+        "verification_passed": False,
+        "reason": str(reason or "verification_degraded"),
+        "total_cases": int(total_cases or 0),
+        "matched_cases": int(matched_cases or 0),
+        "cases": list(cases),
+        "mismatch_cases": list(mismatch_cases),
+        "analysis": dict(analysis or {}),
+        "skip_reason": str(reason or ""),
+        "error": str(error or ""),
+        "code_a": str(code_a or ""),
+        "code_b": str(code_b or ""),
+    }
+    _append_verifier_trace("cross_validation_degraded", {"summary": _clip_json(verdict)})
+    return verdict
+
+
+def _resolve_verifier_trace_path() -> Path:
+    # cross_runner.py 位于 services/isolated_agent/verifier，下沉 3 层到项目根目录
+    root_dir = Path(__file__).resolve().parents[3]
+    return root_dir / "logs" / "verifier_trace.jsonl"
+
+
+def _append_verifier_trace(event: str, payload: Dict[str, Any]) -> None:
+    try:
+        path = _resolve_verifier_trace_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        row = {
+            "ts": datetime.now().isoformat(timespec="seconds"),
+            "event": str(event or ""),
+            "payload": _clip_json(payload),
+        }
+        with path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+    except Exception:
+        return
+
+
+def _clip_json(value: Any, limit: int = 3000) -> Any:
+    if isinstance(value, dict):
+        return {str(k): _clip_json(v, limit=limit) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_clip_json(x, limit=limit) for x in value]
+    text = str(value)
+    if len(text) <= limit:
+        return value
+    head = int(limit * 0.7)
+    tail = limit - head
+    return text[:head] + "\n...\n(trace truncated)\n...\n" + text[-tail:]
