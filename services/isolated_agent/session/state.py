@@ -23,6 +23,8 @@ from dataclasses import dataclass, field
 from hashlib import sha256
 from typing import Any, Dict, List, Optional
 
+from ..contracts.protocol import MAX_VERSION_SNAPSHOTS
+
 
 def compute_code_hash(code_text: str) -> str:
     raw = (code_text or "").encode("utf-8", errors="replace")
@@ -50,6 +52,8 @@ class AgentSessionState:
     last_self_test_version: int = -1
     last_self_test_all_stable: bool = False
     runtime_context: Dict[str, Any] = field(default_factory=dict)
+    version_snapshots: List[Dict[str, Any]] = field(default_factory=list)
+    max_snapshots: int = MAX_VERSION_SNAPSHOTS
 
     def __post_init__(self) -> None:
         if not self.code_hash:
@@ -101,6 +105,25 @@ class AgentSessionState:
         self.recent_events.append(event)
         if len(self.recent_events) > int(self.max_recent_events):
             self.recent_events = self.recent_events[-int(self.max_recent_events):]
+
+    def push_snapshot(self, version: int, code: str, summary: str) -> None:
+        """保存版本快照（modify 前调用），最多保留 max_snapshots 个。"""
+        cap = max(1, int(self.max_snapshots or MAX_VERSION_SNAPSHOTS))
+        self.version_snapshots.append({
+            "version": int(version),
+            "code": str(code or ""),
+            "summary": str(summary or "").strip() or "code modified",
+            "code_hash": compute_code_hash(str(code or "")),
+        })
+        if len(self.version_snapshots) > cap:
+            self.version_snapshots = self.version_snapshots[-cap:]
+
+    def find_snapshot(self, version: int) -> Optional[Dict[str, Any]]:
+        """按版本号查找快照，未找到返回 None。"""
+        for snap in self.version_snapshots:
+            if int(snap.get("version") or 0) == int(version):
+                return dict(snap)
+        return None
 
     def snapshot(self) -> Dict[str, Any]:
         return {

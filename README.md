@@ -447,9 +447,9 @@ Agent 每轮只能输出一个合法 JSON 动作，协议定义在 `contracts/pr
 
 | 动作 | JSON 格式 | 说明 |
 |------|-----------|------|
-| `read` | `{"action": "read", "target": "code\|problem\|all\|data_sample"}` | 读取当前代码/题目/全部/数据样本 |
+| `read` | `{"action": "read", "target": "code\|problem\|all\|data_sample\|v1\|v2\|..."}` | 读取当前代码/题目/全部/数据样本/历史版本快照（最近5个） |
 | `run` | `{"action": "run", "use_current": true}` 或 `{"action": "run", "code": "..."}` | 执行代码，`use_current` 优先 |
-| `modify` | `{"action": "modify", "code": "..."}` | 覆盖更新当前代码（`code` 字段必填） |
+| `modify` | `{"action": "modify", "code": "...", "summary": "可选摘要"}` | 覆盖更新当前代码（`code` 必填，`summary` 可选，保存在版本快照中） |
 | `self_test` | `{"action": "self_test", "cases": [...]}` | 自测 1~5 条用例稳定性 |
 | `finalize` | `{"action": "finalize"}` | 确认提交，触发 finalize 前置检查 |
 

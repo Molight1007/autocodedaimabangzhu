@@ -69,14 +69,19 @@ def get_agent_system_prompt() -> str:
    读取题目：{"action": "read", "target": "problem"}
    读取题目+代码：{"action": "read", "target": "all"}
    读取当前最短测试数据源结构：{"action": "read", "target": "data_sample"}
+   读取历史版本快照：{"action": "read", "target": "vN"}（N 为版本号，最多保留最近5个，具体见上下文 available_versions）
    含义：当对话被上下文裁剪时，你应主动调用 read 获取完整信息。
+       历史版本快照可用于对比"之前通过的那版代码"与当前版本的差异。
+       注意：仅 available_versions 中列出的版本可读取，旧版本可能已被淘汰。
    返回内容约定：
    - target=code: [start_file] ... [start_end]
    - target=problem: [start_problem] ... [end_problem]
    - target=all: [start_problem] ... [end_problem] + [start_file] ... [start_end]
    - target=data_sample: [start_data_sample] ... [end_data_sample]
+   - target=vN: [start_file_vN] version=N summary=<改动摘要> <代码> [end_file_vN]
    特殊错误约定：
    - {"type":"protocol_error","error_code":"data_sample_too_complex"} 表示当前样本整体过长，必须停止自治修复并提示用户手动提供精简样例。
+   - {"type":"protocol_error","error_code":"version_not_found"} 表示请求的版本快照已被淘汰或从未保存（以 available_versions 为准）。
 
 2) run
    方式一（推荐）：{"action": "run", "use_current": true}
@@ -92,8 +97,9 @@ def get_agent_system_prompt() -> str:
    - 运行结果不符合预期：{"type": "wrong", "result": "<运行结果>"}
 
 3) modify
-   {"action": "modify", "code": "<修改后的完整python代码>"}
-   含义：覆盖当前代码为新版本。
+   {"action": "modify", "code": "<修改后的完整python代码>", "summary": "<一句话描述本次改动>"}
+   含义：覆盖当前代码为新版本。summary 可选但强烈建议填写，用于后续版本回溯时快速定位关键修改。
+        summary 会保存在版本快照中，可通过 read target=vN 查看。
 
 4) self_test
    {"action": "self_test", "cases": [{"stdin": "<输入文本>", "label": "<可选标签>", "timeout_sec": 1.5}]}
@@ -114,7 +120,7 @@ def get_agent_system_prompt() -> str:
 - 仅当你确认代码满足要求时才执行 finalize。
 - 强制要求：在最终 finalize 前，必须至少执行一次 self_test，且 all_stable=true，否则任务失败，finalize不放行。
 - 推荐顺序：read -> modify -> run -> self_test -> (必要时继续modify/run/self_test) -> finalize。
-- 仅参考当前输入与最近上下文，不依赖更早历史。
+- 参考当前输入与最近上下文；历史版本快照（available_versions）可作为辅助参考，用于对比差异定位回归。
 
 finalize 前的自我审查清单（你必须思考，无需输出）：
 1. 这段代码是否存在潜在的边界崩溃风险（如空输入、极大值、负数、重复元素）？

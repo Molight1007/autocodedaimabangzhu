@@ -19,6 +19,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any, Dict
 
 from .errors import (
@@ -40,6 +41,12 @@ from .protocol import (
     SELF_TEST_TIMEOUT_MAX_SEC,
     SELF_TEST_TIMEOUT_MIN_SEC,
 )
+
+_VERSION_TARGET_RE = re.compile(r"^v([1-9]\d*)$")
+
+
+def _is_version_target(target: str) -> bool:
+    return bool(_VERSION_TARGET_RE.match(str(target or "").strip().lower()))
 
 
 def validate_action_request(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -74,7 +81,7 @@ def validate_action_request(payload: Dict[str, Any]) -> Dict[str, Any]:
                 details={"action": action, "field": "target"},
             )
         target_text = str(target or READ_TARGET_CODE).strip().lower() or READ_TARGET_CODE
-        if target_text not in ALLOWED_READ_TARGETS:
+        if target_text not in ALLOWED_READ_TARGETS and not _is_version_target(target_text):
             raise ProtocolViolation(
                 error_code=ERR_INVALID_FIELD_TYPE,
                 message="'target' is unsupported",

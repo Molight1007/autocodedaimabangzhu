@@ -20,7 +20,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, Iterable, List
+from typing import Any, Dict, Iterable, List, Optional
 
 from ..contracts.protocol import DEFAULT_CONTEXT_ROUNDS, MAX_CONTEXT_ROUNDS
 
@@ -84,6 +84,7 @@ def build_user_context(
     events: Iterable[Dict[str, Any]],
     max_rounds: int,
     problem_summary_max_chars: int,
+    version_snapshots: Optional[List[Dict[str, Any]]] = None,
 ) -> str:
     """生成用户上下文文本。
 
@@ -113,12 +114,19 @@ def build_user_context(
             f"{latest_read_preview}\n"
         )
 
+    versions_section = ""
+    snapshots = list(version_snapshots or [])
+    if snapshots:
+        versions_lines = [f"  v{s['version']}: {s['summary']}" for s in snapshots]
+        versions_section = "\n\navailable_versions:\n" + "\n".join(versions_lines) + "\n"
+
     return (
         f"{problem_tip}:\n{problem_text}\n\n"
         f"session_id={session_id}\n"
         f"version={version} code_hash={code_hash}\n"
         f"recent_events:\n{recent_text}\n"
         f"{read_section}"
+        f"{versions_section}"
         f"请输出下一步 JSON 动作。"
     )
 

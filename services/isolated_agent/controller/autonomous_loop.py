@@ -318,6 +318,7 @@ def _build_messages(
         events=state.recent_events,
         max_rounds=context_rounds,
         problem_summary_max_chars=int(config.problem_summary_max_chars or 1500),
+        version_snapshots=state.version_snapshots,
     )
     return [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_text}]
 

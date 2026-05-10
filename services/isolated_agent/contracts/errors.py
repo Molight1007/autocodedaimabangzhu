@@ -29,6 +29,7 @@ ERR_RUN_RESULT_INVALID = "run_result_invalid"
 ERR_FINALIZE_REQUIRES_SELF_TEST = "finalize_requires_self_test"
 ERR_DATA_SAMPLE_TOO_COMPLEX = "data_sample_too_complex"
 ERR_DATA_SAMPLE_MISSING = "data_sample_missing"
+ERR_VERSION_NOT_FOUND = "version_not_found"
 
 
 @dataclass(frozen=True)

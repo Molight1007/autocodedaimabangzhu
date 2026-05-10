@@ -64,6 +64,8 @@ READ_TARGET_CODE: Final[str] = "code"
 READ_TARGET_PROBLEM: Final[str] = "problem"
 READ_TARGET_ALL: Final[str] = "all"
 READ_TARGET_DATA_SAMPLE: Final[str] = "data_sample"
+READ_TARGET_VERSION_PREFIX: Final[str] = "v"
+MAX_VERSION_SNAPSHOTS: Final[int] = 5
 ALLOWED_READ_TARGETS: Final[tuple[str, ...]] = (
     READ_TARGET_CODE,
     READ_TARGET_PROBLEM,

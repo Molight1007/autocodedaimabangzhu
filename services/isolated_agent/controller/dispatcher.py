@@ -26,6 +26,7 @@ from ..contracts.errors import (
     ERR_FINALIZE_REQUIRES_SELF_TEST,
     ERR_RUN_EXECUTOR_MISSING,
     ERR_RUN_RESULT_INVALID,
+    ERR_VERSION_NOT_FOUND,
     ProtocolViolation,
 )
 from ..contracts.protocol import (
@@ -40,6 +41,7 @@ from ..contracts.protocol import (
     READ_TARGET_CODE,
     READ_TARGET_DATA_SAMPLE,
     READ_TARGET_PROBLEM,
+    READ_TARGET_VERSION_PREFIX,
     RESULT_FINALIZE_OK,
     RESULT_MODIFY_OK,
     RESULT_PROTOCOL_ERROR,
@@ -93,6 +95,8 @@ class ActionDispatcher:
     def _handle_read(self, state: AgentSessionState, req: Dict[str, Any]) -> Dict[str, Any]:
         target = str(req.get("target") or READ_TARGET_CODE).strip().lower() or READ_TARGET_CODE
         if target not in ALLOWED_READ_TARGETS:
+            if target.startswith(READ_TARGET_VERSION_PREFIX):
+                return self._handle_read_version(state, target)
             target = READ_TARGET_CODE
 
         problem_payload = state.runtime_context.get("problem")
@@ -183,8 +187,12 @@ class ActionDispatcher:
 
     def _handle_modify(self, state: AgentSessionState, req: Dict[str, Any]) -> Dict[str, Any]:
         new_code = str(req.get("code") or "")
+        summary = str(req.get("summary") or "").strip() or "code modified"
+        old_code = state.current_code
+        old_version = int(state.version)
+        state.push_snapshot(old_version, old_code, summary)
         state.replace_code(new_code)
-        state.push_event(action=ACTION_MODIFY, result_type=RESULT_MODIFY_OK, note="code replaced")
+        state.push_event(action=ACTION_MODIFY, result_type=RESULT_MODIFY_OK, note=summary)
         return {
             "type": RESULT_MODIFY_OK,
             "version": int(state.version),
@@ -230,6 +238,40 @@ class ActionDispatcher:
         out["version"] = int(state.version)
         out["code_hash"] = str(state.code_hash)
         return out
+
+    def _handle_read_version(self, state: AgentSessionState, target: str) -> Dict[str, Any]:
+        ver = int(target[1:])
+        snap = state.find_snapshot(ver)
+        if snap is None:
+            raise ProtocolViolation(
+                error_code=ERR_VERSION_NOT_FOUND,
+                message=f"version {target} not found (may have been evicted), check available_versions in context",
+                details={
+                    "target": target,
+                    "available_versions": [s["version"] for s in state.version_snapshots],
+                },
+            )
+        file_block = (
+            f"[start_file_{target}]\n"
+            f"version={snap['version']}\n"
+            f"summary={snap['summary']}\n"
+            f"code_hash={snap['code_hash']}\n"
+            + str(snap["code"])
+            + f"\n[end_file_{target}]"
+        )
+        state.push_event(
+            action=ACTION_READ,
+            result_type=RESULT_READ_OK,
+            note=f"read:{target}",
+            extra={"read_file_preview": self._clip_for_context(file_block, limit=6000)},
+        )
+        return {
+            "type": RESULT_READ_OK,
+            "target": target,
+            "version": int(state.version),
+            "code_hash": str(state.code_hash),
+            "file": file_block,
+        }
 
     def _clip_for_context(self, text: str, limit: int = 1200) -> str:
         s = str(text or "")
