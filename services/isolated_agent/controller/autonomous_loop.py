@@ -2,7 +2,7 @@
 
 核心职责：
 - 驱动 “模型决策 -> 动作分发 -> 结果回填” 的闭环迭代。
-- 在不保存代码历史的前提下，仅利用会话权威代码与最近摘要完成多轮修复。
+- 在不保存代码历史的前提下，利用固定题目卡 + 动态短上下文完成多轮修复。
 - 内置防死循环控制（最大尝试次数、协议错误阈值、无进展阈值）。
 
 不负责：
@@ -57,7 +57,7 @@ class LoopConfig:
     max_protocol_errors: int = 3
     max_no_progress_rounds: int = 5
     context_rounds: int = DEFAULT_CONTEXT_ROUNDS
-    problem_summary_max_chars: int = 1500
+    problem_card_max_chars: int = 1800
     on_step_callback: Optional[Callable[[Dict[str, Any]], None]] = None
     should_stop: Optional[Callable[[], bool]] = None
 
@@ -88,7 +88,7 @@ def run_autonomous_loop(
             "max_protocol_errors": max_protocol_errors,
             "max_no_progress_rounds": max_no_progress_rounds,
             "context_rounds": context_rounds,
-            "problem_summary_max_chars": int(cfg.problem_summary_max_chars or 1500),
+            "problem_card_max_chars": int(cfg.problem_card_max_chars or 1800),
         },
     )
 
@@ -287,7 +287,7 @@ def _build_messages(
 ) -> List[Dict[str, str]]:
     """构造最小上下文。
 
-    只包含系统规则、题目描述、最近 N 条摘要；不直接注入代码全文。
+    只包含系统规则、固定题目卡、动态短上下文；不直接注入代码全文。
     若模型需要代码，必须先调用 `read`。
     """
 
@@ -317,7 +317,7 @@ def _build_messages(
         code_hash=state.code_hash,
         events=state.recent_events,
         max_rounds=context_rounds,
-        problem_summary_max_chars=int(config.problem_summary_max_chars or 1500),
+        problem_card_max_chars=int(config.problem_card_max_chars or 1800),
         version_snapshots=state.version_snapshots,
     )
     return [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_text}]

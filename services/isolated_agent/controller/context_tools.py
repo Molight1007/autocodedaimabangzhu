@@ -2,8 +2,8 @@
 
 核心职责：
 - 将会话事件裁剪为可控窗口（默认最近 15 轮，最大 30，可配置）。
-- 将事件与题目对象转换为短摘要文本，降低提示词体积并减少噪声。
-- 提供“首轮完整题目、后续摘要题目”的上下文组装能力。
+- 将题目对象整理为稳定的“题目卡”，作为每轮都保留的固定前缀。
+- 将动态信息压缩为可裁剪区块，降低提示词体积并减少噪声。
 
 不负责：
 - 不分发动作，不执行 run，不修改会话状态。
@@ -15,14 +15,34 @@
 
 约束：
 - 裁剪器只按顺序保留尾部窗口，不重排事件。
-- 摘要器只保留机判相关字段，避免将长日志塞入上下文。
+- 动态区可裁剪，题目卡固定保留；完整原题仍可通过 read(target=problem/all) 获取。
 """
 
 from __future__ import annotations
 
+import json
 from typing import Any, Dict, Iterable, List, Optional
 
 from ..contracts.protocol import DEFAULT_CONTEXT_ROUNDS, MAX_CONTEXT_ROUNDS
+
+_DEFAULT_PROBLEM_CARD_MAX_CHARS = 1800
+_DYNAMIC_CONTEXT_MAX_CHARS = 2600
+_RECENT_EVENTS_MAX_CHARS = 900
+_READ_PREVIEW_MAX_CHARS = 1200
+_VERSIONS_MAX_CHARS = 500
+_FIELD_VALUE_MAX_CHARS = 600
+_HEAVY_PROBLEM_KEYS = {"cases", "data_samples", "samples", "generate_data_code", "cross_feedback"}
+_ORDERED_PROBLEM_KEYS = (
+    "title",
+    "description",
+    "input_format",
+    "output_format",
+    "constraints",
+    "stdin",
+    "stdout",
+    "sample_input",
+    "sample_output",
+)
 
 
 def trim_recent_events(events: Iterable[Dict[str, Any]], *, max_rounds: int) -> List[Dict[str, Any]]:
@@ -64,14 +84,46 @@ def summarize_event(event: Dict[str, Any]) -> str:
     return line
 
 
-def summarize_problem(problem: Dict[str, Any], *, max_chars: int) -> str:
-    raw = str(problem or "")
-    limit = max(256, int(max_chars or 1500))
-    if len(raw) <= limit:
-        return raw
-    head = int(limit * 0.7)
-    tail = limit - head
-    return raw[:head] + "\n...\n(problem truncated)\n...\n" + raw[-tail:]
+def build_problem_card(problem: Dict[str, Any], *, max_chars: int) -> str:
+    """构建固定题目卡。
+
+    题目卡会在每轮 user prompt 的前半段稳定保留，用于：
+    - 提供持续可缓存的稳定前缀
+    - 避免后续轮次因题面摘要漂移而遗忘约束
+    - 将超长原题、完整样例等重内容留给 read(target=problem/all)
+    """
+
+    limit = max(512, int(max_chars or _DEFAULT_PROBLEM_CARD_MAX_CHARS))
+    problem_obj = dict(problem or {})
+    lines = [
+        "题目卡（固定前缀，完整原题/原始字段请按需 read target=problem 或 all）:",
+    ]
+
+    for key in _ORDERED_PROBLEM_KEYS:
+        if key not in problem_obj:
+            continue
+        lines.append(f"{key}:")
+        lines.append(_render_problem_value(problem_obj.get(key)))
+
+    extras = {
+        str(k): v
+        for k, v in sorted(problem_obj.items(), key=lambda item: str(item[0]))
+        if str(k) not in _ORDERED_PROBLEM_KEYS and str(k) not in _HEAVY_PROBLEM_KEYS
+    }
+    if extras:
+        lines.append("other_fields:")
+        lines.append(_render_problem_value(extras))
+
+    if "cross_feedback" in problem_obj:
+        lines.append("cross_feedback:")
+        lines.append(_render_problem_value(problem_obj.get("cross_feedback")))
+
+    card = "\n".join(lines)
+    if len(card) <= limit:
+        return card
+
+    clipped = _clip_text(card, limit=limit)
+    return clipped + "\n[题目卡已裁剪；完整原题请 read target=problem 或 all]"
 
 
 def build_user_context(
@@ -83,50 +135,33 @@ def build_user_context(
     code_hash: str,
     events: Iterable[Dict[str, Any]],
     max_rounds: int,
-    problem_summary_max_chars: int,
+    problem_card_max_chars: int,
     version_snapshots: Optional[List[Dict[str, Any]]] = None,
 ) -> str:
     """生成用户上下文文本。
 
     规则：
-    - 第 1 轮注入完整题目，确保模型首轮决策不依赖 read。
-    - 第 2 轮及之后注入题目摘要；若信息不足可通过 read(target=all) 自取。
-    - 复杂数据场景可按需 read(target=data_sample) 获取最短测试数据源结构。
+    - 题目卡固定保留在 user prompt 前半段，作为稳定前缀。
+    - 状态、事件、read 预览、版本快照等动态区块按优先级裁剪。
+    - 完整题目与原始长字段由 read(target=problem/all) 兜底获取。
     """
 
     recent = trim_recent_events(events, max_rounds=max_rounds)
-    recent_lines = [summarize_event(item) for item in recent]
-    recent_text = "\n".join(recent_lines) if recent_lines else "- <empty>"
     latest_read_preview = _find_latest_read_preview(recent)
-
-    if int(attempt_idx) <= 1:
-        problem_text = str(problem or {})
-        problem_tip = "题目（完整）"
-    else:
-        problem_text = summarize_problem(problem, max_chars=problem_summary_max_chars)
-        problem_tip = "题目（摘要，信息不足请 read target=all，复杂数据可 read target=data_sample）"
-
-    read_section = ""
-    if latest_read_preview:
-        read_section = (
-            "\n\n"
-            "最近一次 read 返回内容（已裁剪）：\n"
-            f"{latest_read_preview}\n"
-        )
-
-    versions_section = ""
-    snapshots = list(version_snapshots or [])
-    if snapshots:
-        versions_lines = [f"  v{s['version']}: {s['summary']}" for s in snapshots]
-        versions_section = "\n\navailable_versions:\n" + "\n".join(versions_lines) + "\n"
+    problem_text = build_problem_card(problem, max_chars=problem_card_max_chars)
+    dynamic_text = _build_dynamic_context(
+        attempt_idx=attempt_idx,
+        session_id=session_id,
+        version=version,
+        code_hash=code_hash,
+        recent_events=recent,
+        latest_read_preview=latest_read_preview,
+        version_snapshots=version_snapshots,
+    )
 
     return (
-        f"{problem_tip}:\n{problem_text}\n\n"
-        f"session_id={session_id}\n"
-        f"version={version} code_hash={code_hash}\n"
-        f"recent_events:\n{recent_text}\n"
-        f"{read_section}"
-        f"{versions_section}"
+        f"{problem_text}\n\n"
+        f"{dynamic_text}\n"
         f"请输出下一步 JSON 动作。"
     )
 
@@ -139,3 +174,109 @@ def _find_latest_read_preview(events: List[Dict[str, Any]]) -> str:
         if preview:
             return preview
     return ""
+
+
+def _render_problem_value(value: Any) -> str:
+    if isinstance(value, (dict, list)):
+        try:
+            text = json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True)
+        except Exception:
+            text = str(value)
+    else:
+        text = str(value)
+    return _clip_text(text, limit=_FIELD_VALUE_MAX_CHARS)
+
+
+def _build_dynamic_context(
+    *,
+    attempt_idx: int,
+    session_id: str,
+    version: int,
+    code_hash: str,
+    recent_events: List[Dict[str, Any]],
+    latest_read_preview: str,
+    version_snapshots: Optional[List[Dict[str, Any]]],
+) -> str:
+    budget = _DYNAMIC_CONTEXT_MAX_CHARS
+    parts = [
+        f"动态上下文（可裁剪）:\nattempt={int(attempt_idx)}\nsession_id={session_id}\nversion={version} code_hash={code_hash}",
+    ]
+    budget -= len(parts[0])
+
+    recent_text = _fit_recent_events(recent_events, max_chars=min(_RECENT_EVENTS_MAX_CHARS, max(200, budget)))
+    if recent_text:
+        section = f"recent_events:\n{recent_text}"
+        parts.append(section)
+        budget -= len(section)
+
+    if latest_read_preview and budget > 120:
+        preview = _clip_text(
+            latest_read_preview,
+            limit=min(_READ_PREVIEW_MAX_CHARS, max(120, budget)),
+        )
+        section = f"最近一次 read 返回内容（已裁剪）:\n{preview}"
+        parts.append(section)
+        budget -= len(section)
+
+    snapshots_text = _fit_version_snapshots(
+        version_snapshots or [],
+        max_chars=min(_VERSIONS_MAX_CHARS, max(120, budget)),
+    )
+    if snapshots_text:
+        parts.append(f"available_versions:\n{snapshots_text}")
+
+    return "\n\n".join(parts)
+
+
+def _fit_recent_events(events: List[Dict[str, Any]], *, max_chars: int) -> str:
+    limit = max(120, int(max_chars or _RECENT_EVENTS_MAX_CHARS))
+    lines = [summarize_event(item) for item in list(events or [])]
+    if not lines:
+        return "- <empty>"
+
+    kept: List[str] = []
+    used = 0
+    for line in reversed(lines):
+        extra = len(line) + (1 if kept else 0)
+        if kept and used + extra > limit:
+            break
+        if not kept and len(line) > limit:
+            kept.append(_clip_text(line, limit=limit))
+            used = len(kept[0])
+            break
+        kept.append(line)
+        used += extra
+    kept.reverse()
+    return "\n".join(kept)
+
+
+def _fit_version_snapshots(snapshots: List[Dict[str, Any]], *, max_chars: int) -> str:
+    limit = max(120, int(max_chars or _VERSIONS_MAX_CHARS))
+    lines = [f"  v{s['version']}: {s['summary']}" for s in list(snapshots or [])]
+    if not lines:
+        return ""
+
+    kept: List[str] = []
+    used = 0
+    for line in reversed(lines):
+        extra = len(line) + (1 if kept else 0)
+        if kept and used + extra > limit:
+            break
+        if not kept and len(line) > limit:
+            kept.append(_clip_text(line, limit=limit))
+            used = len(kept[0])
+            break
+        kept.append(line)
+        used += extra
+    kept.reverse()
+    return "\n".join(kept)
+
+
+def _clip_text(text: Any, *, limit: int) -> str:
+    raw = str(text or "")
+    cap = max(80, int(limit or 0))
+    if len(raw) <= cap:
+        return raw
+    head = int(cap * 0.7)
+    tail = cap - head
+    return raw[:head] + "\n...\n(truncated)\n...\n" + raw[-tail:]

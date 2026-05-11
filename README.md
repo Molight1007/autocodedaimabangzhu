@@ -1,7 +1,7 @@
 # 数据生成器 — 项目说明文档
 
 > **版本**：1.0.0　|　**技术栈**：Python + PySide6 + DeepSeek / OpenAI 兼容 API　|　**定位**：算法竞赛测试数据生成 & AI 辅助解题平台
-*最后修改时间：2026-04-22*
+*最后修改时间：2026-05-11*
 
 ---
 
@@ -51,6 +51,8 @@
 ├── ui/
 │   ├── main_window.py             # 主窗口
 │   ├── styles/                    # QSS 样式表
+│   ├── utils/
+│   │   └── python_keywords.py     # Python 关键字数据加载（供语法高亮/代码补全共享）
 │   └── widgets/
 │       ├── variables_panel.py     # 左侧变量配置面板
 │       ├── generation_panel.py    # 右侧生成参数面板
@@ -68,6 +70,7 @@
 │       │   └── ui_builder/                    # 对话框 UI 构建工具
 │       ├── code_editor/           # 代码编辑器组件
 │       │   ├── code_editor.py                 # 带行号的代码编辑器
+│       │   ├── code_editor_container.py       # 编辑器容器（整合 Editor + 高亮 + 补全）
 │       │   ├── python_syntax_highlighter.py   # Python 语法高亮
 │       │   ├── python_code_completer.py       # 代码补全
 │       │   └── completion_parentheses.py      # 括号自动补全
@@ -470,7 +473,7 @@ Agent 每轮只能输出一个合法 JSON 动作，协议定义在 `contracts/pr
 
 for attempt in range(1, max_attempts+1):
     1. 检查中断信号（should_stop）
-    2. 组装上下文消息（system_prompt + 最近 N 条事件摘要）
+    2. 组装上下文消息（system_prompt + 固定题目卡 + 动态上下文）
     3. 调用 llm_caller(messages) → 获取 LLM 输出
     4. 解析 LLM 输出为 action_payload（JSON）
        ├─ 解析失败 → protocol_error++，若达上限则退出
@@ -826,7 +829,7 @@ facade.verify_with_cross_agent(problem, candidate_code, test_cases, llm_caller_f
 | **Agent 与 UI 解耦** | Agent 引擎纯 Python，不依赖 PySide6；UI 通过 `on_step_callback` 注入回调 | Agent 可独立测试和复用，UI 层替换不影响业务逻辑 |
 | **子进程执行沙箱** | 用 `subprocess.run` 在独立进程执行候选代码 | 彻底隔离，主进程不受候选代码崩溃/无限循环影响 |
 | **双重安全检查** | 执行前 AST 静态守卫 + 运行时子进程隔离 | AST 拦截明显危险代码，子进程提供运行时隔离兜底 |
-| **短上下文设计** | Agent 上下文只包含系统提示 + 最近 N 条事件摘要，不含完整代码 | 控制 token 消耗；Agent 需要代码时主动调用 `read` |
+| **分层上下文设计** | Agent 上下文采用“固定题目卡 + 动态上下文”双层结构，不默认注入完整代码 | 在保持题意稳定的同时控制 token 消耗，并提高稳定前缀缓存命中；完整原题/代码由 `read` 按需获取 |
 | **对拍隔离** | 两个 Agent 完全独立会话，prompt 强制指定不同算法路径 | 防止 LLM 在同一上下文中生成结构相似的"两份"代码 |
 | **降级策略** | Verifier 在任何异常情况下均降级为 skip，不抛异常 | 对拍验证是加分项，不能因验证失败阻塞主流程 |
 | **版本哈希追踪** | `code_hash = SHA256(current_code)` | 检测无进展循环（modify 后哈希不变 = Agent 在原地打转） |

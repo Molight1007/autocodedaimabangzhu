@@ -200,7 +200,7 @@ class TestRunCrossValidationFullFlow(unittest.TestCase):
         retry_call_count = [0]
 
         def mock_retry(slot, algorithm, problem, llm_caller_factory,
-                       current_code, used_rounds, max_rounds, feedback):
+                       current_code, used_rounds, max_rounds, feedback, on_progress=None):
             retry_call_count[0] += 1
             # 验证 feedback（不匹配信息）已正确传入
             self.assertIn("stdin", feedback)
