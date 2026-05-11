@@ -71,12 +71,27 @@ class AgentSessionState:
         if self.last_run_result_type == "right":
             self.last_passed_version = int(self.version)
 
-    def can_finalize(self) -> bool:
-        return (
-            int(self.last_passed_version) == int(self.version)
-            and int(self.last_self_test_version) == int(self.version)
-            and bool(self.last_self_test_all_stable)
-        )
+    def can_finalize(self) -> tuple[bool, str]:
+        version = int(self.version)
+        missing: list[str] = []
+
+        if int(self.last_passed_version) != version:
+            missing.append(
+                f"finalize被拒  v={version}：尚未执行 run。请先执行 run，确保输出正确。"
+            )
+
+        if int(self.last_self_test_version) != version:
+            missing.append(
+                f"finalize被拒  v={version}：尚未执行 self_test。请先执行 self_test，确保稳定。"
+            )
+        elif not bool(self.last_self_test_all_stable):
+            missing.append(
+                f"finalize被拒  v={version}：self_test 不稳定。请修复代码后重新 run+self_test。"
+            )
+
+        if missing:
+            return False, "\n".join(missing)
+        return True, ""
 
     def mark_self_test_result(self, *, all_stable: bool) -> None:
         self.last_self_test_version = int(self.version)

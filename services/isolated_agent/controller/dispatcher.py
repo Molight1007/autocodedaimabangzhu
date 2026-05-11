@@ -23,7 +23,6 @@ from ..contracts.errors import (
     ERR_DATA_SAMPLE_MISSING,
     ERR_DATA_SAMPLE_TOO_COMPLEX,
     ERR_FINALIZE_REQUIRES_PASS,
-    ERR_FINALIZE_REQUIRES_SELF_TEST,
     ERR_RUN_EXECUTOR_MISSING,
     ERR_RUN_RESULT_INVALID,
     ERR_VERSION_NOT_FOUND,
@@ -290,21 +289,17 @@ class ActionDispatcher:
                 message="finalize code hash mismatch",
                 details={"expected": required_hash, "actual": state.code_hash},
             )
-        if not state.can_finalize():
-            if int(state.last_self_test_version) != int(state.version) or not bool(state.last_self_test_all_stable):
-                raise ProtocolViolation(
-                    error_code=ERR_FINALIZE_REQUIRES_SELF_TEST,
-                    message="finalize requires current version to pass self_test stability checks",
-                    details={
-                        "version": state.version,
-                        "last_self_test_version": state.last_self_test_version,
-                        "last_self_test_all_stable": state.last_self_test_all_stable,
-                    },
-                )
+        can_finalize, reject_message = state.can_finalize()
+        if not can_finalize:
             raise ProtocolViolation(
                 error_code=ERR_FINALIZE_REQUIRES_PASS,
-                message="finalize requires current version to pass run check",
-                details={"version": state.version, "last_passed_version": state.last_passed_version},
+                message=reject_message,
+                details={
+                    "version": state.version,
+                    "last_passed_version": state.last_passed_version,
+                    "last_self_test_version": state.last_self_test_version,
+                    "last_self_test_all_stable": state.last_self_test_all_stable,
+                },
             )
 
         state.status = "finished"
