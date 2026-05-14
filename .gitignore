@@ -33,6 +33,7 @@ env/
 *.swo
 *~
 .claude/
+.trae/
 
 # Logs
 *.log
@@ -49,3 +50,9 @@ dist/
 # OS
 .DS_Store
 Thumbs.db
+
+# Project specific
+数据生成器.spec
+debug.log
+upload_version.bat
+upload_version.ps1
