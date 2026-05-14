@@ -137,13 +137,22 @@ def verify_with_cross_agent(
     code_a = str((cross_result or {}).get("code_a") or "")
     code_b = str((cross_result or {}).get("code_b") or "")
     can_brute = bool(analysis_dict.get("can_brute_force"))
+    a_success = bool((cross_result or {}).get("a_success"))
+    b_success = bool((cross_result or {}).get("b_success"))
     brute_force_code = code_a if can_brute else ""
     optimized_code = code_b if code_b else (code_a if not can_brute else "")
 
     if verification_passed:
         final_code = optimized_code or final_code_fallback
     else:
-        final_code = final_code_fallback or optimized_code or brute_force_code
+        final_code = _pick_degraded_final_code(
+            can_brute_force=can_brute,
+            code_a=code_a,
+            code_b=code_b,
+            a_success=a_success,
+            b_success=b_success,
+            fallback_code=final_code_fallback,
+        )
 
     mismatch_cases = _normalize_mismatch_cases((cross_result or {}).get("mismatch_cases"))
     summary = {
@@ -152,8 +161,19 @@ def verify_with_cross_agent(
         "matched_cases": int((cross_result or {}).get("matched_cases") or 0),
         "a_rounds": int((cross_result or {}).get("a_rounds") or 0),
         "b_rounds": int((cross_result or {}).get("b_rounds") or 0),
+        "a_success": a_success,
+        "b_success": b_success,
         "analysis": analysis_dict,
         "error": str((cross_result or {}).get("error") or ""),
+        "selected_final_code_source": _resolve_selected_code_source(
+            can_brute_force=can_brute,
+            code_a=code_a,
+            code_b=code_b,
+            a_success=a_success,
+            b_success=b_success,
+            fallback_code=final_code_fallback,
+            selected_code=final_code,
+        ),
     }
 
     _notify_progress(on_progress, stage="cross_validation_done", message="对拍完成")
@@ -210,3 +230,54 @@ def _map_strategy(strategy: str) -> str:
     if text == "cross_algo":
         return "cross_algo"
     return "skip"
+
+
+def _pick_degraded_final_code(
+    *,
+    can_brute_force: bool,
+    code_a: str,
+    code_b: str,
+    a_success: bool,
+    b_success: bool,
+    fallback_code: str,
+) -> str:
+    if can_brute_force:
+        if b_success and code_b:
+            return code_b
+        if a_success and code_a:
+            return code_a
+    else:
+        if b_success and code_b:
+            return code_b
+        if a_success and code_a:
+            return code_a
+
+    if code_b:
+        return code_b
+    if code_a:
+        return code_a
+    return str(fallback_code or "")
+
+
+def _resolve_selected_code_source(
+    *,
+    can_brute_force: bool,
+    code_a: str,
+    code_b: str,
+    a_success: bool,
+    b_success: bool,
+    fallback_code: str,
+    selected_code: str,
+) -> str:
+    selected = str(selected_code or "")
+    if selected and b_success and selected == str(code_b or ""):
+        return "optimized_agent" if can_brute_force else "agent_b"
+    if selected and a_success and selected == str(code_a or ""):
+        return "brute_force_agent" if can_brute_force else "agent_a"
+    if selected and selected == str(fallback_code or ""):
+        return "candidate_fallback"
+    if selected and selected == str(code_b or ""):
+        return "agent_b_partial"
+    if selected and selected == str(code_a or ""):
+        return "agent_a_partial"
+    return "unknown"

@@ -166,12 +166,15 @@ class AutonomousFixWorker(QThread):
 
         verdict_dict = verdict.to_dict()
         final_code = str(verdict_dict.get("final_code") or self._candidate_code)
+        cross_summary = dict(verdict_dict.get("summary") or {})
+        cross_reason = str(cross_summary.get("reason") or verdict_dict.get("skip_reason") or "")
 
         return {
             "passed": bool(verdict_dict.get("verification_passed")),
             "final_code": final_code,
             "attempts": 0,
             "summary": {
+                "reason": cross_reason or "cross_validation_degraded",
                 "cross_validation": {
                     "enabled": True,
                     "verification_passed": bool(verdict_dict.get("verification_passed")),

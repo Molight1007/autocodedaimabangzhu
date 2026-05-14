@@ -207,6 +207,9 @@ class AutonomousFixHandler(QObject):
         cross_enabled = bool(cross.get("enabled"))
         cross_passed = bool(cross.get("verification_passed"))
         cross_skip_reason = str(cross.get("skip_reason") or "").strip()
+        cross_summary = dict(cross.get("summary") or {})
+        cross_reason_text = self._format_cross_reason(cross_skip_reason, cross_summary)
+        has_final_code = bool(final_code.strip())
 
         if passed:
             status_text = f"修复成功 (共 {attempts} 轮)"
@@ -223,15 +226,56 @@ class AutonomousFixHandler(QObject):
                     reason_text = cross_skip_reason or "未通过或已降级"
                     log_line += f"=== 双算法对拍：降级（{reason_text}） ===\n"
         else:
-            reason = str(summary.get("reason") or "未知原因")
-            if reason == "data_sample_manual_required":
-                reason = "数据复杂，需手动提供精简样例"
-            self._status_badge.setText(f"修复失败: {reason}")
-            log_line = f"\n=== 修复失败: {reason} ===\n"
+            if cross_enabled and has_final_code:
+                self._status_badge.setText(f"对拍降级: {cross_reason_text}")
+                self._right_editor.set_text(final_code)
+                log_line = (
+                    f"\n=== 双算法对拍：降级（{cross_reason_text}） ===\n"
+                    "=== 已保留当前可用代码，请继续人工确认 ===\n"
+                )
+            else:
+                reason = str(summary.get("reason") or "未知原因")
+                if cross_enabled and not has_final_code:
+                    reason = self._format_cross_hard_failure_reason(cross_reason_text, cross_summary)
+                elif reason == "data_sample_manual_required":
+                    reason = "数据复杂，需手动提供精简样例"
+                self._status_badge.setText(f"修复失败: {reason}")
+                log_line = f"\n=== 修复失败: {reason} ===\n"
 
         current_text = self._left_editor.get_text()
         self._left_editor.set_text(current_text + log_line)
         self._left_editor.editor.moveCursor(QTextCursor.End)
+
+    def _format_cross_reason(self, skip_reason: str, cross_summary: Dict[str, Any]) -> str:
+        reason = str(skip_reason or cross_summary.get("reason") or "").strip()
+        if reason == "low_confidence":
+            return "未识别到稳定双算法，已自动降级为单代码返回"
+        if reason == "output_not_unique":
+            return "题目输出不唯一，不适合对拍"
+        if reason == "data_pool_empty":
+            return "可用于对拍的数据为空"
+        if reason == "optimized_timeout":
+            return "对拍执行超时"
+        if reason == "mismatch_after_retry":
+            return "交叉修复后仍存在不一致"
+        if reason == "dual_generation_failed":
+            return "单边 Agent 失败，已保留另一侧可用代码"
+        if reason:
+            return reason
+        return "未通过或已降级"
+
+    def _format_cross_hard_failure_reason(
+        self,
+        reason_text: str,
+        cross_summary: Dict[str, Any],
+    ) -> str:
+        a_success = bool(cross_summary.get("a_success"))
+        b_success = bool(cross_summary.get("b_success"))
+        if not a_success and not b_success:
+            return "双侧 Agent 均未完成，题目难度可能过高"
+        if reason_text:
+            return reason_text
+        return "双算法对拍失败"
 
     def _on_err(self, message: str):
         self._status_badge.setText("修复异常")

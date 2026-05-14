@@ -297,7 +297,97 @@ class TestRunCrossValidationFullFlow(unittest.TestCase):
 
 
 # ===================================================================
-# 测试 4: 数据传递链完整性（Worker → facade）
+# 测试 4: 降级路由与单边成功保留代码
+# ===================================================================
+class TestCrossValidationDegradeFlow(unittest.TestCase):
+    def test_low_confidence_skips_before_dual_generation(self):
+        """只有单算法/low_confidence 时，应直接 skip，不进入双 Agent 生成。"""
+        from services.isolated_agent.verifier.cross_runner import run_cross_validation
+
+        analysis = {
+            "can_brute_force": False,
+            "confidence": "low",
+            "output_type": "single_value",
+            "algorithms": [
+                {"name": "only_algo", "description": "唯一识别出的算法"},
+            ],
+        }
+
+        with patch(
+            "services.isolated_agent.verifier.cross_runner.generate_dual_codes"
+        ) as mock_generate:
+            result = run_cross_validation(
+                problem={"title": "single algo"},
+                analysis_result=analysis,
+                test_cases=[{"stdin": c["stdin"]} for c in TEST_CASES],
+                llm_caller_factory=lambda tag: lambda m: "{}",
+                max_rounds=30,
+            )
+
+        mock_generate.assert_not_called()
+        self.assertFalse(result["verification_passed"])
+        self.assertEqual(result["strategy"], "skip")
+        self.assertEqual(result["reason"], "low_confidence")
+        self.assertEqual(result["skip_reason"], "low_confidence")
+
+    def test_single_side_success_returns_surviving_code(self):
+        """一侧 Agent 失败、另一侧成功时，应返回成功侧代码而不是丢失。"""
+        from services.isolated_agent.facade import verify_with_cross_agent
+        from services.isolated_agent.verifier.verdict import AnalysisResult, AlgorithmInfo
+
+        analysis = AnalysisResult(
+            can_brute_force=False,
+            max_n_for_brute=None,
+            output_type="single_value",
+            algorithms=(
+                AlgorithmInfo(name="algo_a", description="算法A"),
+                AlgorithmInfo(name="algo_b", description="算法B"),
+            ),
+            confidence="high",
+        )
+
+        with patch(
+            "services.isolated_agent.facade.analyze_problem",
+            return_value=analysis,
+        ), patch(
+            "services.isolated_agent.facade.run_cross_validation",
+            return_value={
+                "strategy": "skip",
+                "verification_passed": False,
+                "skip_reason": "dual_generation_failed",
+                "reason": "dual_generation_failed",
+                "total_cases": 3,
+                "matched_cases": 0,
+                "a_success": False,
+                "b_success": True,
+                "a_rounds": 2,
+                "b_rounds": 5,
+                "code_a": "",
+                "code_b": CODE_B_FIXED,
+                "error": "a_error=no_progress_limit_reached; b_error=",
+                "mismatch_cases": [],
+            },
+        ):
+            verdict = verify_with_cross_agent(
+                problem={"title": "survive"},
+                candidate_code="OLD_CODE",
+                test_cases=[{"stdin": c["stdin"]} for c in TEST_CASES],
+                llm_caller_factory=lambda tag: lambda m: "{}",
+                enable_cross_validation=True,
+            )
+
+        verdict_dict = verdict.to_dict()
+        self.assertFalse(verdict_dict["verification_passed"])
+        self.assertEqual(verdict_dict["skip_reason"], "dual_generation_failed")
+        self.assertEqual(verdict_dict["final_code"], CODE_B_FIXED)
+        self.assertEqual(
+            verdict_dict["summary"].get("selected_final_code_source"),
+            "agent_b",
+        )
+
+
+# ===================================================================
+# 测试 5: 数据传递链完整性（Worker → facade）
 # ===================================================================
 class TestDataPassingChain(unittest.TestCase):
     def test_all_test_cases_flow_to_collect(self):
@@ -319,7 +409,7 @@ class TestDataPassingChain(unittest.TestCase):
 
 
 # ===================================================================
-# 测试 5: data_pool 过滤层
+# 测试 6: data_pool 过滤层
 # ===================================================================
 class TestDataPool(unittest.TestCase):
     def test_all_cases_within_limits_passthrough(self):

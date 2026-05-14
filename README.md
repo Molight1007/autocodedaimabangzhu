@@ -1,7 +1,7 @@
 # 数据生成器 — 项目说明文档
 
 > **版本**：1.0.0　|　**技术栈**：Python + PySide6 + DeepSeek / OpenAI 兼容 API　|　**定位**：算法竞赛测试数据生成 & AI 辅助解题平台
-*最后修改时间：2026-05-11*
+*最后修改时间：2026-05-14*
 
 ---
 
@@ -554,6 +554,7 @@ verify_with_cross_agent(problem, candidate_code, test_cases, llm_caller_factory)
   【路由决策】
   ├─ output_type == any_solution → strategy=skip（构造题，输出不唯一）
   ├─ confidence == low → strategy=skip（算法路径不清晰）
+  ├─ algorithms < 2 → strategy=skip（未识别到稳定双算法）
   └─ else → 进入阶段二
          │
          ▼
@@ -569,6 +570,8 @@ verify_with_cross_agent(problem, candidate_code, test_cases, llm_caller_factory)
          │      Agent-A：指定算法路径 A（暴力解 或 算法A）
          │      Agent-B：指定算法路径 B（优化解 或 算法B）
          │      每个 Agent 内部运行完整 solve_with_agent 自治循环
+         │      若仅一侧成功 finalize，则整体降级并保留成功侧代码返回 UI
+         │      若两侧均失败，则降级并提示“题目难度可能过高”
          │
          ├─ 两份代码在全部 test_cases 上运行，比对 stdout
          │      can_brute_force=True：Agent-A 超时时跳过该用例（不终止）
@@ -600,7 +603,7 @@ verify_with_cross_agent(problem, candidate_code, test_cases, llm_caller_factory)
 | 功能未开启 | `disabled` |
 | analyzer LLM 调用失败 | `analyzer_error` |
 | output_type == any_solution | `output_not_unique` |
-| confidence == low | `low_confidence` |
+| confidence == low / algorithms < 2 | `low_confidence` |
 | 双代码生成失败 | `dual_generation_failed` |
 | test_cases 为空 | `empty_test_cases` |
 | 数据池过滤后为空（stdin 均超长） | `data_pool_empty` |
@@ -831,7 +834,7 @@ facade.verify_with_cross_agent(problem, candidate_code, test_cases, llm_caller_f
 | **双重安全检查** | 执行前 AST 静态守卫 + 运行时子进程隔离 | AST 拦截明显危险代码，子进程提供运行时隔离兜底 |
 | **分层上下文设计** | Agent 上下文采用“固定题目卡 + 动态上下文”双层结构，不默认注入完整代码 | 在保持题意稳定的同时控制 token 消耗，并提高稳定前缀缓存命中；完整原题/代码由 `read` 按需获取 |
 | **对拍隔离** | 两个 Agent 完全独立会话，prompt 强制指定不同算法路径 | 防止 LLM 在同一上下文中生成结构相似的"两份"代码 |
-| **降级策略** | Verifier 在任何异常情况下均降级为 skip，不抛异常 | 对拍验证是加分项，不能因验证失败阻塞主流程 |
+| **降级策略** | Verifier 在任何异常情况下均降级为 skip，不抛异常；若仅单边 Agent 成功则保留该代码返回 | 对拍验证是加分项，不能因验证失败阻塞主流程，同时尽量保留已得到的可用代码 |
 | **版本哈希追踪** | `code_hash = SHA256(current_code)` | 检测无进展循环（modify 后哈希不变 = Agent 在原地打转） |
 | **finalize 前置条件** | run=right + self_test(all_stable=True) 双重验证才允许 finalize | 防止 Agent 在未测试的情况下直接提交 |
 

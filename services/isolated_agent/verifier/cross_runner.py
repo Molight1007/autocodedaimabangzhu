@@ -167,6 +167,7 @@ def run_cross_validation(
     pb = dict(problem or {})
     analysis = dict(analysis_result or {})
     rounds = max(1, int(max_rounds or 30))
+    algorithms = list(analysis.get("algorithms") or [])
     strategy = (
         VERIFY_STRATEGY_BRUTE if bool(analysis.get("can_brute_force")) else VERIFY_STRATEGY_CROSS
     )
@@ -182,7 +183,31 @@ def run_cross_validation(
         },
     )
 
-    algorithms = list(analysis.get("algorithms") or [])
+    # 先做路由层降级判断，避免“明知不该对拍”却仍进入双 Agent 生成。
+    if str(analysis.get("output_type") or "").strip() == VERIFY_OUTPUT_ANY:
+        return _build_degraded_verdict(
+            strategy=VERIFY_STRATEGY_SKIP,
+            analysis=analysis,
+            reason="output_not_unique",
+            total_cases=len(list(test_cases or [])),
+            matched_cases=0,
+            cases=(),
+        )
+
+    if (
+        str(analysis.get("confidence") or "").strip() == VERIFY_CONFIDENCE_LOW
+        or len(algorithms) < 2
+    ):
+        return _build_degraded_verdict(
+            strategy=VERIFY_STRATEGY_SKIP,
+            analysis=analysis,
+            reason="low_confidence",
+            total_cases=len(list(test_cases or [])),
+            matched_cases=0,
+            cases=(),
+            error=f"algorithms_count={len(algorithms)}",
+        )
+
     dual = generate_dual_codes(
         problem=pb,
         algorithms=algorithms[:2],
@@ -201,26 +226,12 @@ def run_cross_validation(
             matched_cases=0,
             cases=(),
             error=f"a_error={dual.get('a_error')}; b_error={dual.get('b_error')}",
-        )
-
-    if str(analysis.get("output_type") or "").strip() == VERIFY_OUTPUT_ANY:
-        return _build_degraded_verdict(
-            strategy=VERIFY_STRATEGY_SKIP,
-            analysis=analysis,
-            reason="output_not_unique",
-            total_cases=len(list(test_cases or [])),
-            matched_cases=0,
-            cases=(),
-        )
-
-    if str(analysis.get("confidence") or "").strip() == VERIFY_CONFIDENCE_LOW:
-        return _build_degraded_verdict(
-            strategy=VERIFY_STRATEGY_SKIP,
-            analysis=analysis,
-            reason="low_confidence",
-            total_cases=len(list(test_cases or [])),
-            matched_cases=0,
-            cases=(),
+            code_a=str(dual.get("code_a") or ""),
+            code_b=str(dual.get("code_b") or ""),
+            a_success=bool(dual.get("a_success")),
+            b_success=bool(dual.get("b_success")),
+            a_rounds=int(dual.get("a_rounds") or 0),
+            b_rounds=int(dual.get("b_rounds") or 0),
         )
 
     pool = prepare_cross_validation_pool(test_cases)
@@ -276,6 +287,8 @@ def run_cross_validation(
             code_b=str(dual.get("code_b") or ""),
             rounds_a=int(dual.get("a_rounds") or 0),
             rounds_b=int(dual.get("b_rounds") or 0),
+            a_success=bool(dual.get("a_success")),
+            b_success=bool(dual.get("b_success")),
         )
 
     first_mismatch = dict(first_compare.get("first_mismatch") or {})
@@ -355,6 +368,8 @@ def run_cross_validation(
             code_b=str(retry_b.get("code") or dual.get("code_b") or ""),
             rounds_a=int(retry_a.get("rounds") or dual.get("a_rounds") or 0),
             rounds_b=int(retry_b.get("rounds") or dual.get("b_rounds") or 0),
+            a_success=bool(retry_a.get("success") or dual.get("a_success")),
+            b_success=bool(retry_b.get("success") or dual.get("b_success")),
         )
 
     return _build_degraded_verdict(
@@ -367,6 +382,10 @@ def run_cross_validation(
         mismatch_cases=tuple(second_compare.get("mismatch_cases") or ()),
         code_a=str(retry_a.get("code") or dual.get("code_a") or ""),
         code_b=str(retry_b.get("code") or dual.get("code_b") or ""),
+        a_success=bool(retry_a.get("success") or dual.get("a_success")),
+        b_success=bool(retry_b.get("success") or dual.get("b_success")),
+        a_rounds=int(retry_a.get("rounds") or dual.get("a_rounds") or 0),
+        b_rounds=int(retry_b.get("rounds") or dual.get("b_rounds") or 0),
     )
 
 
@@ -437,7 +456,7 @@ def _run_single_agent(
             return _SingleGenResult(code=final_code, success=True, rounds=rounds, error="")
 
         return _SingleGenResult(
-            code="",
+            code=final_code,
             success=False,
             rounds=rounds,
             error=_extract_failure_reason(result),
@@ -817,7 +836,7 @@ def _retry_single_agent_after_mismatch(
     return {
         "success": False,
         "rounds": used,
-        "code": str(current_code or ""),
+        "code": str(new_code or current_code or ""),
         "error": _extract_failure_reason(result),
     }
 
@@ -833,6 +852,8 @@ def _build_success_verdict(
     code_b: str,
     rounds_a: int,
     rounds_b: int,
+    a_success: bool,
+    b_success: bool,
 ) -> Dict[str, Any]:
     verdict = {
         "strategy": str(strategy or VERIFY_STRATEGY_CROSS),
@@ -850,6 +871,8 @@ def _build_success_verdict(
         "code_b": str(code_b or ""),
         "a_rounds": int(rounds_a or 0),
         "b_rounds": int(rounds_b or 0),
+        "a_success": bool(a_success),
+        "b_success": bool(b_success),
     }
     _append_verifier_trace("cross_validation_success", {"summary": _clip_json(verdict)})
     return verdict
@@ -867,6 +890,10 @@ def _build_degraded_verdict(
     error: str = "",
     code_a: str = "",
     code_b: str = "",
+    a_success: bool = False,
+    b_success: bool = False,
+    a_rounds: int = 0,
+    b_rounds: int = 0,
 ) -> Dict[str, Any]:
     verdict = {
         "strategy": str(strategy or VERIFY_STRATEGY_SKIP),
@@ -882,6 +909,10 @@ def _build_degraded_verdict(
         "error": str(error or ""),
         "code_a": str(code_a or ""),
         "code_b": str(code_b or ""),
+        "a_success": bool(a_success),
+        "b_success": bool(b_success),
+        "a_rounds": int(a_rounds or 0),
+        "b_rounds": int(b_rounds or 0),
     }
     _append_verifier_trace("cross_validation_degraded", {"summary": _clip_json(verdict)})
     return verdict
