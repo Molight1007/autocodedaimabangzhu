@@ -20,7 +20,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional
 
-from ...prompts.prompt_builders import get_agent_system_prompt
+from .agent_utils import CROSS_FEEDBACK_INSTRUCTION, build_algorithm_system_prompt, build_feedback_payload, build_session_tag, bootstrap_candidate_code
 from ..contracts.protocol import (
     RESULT_GRAMMATICAL_ERROR,
     RESULT_RIGHT,
@@ -52,6 +52,18 @@ class _ExecOutcome:
     output: str
     error: str
     is_timeout: bool
+
+
+def _safe_report_progress(
+    on_progress: Optional[Callable[[Dict[str, Any]], None]],
+    payload: Dict[str, Any],
+) -> None:
+    if on_progress is None:
+        return
+    try:
+        on_progress(payload)
+    except Exception:
+        pass
 
 
 def generate_dual_codes(
@@ -108,11 +120,7 @@ def generate_dual_codes(
     algo_a = _normalize_algorithm(algorithms[0], fallback_name="algorithm_a")
     algo_b = _normalize_algorithm(algorithms[1], fallback_name="algorithm_b")
 
-    if on_progress:
-        try:
-            on_progress({"stage": "dual_gen_start", "message": f"Agent-A[{algo_a['name']}] vs Agent-B[{algo_b['name']}] 并发生成中"})
-        except Exception:
-            pass
+    _safe_report_progress(on_progress, {"stage": "dual_gen_start", "message": f"Agent-A[{algo_a['name']}] vs Agent-B[{algo_b['name']}] 并发生成中"})
     with ThreadPoolExecutor(max_workers=2) as pool:
         fut_a = pool.submit(
             _run_single_agent,
@@ -134,13 +142,9 @@ def generate_dual_codes(
         )
         res_a = fut_a.result()
         res_b = fut_b.result()
-    if on_progress:
-        try:
-            a_status = "通过" if res_a.success else f"失败({res_a.error})"
-            b_status = "通过" if res_b.success else f"失败({res_b.error})"
-            on_progress({"stage": "dual_gen_done", "message": f"Agent-A: {a_status} ({res_a.rounds}轮), Agent-B: {b_status} ({res_b.rounds}轮)"})
-        except Exception:
-            pass
+    a_status = "通过" if res_a.success else f"失败({res_a.error})"
+    b_status = "通过" if res_b.success else f"失败({res_b.error})"
+    _safe_report_progress(on_progress, {"stage": "dual_gen_done", "message": f"Agent-A: {a_status} ({res_a.rounds}轮), Agent-B: {b_status} ({res_b.rounds}轮)"})
 
     return {
         "code_a": res_a.code,
@@ -185,7 +189,7 @@ def run_cross_validation(
 
     # 先做路由层降级判断，避免“明知不该对拍”却仍进入双 Agent 生成。
     if str(analysis.get("output_type") or "").strip() == VERIFY_OUTPUT_ANY:
-        return _build_degraded_verdict(
+        return _build_verdict(passed=False,
             strategy=VERIFY_STRATEGY_SKIP,
             analysis=analysis,
             reason="output_not_unique",
@@ -198,7 +202,7 @@ def run_cross_validation(
         str(analysis.get("confidence") or "").strip() == VERIFY_CONFIDENCE_LOW
         or len(algorithms) < 2
     ):
-        return _build_degraded_verdict(
+        return _build_verdict(passed=False,
             strategy=VERIFY_STRATEGY_SKIP,
             analysis=analysis,
             reason="low_confidence",
@@ -218,7 +222,7 @@ def run_cross_validation(
     _append_verifier_trace("dual_codes_generated", {"result": dict(dual or {})})
 
     if not bool(dual.get("a_success")) or not bool(dual.get("b_success")):
-        return _build_degraded_verdict(
+        return _build_verdict(passed=False,
             strategy=VERIFY_STRATEGY_SKIP,
             analysis=analysis,
             reason="dual_generation_failed",
@@ -245,7 +249,7 @@ def run_cross_validation(
         },
     )
     if pool.is_empty:
-        return _build_degraded_verdict(
+        return _build_verdict(passed=False,
             strategy=strategy,
             analysis=analysis,
             reason="data_pool_empty",
@@ -266,7 +270,7 @@ def run_cross_validation(
 
     terminated_reason = str(first_compare.get("terminated_reason") or "").strip()
     if terminated_reason:
-        return _build_degraded_verdict(
+        return _build_verdict(passed=False,
             strategy=strategy,
             analysis=analysis,
             reason=terminated_reason,
@@ -277,7 +281,8 @@ def run_cross_validation(
         )
 
     if bool(first_compare.get("all_match")):
-        return _build_success_verdict(
+        return _build_verdict(
+            passed=True,
             strategy=strategy,
             analysis=analysis,
             total_cases=int(first_compare.get("total_cases") or 0),
@@ -285,15 +290,15 @@ def run_cross_validation(
             cases=tuple(first_compare.get("cases") or ()),
             code_a=str(dual.get("code_a") or ""),
             code_b=str(dual.get("code_b") or ""),
-            rounds_a=int(dual.get("a_rounds") or 0),
-            rounds_b=int(dual.get("b_rounds") or 0),
+            a_rounds=int(dual.get("a_rounds") or 0),
+            b_rounds=int(dual.get("b_rounds") or 0),
             a_success=bool(dual.get("a_success")),
             b_success=bool(dual.get("b_success")),
         )
 
     first_mismatch = dict(first_compare.get("first_mismatch") or {})
     if not first_mismatch:
-        return _build_degraded_verdict(
+        return _build_verdict(passed=False,
             strategy=strategy,
             analysis=analysis,
             reason="no_comparable_cases",
@@ -305,7 +310,7 @@ def run_cross_validation(
     algo_a = _normalize_algorithm(algorithms[0], fallback_name="algorithm_a")
     algo_b = _normalize_algorithm(algorithms[1], fallback_name="algorithm_b")
 
-    feedback = _build_feedback_payload(first_mismatch)
+    feedback = build_feedback_payload(first_mismatch)
     retry_a = _retry_single_agent_after_mismatch(
         slot="a",
         algorithm=algo_a,
@@ -347,7 +352,7 @@ def run_cross_validation(
 
     terminated_reason = str(second_compare.get("terminated_reason") or "").strip()
     if terminated_reason:
-        return _build_degraded_verdict(
+        return _build_verdict(passed=False,
             strategy=strategy,
             analysis=analysis,
             reason=terminated_reason,
@@ -358,7 +363,8 @@ def run_cross_validation(
         )
 
     if bool(second_compare.get("all_match")):
-        return _build_success_verdict(
+        return _build_verdict(
+            passed=True,
             strategy=strategy,
             analysis=analysis,
             total_cases=int(second_compare.get("total_cases") or 0),
@@ -366,13 +372,14 @@ def run_cross_validation(
             cases=tuple(second_compare.get("cases") or ()),
             code_a=str(retry_a.get("code") or dual.get("code_a") or ""),
             code_b=str(retry_b.get("code") or dual.get("code_b") or ""),
-            rounds_a=int(retry_a.get("rounds") or dual.get("a_rounds") or 0),
-            rounds_b=int(retry_b.get("rounds") or dual.get("b_rounds") or 0),
+            a_rounds=int(retry_a.get("rounds") or dual.get("a_rounds") or 0),
+            b_rounds=int(retry_b.get("rounds") or dual.get("b_rounds") or 0),
             a_success=bool(retry_a.get("success") or dual.get("a_success")),
             b_success=bool(retry_b.get("success") or dual.get("b_success")),
         )
 
-    return _build_degraded_verdict(
+    return _build_verdict(
+        passed=False,
         strategy=strategy,
         analysis=analysis,
         reason="mismatch_after_retry",
@@ -398,7 +405,7 @@ def _run_single_agent(
     slot: str,
     on_progress: Optional[Callable[[Dict[str, Any]], None]] = None,
 ) -> _SingleGenResult:
-    session_tag = _build_session_tag(slot=slot, algorithm_name=str(algorithm.get("name") or "algorithm"))
+    session_tag = build_session_tag(slot=slot, algorithm_name=str(algorithm.get("name") or "algorithm"))
     try:
         llm_caller = llm_caller_factory(session_tag)
         if not callable(llm_caller):
@@ -412,7 +419,7 @@ def _run_single_agent(
         runtime_context = {
             "problem": dict(problem or {}),
             "data_samples": _extract_data_samples(problem),
-            "agent_system_prompt": _build_algorithm_system_prompt(
+            "agent_system_prompt": build_algorithm_system_prompt(
                 algorithm_name=algorithm["name"],
                 algorithm_desc=algorithm["description"],
             ),
@@ -421,27 +428,22 @@ def _run_single_agent(
         algo_name = str(algorithm.get("name") or "algorithm")
 
         def _on_agent_step(step_info: Dict[str, Any]) -> None:
-            if on_progress is None:
-                return
-            try:
-                action = str((step_info or {}).get("action") or "unknown")
-                attempt = int((step_info or {}).get("attempt") or 0)
-                result_type = str((step_info or {}).get("type") or "")
-                on_progress({
-                    "stage": "agent_step",
-                    "slot": slot,
-                    "algorithm": algo_name,
-                    "action": action,
-                    "attempt": attempt,
-                    "result_type": result_type,
-                    "message": f"Agent-{slot.upper()}[{algo_name}] 第{attempt}轮 {action}" + (f" → {result_type}" if result_type else ""),
-                })
-            except Exception:
-                pass
+            action = str((step_info or {}).get("action") or "unknown")
+            attempt = int((step_info or {}).get("attempt") or 0)
+            result_type = str((step_info or {}).get("type") or "")
+            _safe_report_progress(on_progress, {
+                "stage": "agent_step",
+                "slot": slot,
+                "algorithm": algo_name,
+                "action": action,
+                "attempt": attempt,
+                "result_type": result_type,
+                "message": f"Agent-{slot.upper()}[{algo_name}] 第{attempt}轮 {action}" + (f" → {result_type}" if result_type else ""),
+            })
 
         result = _call_solve_with_agent(
             problem=dict(problem or {}),
-            candidate_code=_bootstrap_candidate_code(),
+            candidate_code=bootstrap_candidate_code(),
             llm_caller=llm_caller,
             runtime_context=runtime_context,
             max_attempts=max_rounds,
@@ -518,33 +520,6 @@ def _normalize_sample_item(item: Any) -> Dict[str, Any] | None:
     return None
 
 
-def _build_algorithm_system_prompt(*, algorithm_name: str, algorithm_desc: str) -> str:
-    base = get_agent_system_prompt().strip()
-    extra = (
-        "\n\n"
-        "你当前处于一个独立会话。\n"
-        "本会话必须使用且仅使用以下算法路线：\n"
-        f"- 算法名称：{algorithm_name}\n"
-        f"- 算法描述：{algorithm_desc}\n"
-        "硬约束：\n"
-        "1) 禁止偏离上述算法路线，不要引入替代算法。\n"
-        "2) 目标仅为得到可运行且稳定的最终代码：消除语法错误/运行时错误，完成至少一次 self_test(all_stable=true) 后 finalize。\n"
-        "3) 输出协议仍必须严格遵守 JSON action 规范。"
-    )
-    return base + extra
-
-
-def _bootstrap_candidate_code() -> str:
-    # 提供最小可运行骨架，降低首轮语法错误概率。
-    return (
-        "def solve(problem: dict, data: dict) -> dict:\n"
-        "    _ = problem\n"
-        "    _stdin = str((data or {}).get('stdin') or '')\n"
-        "    _ = _stdin\n"
-        "    return {'stdout': '', 'meta': {}}\n"
-    )
-
-
 def _extract_failure_reason(result: Dict[str, Any]) -> str:
     summary = dict((result or {}).get("summary") or {})
     reason = str(summary.get("reason") or "").strip()
@@ -556,28 +531,11 @@ def _extract_failure_reason(result: Dict[str, Any]) -> str:
     return "agent_generation_failed"
 
 
-def _build_session_tag(*, slot: str, algorithm_name: str) -> str:
-    clean = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "-" for ch in str(algorithm_name or "algorithm"))
-    clean = clean.strip("-_") or "algorithm"
-    return f"verify-{slot}-{clean}"
-
-
 def _call_solve_with_agent(**kwargs: Any) -> Dict[str, Any]:
     # 延迟导入，避免 facade <-> cross_runner 顶层循环依赖。
     from ..facade import solve_with_agent
 
     return dict(solve_with_agent(**kwargs) or {})
-
-
-def _normalize_test_cases(test_cases: list) -> List[Dict[str, str]]:
-    out: List[Dict[str, str]] = []
-    for item in list(test_cases or []):
-        if isinstance(item, dict):
-            out.append({"stdin": str(item.get("stdin") or "")})
-            continue
-        if isinstance(item, str):
-            out.append({"stdin": item})
-    return out
 
 
 def _compare_codes_on_cases(
@@ -650,30 +608,23 @@ def _compare_codes_on_cases(
             mismatch_cases.append(one)
             break  # 遇错即停：发现第一个不匹配用例后立即终止扫描
         if on_progress and (compared_cases % 5 == 0 or compared_cases == len(test_cases)):
-            try:
-                on_progress({
-                    "stage": "compare_progress",
-                    "message": f"对拍: {compared_cases}/{len(test_cases)}, 已匹配 {matched_cases}",
-                    "current": compared_cases,
-                    "total": len(test_cases),
-                    "matched": matched_cases,
-                })
-            except Exception:
-                pass
+            _safe_report_progress(on_progress, {
+                "stage": "compare_progress",
+                "message": f"对拍: {compared_cases}/{len(test_cases)}, 已匹配 {matched_cases}",
+                "current": compared_cases,
+                "total": len(test_cases),
+                "matched": matched_cases,
+            })
 
     all_match = (
         not terminated_reason
         and compared_cases > 0
         and len(mismatch_cases) == 0
     )
-    if on_progress:
-        try:
-            on_progress({
-                "stage": "compare_done",
-                "message": f"对拍完成: {compared_cases}/{len(test_cases)} 已比, {matched_cases} 匹配" + (f", 终止: {terminated_reason}" if terminated_reason else ""),
-            })
-        except Exception:
-            pass
+    _safe_report_progress(on_progress, {
+        "stage": "compare_done",
+        "message": f"对拍完成: {compared_cases}/{len(test_cases)} 已比, {matched_cases} 匹配" + (f", 终止: {terminated_reason}" if terminated_reason else ""),
+    })
     return {
         "all_match": all_match,
         "total_cases": len(test_cases),
@@ -723,14 +674,6 @@ def _execute_code_once(*, code: str, stdin_text: str, timeout_sec: float) -> _Ex
     )
 
 
-def _build_feedback_payload(first_mismatch: Dict[str, Any]) -> Dict[str, str]:
-    return {
-        "stdin": str(first_mismatch.get("stdin") or ""),
-        "out_a": str(first_mismatch.get("out_a") or ""),
-        "out_b": str(first_mismatch.get("out_b") or ""),
-    }
-
-
 def _retry_single_agent_after_mismatch(
     *,
     slot: str,
@@ -752,7 +695,7 @@ def _retry_single_agent_after_mismatch(
             "error": "retry_budget_exhausted",
         }
 
-    session_tag = _build_session_tag(slot=slot, algorithm_name=str(algorithm.get("name") or "algorithm"))
+    session_tag = build_session_tag(slot=slot, algorithm_name=str(algorithm.get("name") or "algorithm"))
     llm_caller = llm_caller_factory(session_tag)
     if not callable(llm_caller):
         return {
@@ -764,17 +707,7 @@ def _retry_single_agent_after_mismatch(
 
     problem_retry = dict(problem or {})
     problem_retry["cross_feedback"] = {
-        "instruction": (
-            "【对拍反馈】你的输出与另一份参考代码的输出不一致。\n"
-            "注意：对方代码也可能错误。你的任务是判断谁的输出正确，而不是盲目修改。\n\n"
-            "你必须严格按以下步骤思考（内部推理，不输出）：\n"
-            "1. 仔细阅读题目描述，确定对于给定的输入，正确答案应该是什么？\n"
-            "2. 你的输出是否正确？\n"
-            "3. 对方输出是否正确？\n"
-            "4. 如果你的输出正确，直接输出 finalize，不要做任何修改。\n"
-            "5. 如果你的输出错误，分析错误原因，输出 modify 修复代码。\n"
-            "6. 如果你无法确定谁正确，输出 finalize（保持原样），让系统裁决。"
-        ),
+        "instruction": CROSS_FEEDBACK_INSTRUCTION,
         "stdin": str(feedback.get("stdin") or ""),
         "your_output": str(feedback.get(f"out_{slot}") or ""),
         "peer_output": str(feedback.get("out_b" if slot == "a" else "out_a") or ""),
@@ -783,40 +716,31 @@ def _retry_single_agent_after_mismatch(
     runtime_context = {
         "problem": dict(problem_retry),
         "data_samples": _extract_data_samples(problem_retry),
-        "agent_system_prompt": _build_algorithm_system_prompt(
+        "agent_system_prompt": build_algorithm_system_prompt(
             algorithm_name=str(algorithm.get("name") or ""),
             algorithm_desc=str(algorithm.get("description") or ""),
         ),
     }
 
     algo_name = str(algorithm.get("name") or "algorithm")
-    if on_progress:
-        try:
-            on_progress({
-                "stage": "retry_start",
-                "message": f"Agent-{slot.upper()}[{algo_name}] 交叉修复中 (最多{extra_budget}轮)",
-            })
-        except Exception:
-            pass
+    _safe_report_progress(on_progress, {
+        "stage": "retry_start",
+        "message": f"Agent-{slot.upper()}[{algo_name}] 交叉修复中 (最多{extra_budget}轮)",
+    })
 
     def _on_retry_step(step_info: Dict[str, Any]) -> None:
-        if on_progress is None:
-            return
-        try:
-            action = str((step_info or {}).get("action") or "unknown")
-            attempt = int((step_info or {}).get("attempt") or 0)
-            result_type = str((step_info or {}).get("type") or "")
-            on_progress({
-                "stage": "agent_step",
-                "slot": slot,
-                "algorithm": algo_name,
-                "action": action,
-                "attempt": attempt,
-                "result_type": result_type,
-                "message": f"Agent-{slot.upper()}[{algo_name}] 修复第{attempt}轮 {action}" + (f" → {result_type}" if result_type else ""),
-            })
-        except Exception:
-            pass
+        action = str((step_info or {}).get("action") or "unknown")
+        attempt = int((step_info or {}).get("attempt") or 0)
+        result_type = str((step_info or {}).get("type") or "")
+        _safe_report_progress(on_progress, {
+            "stage": "agent_step",
+            "slot": slot,
+            "algorithm": algo_name,
+            "action": action,
+            "attempt": attempt,
+            "result_type": result_type,
+            "message": f"Agent-{slot.upper()}[{algo_name}] 修复第{attempt}轮 {action}" + (f" → {result_type}" if result_type else ""),
+        })
 
     result = _call_solve_with_agent(
         problem=problem_retry,
@@ -841,48 +765,12 @@ def _retry_single_agent_after_mismatch(
     }
 
 
-def _build_success_verdict(
+def _build_verdict(
     *,
-    strategy: str,
+    passed: bool,
+    strategy: str = "",
     analysis: Dict[str, Any],
-    total_cases: int,
-    matched_cases: int,
-    cases: tuple[Dict[str, Any], ...],
-    code_a: str,
-    code_b: str,
-    rounds_a: int,
-    rounds_b: int,
-    a_success: bool,
-    b_success: bool,
-) -> Dict[str, Any]:
-    verdict = {
-        "strategy": str(strategy or VERIFY_STRATEGY_CROSS),
-        "passed": True,
-        "verification_passed": True,
-        "reason": "outputs_match",
-        "total_cases": int(total_cases or 0),
-        "matched_cases": int(matched_cases or 0),
-        "cases": list(cases),
-        "mismatch_cases": [],
-        "analysis": dict(analysis or {}),
-        "skip_reason": "",
-        "error": "",
-        "code_a": str(code_a or ""),
-        "code_b": str(code_b or ""),
-        "a_rounds": int(rounds_a or 0),
-        "b_rounds": int(rounds_b or 0),
-        "a_success": bool(a_success),
-        "b_success": bool(b_success),
-    }
-    _append_verifier_trace("cross_validation_success", {"summary": _clip_json(verdict)})
-    return verdict
-
-
-def _build_degraded_verdict(
-    *,
-    strategy: str,
-    analysis: Dict[str, Any],
-    reason: str,
+    reason: str = "",
     total_cases: int,
     matched_cases: int,
     cases: tuple[Dict[str, Any], ...],
@@ -895,11 +783,20 @@ def _build_degraded_verdict(
     a_rounds: int = 0,
     b_rounds: int = 0,
 ) -> Dict[str, Any]:
+    if passed:
+        strategy = str(strategy or VERIFY_STRATEGY_CROSS)
+        reason = "outputs_match"
+        mismatch_cases = ()
+        error = ""
+    else:
+        strategy = str(strategy or VERIFY_STRATEGY_SKIP)
+        reason = str(reason or "verification_degraded")
+
     verdict = {
-        "strategy": str(strategy or VERIFY_STRATEGY_SKIP),
-        "passed": False,
-        "verification_passed": False,
-        "reason": str(reason or "verification_degraded"),
+        "strategy": strategy,
+        "passed": passed,
+        "verification_passed": passed,
+        "reason": reason,
         "total_cases": int(total_cases or 0),
         "matched_cases": int(matched_cases or 0),
         "cases": list(cases),
@@ -914,7 +811,8 @@ def _build_degraded_verdict(
         "a_rounds": int(a_rounds or 0),
         "b_rounds": int(b_rounds or 0),
     }
-    _append_verifier_trace("cross_validation_degraded", {"summary": _clip_json(verdict)})
+    event = "cross_validation_success" if passed else "cross_validation_degraded"
+    _append_verifier_trace(event, {"summary": _clip_json(verdict)})
     return verdict
 
 
