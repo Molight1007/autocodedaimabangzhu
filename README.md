@@ -116,6 +116,10 @@
 │   │   │   ├── cross_runner.py     # 阶段二：双代码对拍与交叉反馈
 │   │   │   ├── data_pool.py        # 数据池过滤层（stdin 长度 + 数量上限）
 │   │   │   ├── verdict.py          # 验证结果数据类
+│   │   │   ├── agent_utils/        # Agent 配置 / Prompt 构建 / 追踪日志
+│   │   │   │   ├── __init__.py
+│   │   │   │   ├── prompts.py
+│   │   │   │   └── trace.py
 │   │   │   └── __init__.py
 │   ├── score_distributor.py       # 测试点分值分配
 │   ├── solve_batch_runner.py      # 批量解题运行器

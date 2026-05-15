@@ -1,26 +1,32 @@
-"""双 Agent 代码生成（阶段 2.1）。
+"""双代码对拍验证编排器。
 
-仅负责：
-- 为两条算法路径创建独立 Agent 会话并发生成代码。
-- 复用现有 isolated_agent 自治修复流程，限制最大轮数。
-- 汇总每个 Agent 的生成结果与失败原因。
+负责：
+- 路由降级判断（output_type / confidence / algorithms 不足时走 skip）。
+- 并发双 Agent 代码生成 + 自治修复。
+- 数据池过滤后对拍比对 stdout。
+- 不匹配时注入交叉反馈重试，最终产出验证裁决。
 
-不负责：
-- 不做对拍。
-- 不做交叉反馈。
-- 不做最终验证裁决。
+子模块依赖：
+- agent_utils/prompts.py : 算法约束 prompt / 会话标签 / 反馈 payload / 代码骨架。
+- agent_utils/trace.py   : JSONL 追踪日志写入 / 内容裁剪。
+- data_pool.py           : 测试数据长度 + 数量过滤。
 """
 
 from __future__ import annotations
 
-import json
-from datetime import datetime
-from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional
 
-from .agent_utils import CROSS_FEEDBACK_INSTRUCTION, build_algorithm_system_prompt, build_feedback_payload, build_session_tag, bootstrap_candidate_code
+from .agent_utils import (
+    CROSS_FEEDBACK_INSTRUCTION,
+    append_verifier_trace,
+    bootstrap_candidate_code,
+    build_algorithm_system_prompt,
+    build_feedback_payload,
+    build_session_tag,
+    clip_json,
+)
 from ..contracts.protocol import (
     RESULT_GRAMMATICAL_ERROR,
     RESULT_RIGHT,
@@ -176,7 +182,7 @@ def run_cross_validation(
         VERIFY_STRATEGY_BRUTE if bool(analysis.get("can_brute_force")) else VERIFY_STRATEGY_CROSS
     )
 
-    _append_verifier_trace(
+    append_verifier_trace(
         "cross_validation_start",
         {
             "strategy": strategy,
@@ -219,7 +225,7 @@ def run_cross_validation(
         max_rounds=rounds,
         on_progress=on_progress,
     )
-    _append_verifier_trace("dual_codes_generated", {"result": dict(dual or {})})
+    append_verifier_trace("dual_codes_generated", {"result": dict(dual or {})})
 
     if not bool(dual.get("a_success")) or not bool(dual.get("b_success")):
         return _build_verdict(passed=False,
@@ -239,7 +245,7 @@ def run_cross_validation(
         )
 
     pool = prepare_cross_validation_pool(test_cases)
-    _append_verifier_trace(
+    append_verifier_trace(
         "data_pool_filtered",
         {
             "total_original": pool.total_original,
@@ -266,7 +272,7 @@ def run_cross_validation(
         can_brute_force=bool(analysis.get("can_brute_force")),
         on_progress=on_progress,
     )
-    _append_verifier_trace("first_compare_done", {"summary": _clip_json(first_compare)})
+    append_verifier_trace("first_compare_done", {"summary": clip_json(first_compare)})
 
     terminated_reason = str(first_compare.get("terminated_reason") or "").strip()
     if terminated_reason:
@@ -333,7 +339,7 @@ def run_cross_validation(
         feedback=feedback,
         on_progress=on_progress,
     )
-    _append_verifier_trace(
+    append_verifier_trace(
         "retry_done",
         {
             "retry_a": retry_a,
@@ -348,7 +354,7 @@ def run_cross_validation(
         can_brute_force=bool(analysis.get("can_brute_force")),
         on_progress=on_progress,
     )
-    _append_verifier_trace("second_compare_done", {"summary": _clip_json(second_compare)})
+    append_verifier_trace("second_compare_done", {"summary": clip_json(second_compare)})
 
     terminated_reason = str(second_compare.get("terminated_reason") or "").strip()
     if terminated_reason:
@@ -812,39 +818,5 @@ def _build_verdict(
         "b_rounds": int(b_rounds or 0),
     }
     event = "cross_validation_success" if passed else "cross_validation_degraded"
-    _append_verifier_trace(event, {"summary": _clip_json(verdict)})
+    append_verifier_trace(event, {"summary": clip_json(verdict)})
     return verdict
-
-
-def _resolve_verifier_trace_path() -> Path:
-    # cross_runner.py 位于 services/isolated_agent/verifier，下沉 3 层到项目根目录
-    root_dir = Path(__file__).resolve().parents[3]
-    return root_dir / "logs" / "verifier_trace.jsonl"
-
-
-def _append_verifier_trace(event: str, payload: Dict[str, Any]) -> None:
-    try:
-        path = _resolve_verifier_trace_path()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        row = {
-            "ts": datetime.now().isoformat(timespec="seconds"),
-            "event": str(event or ""),
-            "payload": _clip_json(payload),
-        }
-        with path.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(row, ensure_ascii=False) + "\n")
-    except Exception:
-        return
-
-
-def _clip_json(value: Any, limit: int = 3000) -> Any:
-    if isinstance(value, dict):
-        return {str(k): _clip_json(v, limit=limit) for k, v in value.items()}
-    if isinstance(value, list):
-        return [_clip_json(x, limit=limit) for x in value]
-    text = str(value)
-    if len(text) <= limit:
-        return value
-    head = int(limit * 0.7)
-    tail = limit - head
-    return text[:head] + "\n...\n(trace truncated)\n...\n" + text[-tail:]
