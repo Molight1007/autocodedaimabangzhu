@@ -185,15 +185,44 @@ def run_cross_validation(
     append_verifier_trace(
         "cross_validation_start",
         {
-            "strategy": strategy,
-            "max_rounds": rounds,
+            "strategy": strategy, "max_rounds": rounds,
             "test_case_count": len(list(test_cases or [])),
             "confidence": str(analysis.get("confidence") or ""),
             "output_type": str(analysis.get("output_type") or ""),
         },
     )
 
-    # 先做路由层降级判断，避免“明知不该对拍”却仍进入双 Agent 生成。
+    verdict = _try_early_degrade(analysis=analysis, algorithms=algorithms, test_cases=test_cases)
+    if verdict is not None:
+        return verdict
+
+    result = _generate_and_first_compare(
+        pb=pb, algorithms=algorithms, analysis=analysis,
+        test_cases=test_cases, rounds=rounds, strategy=strategy,
+        llm_caller_factory=llm_caller_factory, on_progress=on_progress,
+    )
+    if "verdict" in result:
+        return result["verdict"]
+
+    return _retry_and_second_compare(
+        pb=pb, algorithms=algorithms, dual=result["dual"],
+        pool=result["pool"], first_compare=result["first_compare"],
+        analysis=analysis, rounds=rounds, strategy=strategy,
+        llm_caller_factory=llm_caller_factory, on_progress=on_progress,
+    )
+
+
+def _try_early_degrade(
+    *,
+    analysis: Dict[str, Any],
+    algorithms: list,
+    test_cases: list,
+) -> Optional[dict]:
+    """无需 LLM 调用的前置降级判断。
+
+    Returns:
+        降级 verdict dict 或 None（继续）。
+    """
     if str(analysis.get("output_type") or "").strip() == VERIFY_OUTPUT_ANY:
         return _build_verdict(passed=False,
             strategy=VERIFY_STRATEGY_SKIP,
@@ -218,6 +247,26 @@ def run_cross_validation(
             error=f"algorithms_count={len(algorithms)}",
         )
 
+    return None
+
+
+def _generate_and_first_compare(
+    *,
+    pb: Dict[str, Any],
+    algorithms: list,
+    analysis: Dict[str, Any],
+    test_cases: list,
+    rounds: int,
+    strategy: str,
+    llm_caller_factory: Callable,
+    on_progress: Optional[Callable[[Dict[str, Any]], None]],
+) -> Dict[str, Any]:
+    """双代码生成 → 数据池过滤 → 首次对拍。
+
+    Returns:
+        {"verdict": dict}  ← 已产生最终裁决。
+        {"dual": ..., "pool": ..., "first_compare": ...}  ← 继续重试。
+    """
     dual = generate_dual_codes(
         problem=pb,
         algorithms=algorithms[:2],
@@ -228,7 +277,7 @@ def run_cross_validation(
     append_verifier_trace("dual_codes_generated", {"result": dict(dual or {})})
 
     if not bool(dual.get("a_success")) or not bool(dual.get("b_success")):
-        return _build_verdict(passed=False,
+        return {"verdict": _build_verdict(passed=False,
             strategy=VERIFY_STRATEGY_SKIP,
             analysis=analysis,
             reason="dual_generation_failed",
@@ -242,7 +291,7 @@ def run_cross_validation(
             b_success=bool(dual.get("b_success")),
             a_rounds=int(dual.get("a_rounds") or 0),
             b_rounds=int(dual.get("b_rounds") or 0),
-        )
+        )}
 
     pool = prepare_cross_validation_pool(test_cases)
     append_verifier_trace(
@@ -255,7 +304,7 @@ def run_cross_validation(
         },
     )
     if pool.is_empty:
-        return _build_verdict(passed=False,
+        return {"verdict": _build_verdict(passed=False,
             strategy=strategy,
             analysis=analysis,
             reason="data_pool_empty",
@@ -263,7 +312,7 @@ def run_cross_validation(
             matched_cases=0,
             cases=(),
             error=f"filtered_by_size={pool.total_filtered_by_size}",
-        )
+        )}
 
     first_compare = _compare_codes_on_cases(
         code_a=str(dual.get("code_a") or ""),
@@ -276,7 +325,7 @@ def run_cross_validation(
 
     terminated_reason = str(first_compare.get("terminated_reason") or "").strip()
     if terminated_reason:
-        return _build_verdict(passed=False,
+        return {"verdict": _build_verdict(passed=False,
             strategy=strategy,
             analysis=analysis,
             reason=terminated_reason,
@@ -284,10 +333,10 @@ def run_cross_validation(
             matched_cases=int(first_compare.get("matched_cases") or 0),
             cases=tuple(first_compare.get("cases") or ()),
             mismatch_cases=tuple(first_compare.get("mismatch_cases") or ()),
-        )
+        )}
 
     if bool(first_compare.get("all_match")):
-        return _build_verdict(
+        return {"verdict": _build_verdict(
             passed=True,
             strategy=strategy,
             analysis=analysis,
@@ -300,23 +349,40 @@ def run_cross_validation(
             b_rounds=int(dual.get("b_rounds") or 0),
             a_success=bool(dual.get("a_success")),
             b_success=bool(dual.get("b_success")),
-        )
+        )}
 
     first_mismatch = dict(first_compare.get("first_mismatch") or {})
     if not first_mismatch:
-        return _build_verdict(passed=False,
+        return {"verdict": _build_verdict(passed=False,
             strategy=strategy,
             analysis=analysis,
             reason="no_comparable_cases",
             total_cases=int(first_compare.get("total_cases") or 0),
             matched_cases=int(first_compare.get("matched_cases") or 0),
             cases=tuple(first_compare.get("cases") or ()),
-        )
+        )}
 
+    return {"dual": dual, "pool": pool, "first_compare": first_compare}
+
+
+def _retry_and_second_compare(
+    *,
+    pb: Dict[str, Any],
+    algorithms: list,
+    dual: Dict[str, Any],
+    pool,
+    first_compare: Dict[str, Any],
+    analysis: Dict[str, Any],
+    rounds: int,
+    strategy: str,
+    llm_caller_factory: Callable,
+    on_progress: Optional[Callable[[Dict[str, Any]], None]],
+) -> dict:
+    """交叉反馈重试 + 二次对拍，返回最终裁决。"""
     algo_a = _normalize_algorithm(algorithms[0], fallback_name="algorithm_a")
     algo_b = _normalize_algorithm(algorithms[1], fallback_name="algorithm_b")
 
-    feedback = build_feedback_payload(first_mismatch)
+    feedback = build_feedback_payload(dict(first_compare.get("first_mismatch") or {}))
     retry_a = _retry_single_agent_after_mismatch(
         slot="a",
         algorithm=algo_a,
