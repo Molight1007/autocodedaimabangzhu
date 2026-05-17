@@ -1,7 +1,7 @@
 # 数据生成器 — 项目说明文档
 
 > **版本**：1.0.0　|　**技术栈**：Python + PySide6 + DeepSeek / OpenAI 兼容 API　|　**定位**：算法竞赛测试数据生成 & AI 辅助解题平台
-*最后修改时间：2026-05-14*
+*最后修改时间：2026-05-16*
 
 ---
 
@@ -135,8 +135,8 @@
 │   ├── API_Help_text.txt          # 界面内 API 帮助文本
 │   └── python_keywords.json       # Python 关键字列表（代码补全用）
 ├── logs/                          # 运行日志目录（自动创建）
-│   ├── autonomous_trace.jsonl     # 自治 Agent 每步追踪日志
-│   └── verifier_trace.jsonl       # 对拍验证追踪日志
+│   ├── agent_trace.json           # Isolated Agent 统一聚合日志（单 Agent / 双算法对拍共用）
+│   └── agent_runs/                # 单问题归档目录（每次运行一个 JSON 文件）
 ├── assets/                        # 静态资源（图标等）
 ├── build_exe.bat                  # PyInstaller 打包脚本
 ├── upload_version.bat / .ps1      # 版本发布脚本
@@ -521,15 +521,25 @@ AST 静态分析，拦截规则：
 
 守卫只做高确定性拦截，不过度拦截正常算法代码。
 
-### 每步追踪日志
+### 聚合追踪日志
 
-自治循环每个关键节点追加 JSONL 到 `logs/autonomous_trace.jsonl`：
+Isolated Agent 不再输出旧式逐行 `jsonl` 事件流，统一改为按问题聚合写入 `logs/agent_trace.json`，并在 `logs/agent_runs/<run_id>.json` 下保存单次归档。
+
+单 Agent 与双算法对拍共用同一日志结构：
 
 ```json
-{"ts": "2026-04-21T10:00:00", "event": "attempt_begin", "session_id": "...", "version": 2, "code_hash": "sha256:...", "payload": {...}}
+[
+  {
+    "run_id": "20260516_001",
+    "status": "done",
+    "mode": "single_agent",
+    "problem": {"title": "两数之和"},
+    "message": [{"stage": "loop_start", "message": "开始自治修复"}],
+    "code": [{"phase": "initial", "content": "完整代码"}],
+    "summary": {"passed": true, "reason": "finalize_ok"}
+  }
+]
 ```
-
-事件类型：`loop_start` / `attempt_begin` / `llm_output` / `action_payload` / `dispatch_result` / `loop_success` / `loop_failed` 等。
 
 ---
 
@@ -616,13 +626,22 @@ verify_with_cross_agent(problem, candidate_code, test_cases, llm_caller_factory)
 
 ### 对拍验证追踪日志
 
-关键节点追加 JSONL 到 `logs/verifier_trace.jsonl`：
+对拍验证与单 Agent 现统一写入 `logs/agent_trace.json`，单次运行结束后同步归档到 `logs/agent_runs/<run_id>.json`。
 
-```json
-{"ts": "2026-04-21T10:05:00", "event": "cross_validation_start", "payload": {"strategy": "cross_algo", ...}}
-```
+聚合日志中的每个对象表示一次完整问题处理过程，包含：
 
-事件类型：`cross_validation_start` / `data_pool_filtered` / `dual_codes_generated` / `first_compare_done` / `retry_done` / `second_compare_done` / `cross_validation_success` / `cross_validation_degraded`。
+- `run_id` / `status` / `started_at` / `finished_at`
+- `problem` / `analysis` / `meta`
+- `events`：关键节点摘要（如 `cross_validation_start`、`dual_codes_generated`、`first_compare_done`、`retry_done`）
+- `message`：运行过程中上报的完整进度消息列表
+- `code`：保留各阶段完整代码版本、哈希、轮数和错误信息
+- `result`：最终验证结果摘要
+
+这样可以同时满足：
+
+- 实时追踪：运行中持续覆盖更新 `agent_trace.json`
+- 问题聚合：同一问题不再拆成多行事件流
+- 结果溯源：结束后保留单问题完整归档文件
 
 ### 数据池过滤层（`data_pool.py`）
 
@@ -743,16 +762,28 @@ pyinstaller --name="数据生成器" --onefile --windowed --clean ...
 
 | 日志文件 | 写入时机 | 格式 |
 |----------|----------|------|
-| `logs/autonomous_trace.jsonl` | 每次自治循环每个动作节点 | JSONL，每行一条事件 |
-| `logs/verifier_trace.jsonl` | 每次对拍验证每个关键节点 | JSONL，每行一条事件 |
+| `logs/agent_trace.json` | 单 Agent / 双算法对拍运行中持续更新 | JSON 数组，每个元素代表一个完整问题 |
+| `logs/agent_runs/<run_id>.json` | 单 Agent / 双算法对拍结束后归档 | 单问题完整 JSON 快照 |
 | `debug.log` | 项目根目录，开发调试用 | 文本日志 |
 
-JSONL 格式：
+`agent_trace.json` 中的单项结构示意：
+
 ```json
-{"ts": "ISO8601时间", "event": "事件名", "session_id": "...", "version": 1, "code_hash": "sha256:...", "payload": {...}}
+{
+  "run_id": "20260516_120000_ab12cd34",
+  "status": "passed",
+  "problem": {"title": "两数之和"},
+  "message": [
+    {"ts": "2026-05-16T12:00:00", "stage": "dual_gen_start", "message": "开始双算法并发生成"}
+  ],
+  "code": [
+    {"slot": "a", "phase": "dual_generated", "hash": "sha256:...", "content": "完整代码"}
+  ],
+  "result": {"verification_passed": true, "reason": "outputs_match"}
+}
 ```
 
-长字符串在日志中自动截断（trace 限制 6000 字符，payload 中代码截断为 6000 字符）。
+为控制体积，大字段会被压缩成摘要；完整进度消息与完整代码版本保留在 `message` 和 `code` 字段中。
 
 ---
 

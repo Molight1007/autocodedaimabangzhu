@@ -217,7 +217,10 @@ class SolveBatchRunner(QObject):
         proc = QProcess(self)
         self._proc = proc
         proc.setProgram(self._python_exe)
-        proc.setArguments([self._script_path])
+        if getattr(sys, "frozen", False):
+            proc.setArguments(["--exec-script", self._script_path])
+        else:
+            proc.setArguments([self._script_path])
         proc.setProcessChannelMode(QProcess.SeparateChannels)
         proc.finished.connect(self._on_finished)
         proc.errorOccurred.connect(self._on_error)

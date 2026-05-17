@@ -22,6 +22,12 @@ from typing import Any, Callable, Dict, List, Optional
 from .controller import create_session, run_autonomous_session
 from .contracts.protocol import DEFAULT_CONTEXT_ROUNDS, DEFAULT_MAX_AUTONOMOUS_ATTEMPTS
 from .runtime import build_default_run_executor
+from .verifier.agent_utils import (
+    append_agent_trace_code_version,
+    append_agent_trace_message,
+    finalize_agent_trace_run,
+    start_agent_trace_run,
+)
 from .verifier.analyzer import analyze_problem
 from .verifier.cross_runner import run_cross_validation
 from .verifier.verdict import VerifyVerdict, create_skipped_verdict
@@ -40,12 +46,46 @@ def solve_with_agent(
     should_stop: Optional[Callable[[], bool]] = None,
 ) -> Dict[str, Any]:
     """运行单题单会话的自治修复流程。"""
+    trace_context = dict(runtime_context or {})
+    trace_disabled = bool(trace_context.get("disable_trace_store"))
+    trace_run_id = str(trace_context.get("trace_run_id") or "").strip()
+    owns_trace_run = False
+    if not trace_disabled and not trace_run_id:
+        trace_run_id = start_agent_trace_run(
+            problem=dict(problem or {}),
+            mode="single_agent",
+            meta={
+                "session_id": str(session_id or "").strip() or "isolated-agent-session",
+                "max_attempts": int(max_attempts or DEFAULT_MAX_AUTONOMOUS_ATTEMPTS),
+                "context_rounds": int(context_rounds or DEFAULT_CONTEXT_ROUNDS),
+            },
+        )
+        if trace_run_id:
+            owns_trace_run = True
+            trace_context["trace_run_id"] = trace_run_id
+            append_agent_trace_message(
+                trace_run_id,
+                {
+                    "stage": "session_start",
+                    "message": "创建单 Agent 修复会话",
+                    "mode": "single_agent",
+                },
+            )
+            if str(candidate_code or ""):
+                append_agent_trace_code_version(
+                    trace_run_id,
+                    slot="single_agent",
+                    phase="initial",
+                    code=str(candidate_code or ""),
+                    success=False,
+                    rounds=0,
+                )
 
     state = create_session(
         session_id=str(session_id or "").strip() or "isolated-agent-session",
         candidate_code=str(candidate_code or ""),
         max_recent_events=int(context_rounds or 3),
-        runtime_context=dict(runtime_context or {}),
+        runtime_context=trace_context,
     )
     executor = build_default_run_executor()
     try:
@@ -59,15 +99,38 @@ def solve_with_agent(
             on_step_callback=on_step_callback,
             should_stop=should_stop,
         )
-        return {
+        response = {
             "session_id": state.session_id,
             "passed": bool((result or {}).get("passed")),
             "final_code": str((result or {}).get("final_code") or state.current_code),
             "summary": dict((result or {}).get("summary") or {}),
             "attempts": int((result or {}).get("attempts") or 0),
         }
+        if owns_trace_run and trace_run_id:
+            final_code = str(response.get("final_code") or "")
+            if final_code:
+                append_agent_trace_code_version(
+                    trace_run_id,
+                    slot="single_agent",
+                    phase="final",
+                    code=final_code,
+                    success=bool(response.get("passed")),
+                    rounds=int(response.get("attempts") or 0),
+                )
+            finalize_agent_trace_run(
+                trace_run_id,
+                {
+                    "passed": bool(response.get("passed")),
+                    "reason": str(dict(response.get("summary") or {}).get("reason") or ("finalize_ok" if response.get("passed") else "autonomous_failed")),
+                    "attempts": int(response.get("attempts") or 0),
+                    "session_id": str(response.get("session_id") or ""),
+                    "summary": dict(response.get("summary") or {}),
+                },
+                status="done",
+            )
+        return response
     except Exception:
-        return {
+        response = {
             "session_id": state.session_id,
             "passed": False,
             "final_code": state.current_code,
@@ -78,6 +141,28 @@ def solve_with_agent(
                 "error": traceback.format_exc(),
             },
         }
+        if owns_trace_run and trace_run_id:
+            if str(state.current_code or ""):
+                append_agent_trace_code_version(
+                    trace_run_id,
+                    slot="single_agent",
+                    phase="final",
+                    code=str(state.current_code or ""),
+                    success=False,
+                    rounds=0,
+                )
+            finalize_agent_trace_run(
+                trace_run_id,
+                {
+                    "passed": False,
+                    "reason": "facade_runtime_exception",
+                    "attempts": 0,
+                    "session_id": str(state.session_id or ""),
+                    "summary": dict(response.get("summary") or {}),
+                },
+                status="done",
+            )
+        return response
 
 
 def verify_with_cross_agent(

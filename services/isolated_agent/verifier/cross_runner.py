@@ -8,7 +8,7 @@
 
 子模块依赖：
 - agent_utils/prompts.py : 算法约束 prompt / 会话标签 / 反馈 payload / 代码骨架。
-- agent_utils/trace.py   : JSONL 追踪日志写入 / 内容裁剪。
+- agent_utils/trace.py   : 问题级追踪日志聚合 / 单问题归档。
 - data_pool.py           : 测试数据长度 + 数量过滤。
 """
 
@@ -20,12 +20,14 @@ from typing import Any, Callable, Dict, List, Optional
 
 from .agent_utils import (
     CROSS_FEEDBACK_INSTRUCTION,
-    append_verifier_trace,
+    append_agent_trace_code_version,
+    append_agent_trace_message,
     bootstrap_candidate_code,
     build_algorithm_system_prompt,
     build_feedback_payload,
     build_session_tag,
-    clip_json,
+    finalize_agent_trace_run,
+    start_agent_trace_run,
 )
 from ..contracts.protocol import (
     RESULT_GRAMMATICAL_ERROR,
@@ -63,13 +65,23 @@ class _ExecOutcome:
 def _safe_report_progress(
     on_progress: Optional[Callable[[Dict[str, Any]], None]],
     payload: Dict[str, Any],
+    trace_run_id: str = "",
 ) -> None:
+    if trace_run_id and _should_capture_progress_message(payload):
+        one = dict(payload or {})
+        one.setdefault("mode", "cross_validation")
+        append_agent_trace_message(trace_run_id, one)
     if on_progress is None:
         return
     try:
         on_progress(payload)
     except Exception:
         pass
+
+
+def _should_capture_progress_message(payload: Dict[str, Any]) -> bool:
+    stage = str((payload or {}).get("stage") or "")
+    return stage not in {"agent_step", "compare_progress"}
 
 
 def generate_dual_codes(
@@ -79,6 +91,7 @@ def generate_dual_codes(
     llm_caller_factory: Callable[[str], Callable],
     max_rounds: int = 30,
     on_progress: Optional[Callable[[Dict[str, Any]], None]] = None,
+    trace_run_id: str = "",
 ) -> dict:
     """并发生成两份相互隔离的候选代码。
 
@@ -126,7 +139,11 @@ def generate_dual_codes(
     algo_a = _normalize_algorithm(algorithms[0], fallback_name="algorithm_a")
     algo_b = _normalize_algorithm(algorithms[1], fallback_name="algorithm_b")
 
-    _safe_report_progress(on_progress, {"stage": "dual_gen_start", "message": f"Agent-A[{algo_a['name']}] vs Agent-B[{algo_b['name']}] 并发生成中"})
+    _safe_report_progress(
+        on_progress,
+        {"stage": "dual_gen_start", "message": f"Agent-A[{algo_a['name']}] vs Agent-B[{algo_b['name']}] 并发生成中"},
+        trace_run_id=trace_run_id,
+    )
     with ThreadPoolExecutor(max_workers=2) as pool:
         fut_a = pool.submit(
             _run_single_agent,
@@ -136,6 +153,7 @@ def generate_dual_codes(
             max_rounds=rounds,
             slot="a",
             on_progress=on_progress,
+            trace_run_id=trace_run_id,
         )
         fut_b = pool.submit(
             _run_single_agent,
@@ -145,12 +163,17 @@ def generate_dual_codes(
             max_rounds=rounds,
             slot="b",
             on_progress=on_progress,
+            trace_run_id=trace_run_id,
         )
         res_a = fut_a.result()
         res_b = fut_b.result()
     a_status = "通过" if res_a.success else f"失败({res_a.error})"
     b_status = "通过" if res_b.success else f"失败({res_b.error})"
-    _safe_report_progress(on_progress, {"stage": "dual_gen_done", "message": f"Agent-A: {a_status} ({res_a.rounds}轮), Agent-B: {b_status} ({res_b.rounds}轮)"})
+    _safe_report_progress(
+        on_progress,
+        {"stage": "dual_gen_done", "message": f"Agent-A: {a_status} ({res_a.rounds}轮), Agent-B: {b_status} ({res_b.rounds}轮)"},
+        trace_run_id=trace_run_id,
+    )
 
     return {
         "code_a": res_a.code,
@@ -181,35 +204,52 @@ def run_cross_validation(
     strategy = (
         VERIFY_STRATEGY_BRUTE if bool(analysis.get("can_brute_force")) else VERIFY_STRATEGY_CROSS
     )
-
-    append_verifier_trace(
-        "cross_validation_start",
-        {
-            "strategy": strategy, "max_rounds": rounds,
+    trace_run_id = start_agent_trace_run(
+        problem=pb,
+        mode="cross_validation",
+        meta={
+            "strategy": strategy,
+            "max_rounds": rounds,
             "test_case_count": len(list(test_cases or [])),
             "confidence": str(analysis.get("confidence") or ""),
             "output_type": str(analysis.get("output_type") or ""),
+            "analysis": analysis,
         },
+    )
+
+    _safe_report_progress(
+        on_progress,
+        {
+            "stage": "cross_validation_start",
+            "message": "开始双算法对拍",
+        },
+        trace_run_id=trace_run_id,
     )
 
     verdict = _try_early_degrade(analysis=analysis, algorithms=algorithms, test_cases=test_cases)
     if verdict is not None:
+        finalize_agent_trace_run(trace_run_id, verdict, status="done")
         return verdict
 
     result = _generate_and_first_compare(
         pb=pb, algorithms=algorithms, analysis=analysis,
         test_cases=test_cases, rounds=rounds, strategy=strategy,
         llm_caller_factory=llm_caller_factory, on_progress=on_progress,
+        trace_run_id=trace_run_id,
     )
     if "verdict" in result:
+        finalize_agent_trace_run(trace_run_id, result["verdict"], status="done")
         return result["verdict"]
 
-    return _retry_and_second_compare(
+    verdict = _retry_and_second_compare(
         pb=pb, algorithms=algorithms, dual=result["dual"],
         pool=result["pool"], first_compare=result["first_compare"],
         analysis=analysis, rounds=rounds, strategy=strategy,
         llm_caller_factory=llm_caller_factory, on_progress=on_progress,
+        trace_run_id=trace_run_id,
     )
+    finalize_agent_trace_run(trace_run_id, verdict, status="done")
+    return verdict
 
 
 def _try_early_degrade(
@@ -260,6 +300,7 @@ def _generate_and_first_compare(
     strategy: str,
     llm_caller_factory: Callable,
     on_progress: Optional[Callable[[Dict[str, Any]], None]],
+    trace_run_id: str,
 ) -> Dict[str, Any]:
     """双代码生成 → 数据池过滤 → 首次对拍。
 
@@ -273,8 +314,42 @@ def _generate_and_first_compare(
         llm_caller_factory=llm_caller_factory,
         max_rounds=rounds,
         on_progress=on_progress,
+        trace_run_id=trace_run_id,
     )
-    append_verifier_trace("dual_codes_generated", {"result": dict(dual or {})})
+    append_agent_trace_message(
+        trace_run_id,
+        {
+            "stage": "dual_codes_generated",
+            "message": "双算法代码生成完成",
+            "mode": "cross_validation",
+            "details": {
+                "a_success": bool(dual.get("a_success")),
+                "b_success": bool(dual.get("b_success")),
+                "a_rounds": int(dual.get("a_rounds") or 0),
+                "b_rounds": int(dual.get("b_rounds") or 0),
+                "a_error": str(dual.get("a_error") or ""),
+                "b_error": str(dual.get("b_error") or ""),
+            },
+        },
+    )
+    append_agent_trace_code_version(
+        trace_run_id,
+        slot="a",
+        phase="dual_generated",
+        code=str(dual.get("code_a") or ""),
+        success=bool(dual.get("a_success")),
+        rounds=int(dual.get("a_rounds") or 0),
+        error=str(dual.get("a_error") or ""),
+    )
+    append_agent_trace_code_version(
+        trace_run_id,
+        slot="b",
+        phase="dual_generated",
+        code=str(dual.get("code_b") or ""),
+        success=bool(dual.get("b_success")),
+        rounds=int(dual.get("b_rounds") or 0),
+        error=str(dual.get("b_error") or ""),
+    )
 
     if not bool(dual.get("a_success")) or not bool(dual.get("b_success")):
         return {"verdict": _build_verdict(passed=False,
@@ -294,13 +369,18 @@ def _generate_and_first_compare(
         )}
 
     pool = prepare_cross_validation_pool(test_cases)
-    append_verifier_trace(
-        "data_pool_filtered",
+    append_agent_trace_message(
+        trace_run_id,
         {
-            "total_original": pool.total_original,
-            "total_filtered_by_size": pool.total_filtered_by_size,
-            "total_dropped_by_cap": pool.total_dropped_by_cap,
-            "total_retained": pool.total_retained,
+            "stage": "data_pool_filtered",
+            "message": f"数据池过滤完成，保留 {pool.total_retained}/{pool.total_original} 条",
+            "mode": "cross_validation",
+            "details": {
+                "total_original": pool.total_original,
+                "total_filtered_by_size": pool.total_filtered_by_size,
+                "total_dropped_by_cap": pool.total_dropped_by_cap,
+                "total_retained": pool.total_retained,
+            },
         },
     )
     if pool.is_empty:
@@ -320,8 +400,21 @@ def _generate_and_first_compare(
         test_cases=pool.cases,
         can_brute_force=bool(analysis.get("can_brute_force")),
         on_progress=on_progress,
+        trace_run_id=trace_run_id,
     )
-    append_verifier_trace("first_compare_done", {"summary": clip_json(first_compare)})
+    append_agent_trace_message(
+        trace_run_id,
+        {
+            "stage": "first_compare_done",
+            "message": f"首轮对拍完成，匹配 {int(first_compare.get('matched_cases') or 0)}/{int(first_compare.get('total_cases') or 0)}",
+            "mode": "cross_validation",
+            "details": {
+                "all_match": bool(first_compare.get("all_match")),
+                "terminated_reason": str(first_compare.get("terminated_reason") or ""),
+                "first_mismatch": dict(first_compare.get("first_mismatch") or {}),
+            },
+        },
+    )
 
     terminated_reason = str(first_compare.get("terminated_reason") or "").strip()
     if terminated_reason:
@@ -377,6 +470,7 @@ def _retry_and_second_compare(
     strategy: str,
     llm_caller_factory: Callable,
     on_progress: Optional[Callable[[Dict[str, Any]], None]],
+    trace_run_id: str,
 ) -> dict:
     """交叉反馈重试 + 二次对拍，返回最终裁决。"""
     algo_a = _normalize_algorithm(algorithms[0], fallback_name="algorithm_a")
@@ -393,6 +487,7 @@ def _retry_and_second_compare(
         max_rounds=rounds,
         feedback=feedback,
         on_progress=on_progress,
+        trace_run_id=trace_run_id,
     )
     retry_b = _retry_single_agent_after_mismatch(
         slot="b",
@@ -404,13 +499,37 @@ def _retry_and_second_compare(
         max_rounds=rounds,
         feedback=feedback,
         on_progress=on_progress,
+        trace_run_id=trace_run_id,
     )
-    append_verifier_trace(
-        "retry_done",
+    append_agent_trace_message(
+        trace_run_id,
         {
-            "retry_a": retry_a,
-            "retry_b": retry_b,
+            "stage": "retry_done",
+            "message": "交叉反馈修复完成",
+            "mode": "cross_validation",
+            "details": {
+                "retry_a": retry_a,
+                "retry_b": retry_b,
+            },
         },
+    )
+    append_agent_trace_code_version(
+        trace_run_id,
+        slot="a",
+        phase="retry_done",
+        code=str(retry_a.get("code") or dual.get("code_a") or ""),
+        success=bool(retry_a.get("success") or dual.get("a_success")),
+        rounds=int(retry_a.get("rounds") or dual.get("a_rounds") or 0),
+        error=str(retry_a.get("error") or ""),
+    )
+    append_agent_trace_code_version(
+        trace_run_id,
+        slot="b",
+        phase="retry_done",
+        code=str(retry_b.get("code") or dual.get("code_b") or ""),
+        success=bool(retry_b.get("success") or dual.get("b_success")),
+        rounds=int(retry_b.get("rounds") or dual.get("b_rounds") or 0),
+        error=str(retry_b.get("error") or ""),
     )
 
     second_compare = _compare_codes_on_cases(
@@ -419,8 +538,21 @@ def _retry_and_second_compare(
         test_cases=pool.cases,
         can_brute_force=bool(analysis.get("can_brute_force")),
         on_progress=on_progress,
+        trace_run_id=trace_run_id,
     )
-    append_verifier_trace("second_compare_done", {"summary": clip_json(second_compare)})
+    append_agent_trace_message(
+        trace_run_id,
+        {
+            "stage": "second_compare_done",
+            "message": f"第二轮对拍完成，匹配 {int(second_compare.get('matched_cases') or 0)}/{int(second_compare.get('total_cases') or 0)}",
+            "mode": "cross_validation",
+            "details": {
+                "all_match": bool(second_compare.get("all_match")),
+                "terminated_reason": str(second_compare.get("terminated_reason") or ""),
+                "first_mismatch": dict(second_compare.get("first_mismatch") or {}),
+            },
+        },
+    )
 
     terminated_reason = str(second_compare.get("terminated_reason") or "").strip()
     if terminated_reason:
@@ -476,6 +608,7 @@ def _run_single_agent(
     max_rounds: int,
     slot: str,
     on_progress: Optional[Callable[[Dict[str, Any]], None]] = None,
+    trace_run_id: str = "",
 ) -> _SingleGenResult:
     session_tag = build_session_tag(slot=slot, algorithm_name=str(algorithm.get("name") or "algorithm"))
     try:
@@ -495,6 +628,7 @@ def _run_single_agent(
                 algorithm_name=algorithm["name"],
                 algorithm_desc=algorithm["description"],
             ),
+            "disable_trace_store": True,
         }
 
         algo_name = str(algorithm.get("name") or "algorithm")
@@ -503,15 +637,19 @@ def _run_single_agent(
             action = str((step_info or {}).get("action") or "unknown")
             attempt = int((step_info or {}).get("attempt") or 0)
             result_type = str((step_info or {}).get("type") or "")
-            _safe_report_progress(on_progress, {
-                "stage": "agent_step",
-                "slot": slot,
-                "algorithm": algo_name,
-                "action": action,
-                "attempt": attempt,
-                "result_type": result_type,
-                "message": f"Agent-{slot.upper()}[{algo_name}] 第{attempt}轮 {action}" + (f" → {result_type}" if result_type else ""),
-            })
+            _safe_report_progress(
+                on_progress,
+                {
+                    "stage": "agent_step",
+                    "slot": slot,
+                    "algorithm": algo_name,
+                    "action": action,
+                    "attempt": attempt,
+                    "result_type": result_type,
+                    "message": f"Agent-{slot.upper()}[{algo_name}] 第{attempt}轮 {action}" + (f" → {result_type}" if result_type else ""),
+                },
+                trace_run_id=trace_run_id,
+            )
 
         result = _call_solve_with_agent(
             problem=dict(problem or {}),
@@ -617,6 +755,7 @@ def _compare_codes_on_cases(
     test_cases: List[Dict[str, str]],
     can_brute_force: bool,
     on_progress: Optional[Callable[[Dict[str, Any]], None]] = None,
+    trace_run_id: str = "",
 ) -> Dict[str, Any]:
     timeout_a = 3.0 if bool(can_brute_force) else 2.0
     timeout_b = 2.0
@@ -680,23 +819,31 @@ def _compare_codes_on_cases(
             mismatch_cases.append(one)
             break  # 遇错即停：发现第一个不匹配用例后立即终止扫描
         if on_progress and (compared_cases % 5 == 0 or compared_cases == len(test_cases)):
-            _safe_report_progress(on_progress, {
-                "stage": "compare_progress",
-                "message": f"对拍: {compared_cases}/{len(test_cases)}, 已匹配 {matched_cases}",
-                "current": compared_cases,
-                "total": len(test_cases),
-                "matched": matched_cases,
-            })
+            _safe_report_progress(
+                on_progress,
+                {
+                    "stage": "compare_progress",
+                    "message": f"对拍: {compared_cases}/{len(test_cases)}, 已匹配 {matched_cases}",
+                    "current": compared_cases,
+                    "total": len(test_cases),
+                    "matched": matched_cases,
+                },
+                trace_run_id=trace_run_id,
+            )
 
     all_match = (
         not terminated_reason
         and compared_cases > 0
         and len(mismatch_cases) == 0
     )
-    _safe_report_progress(on_progress, {
-        "stage": "compare_done",
-        "message": f"对拍完成: {compared_cases}/{len(test_cases)} 已比, {matched_cases} 匹配" + (f", 终止: {terminated_reason}" if terminated_reason else ""),
-    })
+    _safe_report_progress(
+        on_progress,
+        {
+            "stage": "compare_done",
+            "message": f"对拍完成: {compared_cases}/{len(test_cases)} 已比, {matched_cases} 匹配" + (f", 终止: {terminated_reason}" if terminated_reason else ""),
+        },
+        trace_run_id=trace_run_id,
+    )
     return {
         "all_match": all_match,
         "total_cases": len(test_cases),
@@ -757,6 +904,7 @@ def _retry_single_agent_after_mismatch(
     max_rounds: int,
     feedback: Dict[str, str],
     on_progress: Optional[Callable[[Dict[str, Any]], None]] = None,
+    trace_run_id: str = "",
 ) -> Dict[str, Any]:
     extra_budget = min(5, max(0, int(max_rounds or 1) - int(used_rounds or 0)))
     if extra_budget <= 0:
@@ -792,27 +940,36 @@ def _retry_single_agent_after_mismatch(
             algorithm_name=str(algorithm.get("name") or ""),
             algorithm_desc=str(algorithm.get("description") or ""),
         ),
+        "disable_trace_store": True,
     }
 
     algo_name = str(algorithm.get("name") or "algorithm")
-    _safe_report_progress(on_progress, {
-        "stage": "retry_start",
-        "message": f"Agent-{slot.upper()}[{algo_name}] 交叉修复中 (最多{extra_budget}轮)",
-    })
+    _safe_report_progress(
+        on_progress,
+        {
+            "stage": "retry_start",
+            "message": f"Agent-{slot.upper()}[{algo_name}] 交叉修复中 (最多{extra_budget}轮)",
+        },
+        trace_run_id=trace_run_id,
+    )
 
     def _on_retry_step(step_info: Dict[str, Any]) -> None:
         action = str((step_info or {}).get("action") or "unknown")
         attempt = int((step_info or {}).get("attempt") or 0)
         result_type = str((step_info or {}).get("type") or "")
-        _safe_report_progress(on_progress, {
-            "stage": "agent_step",
-            "slot": slot,
-            "algorithm": algo_name,
-            "action": action,
-            "attempt": attempt,
-            "result_type": result_type,
-            "message": f"Agent-{slot.upper()}[{algo_name}] 修复第{attempt}轮 {action}" + (f" → {result_type}" if result_type else ""),
-        })
+        _safe_report_progress(
+            on_progress,
+            {
+                "stage": "agent_step",
+                "slot": slot,
+                "algorithm": algo_name,
+                "action": action,
+                "attempt": attempt,
+                "result_type": result_type,
+                "message": f"Agent-{slot.upper()}[{algo_name}] 修复第{attempt}轮 {action}" + (f" → {result_type}" if result_type else ""),
+            },
+            trace_run_id=trace_run_id,
+        )
 
     result = _call_solve_with_agent(
         problem=problem_retry,
@@ -883,6 +1040,4 @@ def _build_verdict(
         "a_rounds": int(a_rounds or 0),
         "b_rounds": int(b_rounds or 0),
     }
-    event = "cross_validation_success" if passed else "cross_validation_degraded"
-    append_verifier_trace(event, {"summary": clip_json(verdict)})
     return verdict

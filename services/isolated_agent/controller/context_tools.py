@@ -149,7 +149,7 @@ def build_user_context(
     recent = trim_recent_events(events, max_rounds=max_rounds)
     latest_read_preview = _find_latest_read_preview(recent)
     problem_text = build_problem_card(problem, max_chars=problem_card_max_chars)
-    dynamic_text = _build_dynamic_context(
+    dynamic_text = build_dynamic_context(
         attempt_idx=attempt_idx,
         session_id=session_id,
         version=version,
@@ -187,7 +187,7 @@ def _render_problem_value(value: Any) -> str:
     return _clip_text(text, limit=_FIELD_VALUE_MAX_CHARS)
 
 
-def _build_dynamic_context(
+def build_dynamic_context(
     *,
     attempt_idx: int,
     session_id: str,

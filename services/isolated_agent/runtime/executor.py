@@ -242,8 +242,12 @@ def _execute_subprocess(
 
         env = dict(os.environ)
         env["ISOLATED_AGENT_CASE"] = json.dumps({"stdin": stdin_text}, ensure_ascii=True)
+        if getattr(sys, "frozen", False):
+            cmd = [sys.executable, "--exec-script", script_path]
+        else:
+            cmd = [sys.executable, "-I", script_path]
         proc = subprocess.run(
-            [sys.executable, "-I", script_path],
+            cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             timeout=max(0.2, float(timeout_sec or _DEFAULT_TIMEOUT_SEC)),

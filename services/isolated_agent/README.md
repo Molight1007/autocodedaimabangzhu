@@ -232,15 +232,15 @@
 
 ## 追踪日志
 
-当前子系统会写两类 JSONL 日志：
+当前子系统统一写聚合 JSON 日志：
 
-- `logs/autonomous_trace.jsonl`
-- `logs/verifier_trace.jsonl`
+- `logs/agent_trace.json`
+- `logs/agent_runs/<run_id>.json`
 
 其中：
 
-- `autonomous_trace.jsonl` 记录自治循环的关键节点，例如 `loop_start`、`attempt_begin`、`llm_output`、`action_payload`、`dispatch_result`、`loop_success`、`loop_failed`。
-- `verifier_trace.jsonl` 记录验证流程的关键节点，例如 `cross_validation_start`、`dual_codes_generated`、`first_compare_done`、`retry_done`、`second_compare_done`、`cross_validation_success`、`cross_validation_degraded`。
+- `agent_trace.json` 记录所有单 Agent 与双算法对拍的运行对象，每个对象包含 `run_id / status / problem / message / code / summary`。
+- `agent_runs/<run_id>.json` 保存单次运行的独立归档，便于单问题排错与溯源。
 
 日志原则：
 

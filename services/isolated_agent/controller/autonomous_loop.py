@@ -21,9 +21,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from ..contracts.protocol import (
@@ -36,10 +34,17 @@ from ..contracts.protocol import (
     DEFAULT_MAX_AUTONOMOUS_ATTEMPTS,
     MAX_CONTEXT_ROUNDS,
     RESULT_FINALIZE_OK,
+    RESULT_MODIFY_OK,
     RESULT_PROTOCOL_ERROR,
 )
 from ..session.state import AgentSessionState
-from .context_tools import build_user_context
+from ..verifier.agent_utils import append_agent_trace_code_version, append_agent_trace_message
+from .context_tools import (
+    _find_latest_read_preview,
+    build_dynamic_context,
+    build_problem_card,
+    trim_recent_events,
+)
 from .dispatcher import ActionDispatcher, RunExecutor
 
 LlmCaller = Callable[[List[Dict[str, str]]], Any]
@@ -96,30 +101,18 @@ def run_autonomous_loop(
         if _should_stop(cfg):
             _append_trace(state, "loop_stopped", {"attempt": attempt, "reason": "interruption_requested"})
             break
-        messages = _build_messages(
+        messages, _ = _build_messages(
             problem=problem,
             state=state,
             attempt_idx=attempt,
             config=cfg,
             context_rounds=context_rounds,
         )
-        _append_trace(
-            state,
-            "attempt_begin",
-            {
-                "attempt": attempt,
-                "version": int(state.version),
-                "code_hash": str(state.code_hash),
-                "messages": _clip_messages_for_trace(messages),
-            },
-        )
         llm_output = llm_caller(messages)
-        _append_trace(state, "llm_output", {"attempt": attempt, "raw": _clip_text_for_trace(llm_output)})
         if _should_stop(cfg):
             _append_trace(state, "loop_stopped", {"attempt": attempt, "reason": "interruption_requested_after_llm"})
             break
         action_payload = _normalize_llm_action(llm_output)
-        _append_trace(state, "action_payload", {"attempt": attempt, "payload": dict(action_payload or {})})
         if not action_payload:
             protocol_errors += 1
             state.push_event(
@@ -159,7 +152,6 @@ def run_autonomous_loop(
                 "attempt": attempt,
                 "action": str(action_payload.get("action") or ""),
                 "result_type": result_type,
-                "result": _clip_json_like(result),
             },
         )
         step_info = {
@@ -284,11 +276,14 @@ def _build_messages(
     attempt_idx: int,
     config: LoopConfig,
     context_rounds: int,
-) -> List[Dict[str, str]]:
+) -> tuple[List[Dict[str, str]], str]:
     """构造最小上下文。
 
     只包含系统规则、固定题目卡、动态短上下文；不直接注入代码全文。
     若模型需要代码，必须先调用 `read`。
+
+    返回 (messages, dynamic_context_text) —— dynamic_context_text 仅用于日志追踪，
+    不含 system_prompt 和 problem_card（两者已在 loop_start 中记录）。
     """
 
     system_prompt = str(state.runtime_context.get("agent_system_prompt") or "").strip()
@@ -309,18 +304,22 @@ def _build_messages(
             "如果 read(target=data_sample) 返回 data_sample_too_complex，表示样本过大，需要人工提供精简样例后再继续。\n"
             "如果你需要先查看题目和代码，请先 read(target=all)；拿到内容后再给 modify 或 run。"
         )
-    user_text = build_user_context(
+
+    problem_card_max_chars = int(config.problem_card_max_chars or 1800)
+    recent = trim_recent_events(state.recent_events, max_rounds=context_rounds)
+    latest_read_preview = _find_latest_read_preview(recent)
+    problem_text = build_problem_card(problem, max_chars=problem_card_max_chars)
+    dynamic_text = build_dynamic_context(
         attempt_idx=attempt_idx,
-        problem=problem,
         session_id=state.session_id,
         version=state.version,
         code_hash=state.code_hash,
-        events=state.recent_events,
-        max_rounds=context_rounds,
-        problem_card_max_chars=int(config.problem_card_max_chars or 1800),
+        recent_events=recent,
+        latest_read_preview=latest_read_preview,
         version_snapshots=state.version_snapshots,
     )
-    return [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_text}]
+    user_text = f"{problem_text}\n\n{dynamic_text}\n请输出下一步 JSON 动作。"
+    return [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_text}], dynamic_text
 
 
 def _normalize_llm_action(raw: Any) -> Dict[str, Any]:
@@ -375,62 +374,100 @@ def _should_stop(cfg: LoopConfig) -> bool:
         return False
 
 
-def _resolve_trace_log_path(state: AgentSessionState) -> Path:
-    custom = str((state.runtime_context or {}).get("trace_log_path") or "").strip()
-    if custom:
-        return Path(custom)
-    root_dir = Path(__file__).resolve().parents[3]
-    return root_dir / "logs" / "autonomous_trace.jsonl"
-
-
 def _append_trace(state: AgentSessionState, event: str, payload: Dict[str, Any]) -> None:
     try:
-        log_path = _resolve_trace_log_path(state)
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        row = {
-            "ts": datetime.now().isoformat(timespec="seconds"),
-            "event": str(event or ""),
-            "session_id": str(state.session_id or ""),
-            "version": int(state.version),
-            "code_hash": str(state.code_hash or ""),
-            "payload": _clip_json_like(payload),
-        }
-        with log_path.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+        run_id = str((state.runtime_context or {}).get("trace_run_id") or "").strip()
+        if not run_id:
+            return
+        message_item = _build_trace_message_item(state=state, event=event, payload=payload)
+        if message_item:
+            append_agent_trace_message(run_id, message_item)
+        if (
+            str(event or "") == "dispatch_result"
+            and str((payload or {}).get("action") or "") == ACTION_MODIFY
+            and str((payload or {}).get("result_type") or "") == RESULT_MODIFY_OK
+        ):
+            append_agent_trace_code_version(
+                run_id,
+                slot="single_agent",
+                phase="modify",
+                code=str(state.current_code or ""),
+                success=True,
+                rounds=int((payload or {}).get("attempt") or 0),
+                extra={
+                    "version": int(state.version),
+                    "code_hash": str(state.code_hash or ""),
+                },
+            )
     except Exception:
         return
 
 
-def _clip_messages_for_trace(messages: List[Dict[str, str]]) -> List[Dict[str, str]]:
-    out: List[Dict[str, str]] = []
-    for m in list(messages or []):
-        item = dict(m or {})
-        out.append(
+def _build_trace_message_item(
+    *,
+    state: AgentSessionState,
+    event: str,
+    payload: Dict[str, Any],
+) -> Dict[str, Any]:
+    evt = str(event or "")
+    data = dict(payload or {})
+    stage = evt
+    message = ""
+    details: Dict[str, Any] = {
+        "session_id": str(state.session_id or ""),
+        "version": int(state.version),
+        "code_hash": str(state.code_hash or ""),
+    }
+    if evt == "loop_start":
+        message = "开始自治修复"
+        details.update(
             {
-                "role": str(item.get("role") or ""),
-                "content": _clip_text_for_trace(item.get("content") or ""),
+                "max_attempts": int(data.get("max_attempts") or 0),
+                "context_rounds": int(data.get("context_rounds") or 0),
             }
         )
-    return out
+    elif evt == "dispatch_result":
+        attempt = int(data.get("attempt") or 0)
+        action = str(data.get("action") or "")
+        result_type = str(data.get("result_type") or "")
+        message = f"第{attempt}轮 {action} -> {result_type}"
+        details.update(
+            {
+                "attempt": attempt,
+                "action": action,
+                "result_type": result_type,
+            }
+        )
+    elif evt == "protocol_error":
+        attempt = int(data.get("attempt") or 0)
+        reason = str(data.get("reason") or "")
+        message = f"第{attempt}轮 协议错误: {reason}"
+        details.update({"attempt": attempt, "reason": reason})
+    elif evt == "loop_stop_reason":
+        reason = str(data.get("reason") or "")
+        message = f"停止原因: {reason}"
+        details.update({"attempt": int(data.get("attempt") or 0), "reason": reason})
+    elif evt == "loop_stopped":
+        message = "自治修复被中断"
+        details.update({"reason": str(data.get("reason") or "")})
+    elif evt == "loop_success":
+        message = "自治修复完成"
+        details.update({"attempt": int(data.get("attempt") or 0), "reason": str(data.get("reason") or "")})
+    elif evt == "loop_failed":
+        message = "自治修复结束，未通过"
+        details.update(
+            {
+                "attempts": int(data.get("attempts") or 0),
+                "protocol_errors": int(data.get("protocol_errors") or 0),
+                "no_progress_rounds": int(data.get("no_progress_rounds") or 0),
+            }
+        )
+    else:
+        return {}
 
-
-def _clip_text_for_trace(raw: Any, limit: int = 6000) -> str:
-    text = str(raw or "")
-    lim = max(500, int(limit or 6000))
-    if len(text) <= lim:
-        return text
-    head = int(lim * 0.7)
-    tail = lim - head
-    return text[:head] + "\n...\n(trace truncated)\n...\n" + text[-tail:]
-
-
-def _clip_json_like(obj: Any) -> Any:
-    if isinstance(obj, dict):
-        return {str(k): _clip_json_like(v) for k, v in obj.items()}
-    if isinstance(obj, list):
-        return [_clip_json_like(v) for v in obj]
-    if isinstance(obj, (str, int, float, bool)) or obj is None:
-        if isinstance(obj, str):
-            return _clip_text_for_trace(obj)
-        return obj
-    return _clip_text_for_trace(obj)
+    return {
+        "stage": stage,
+        "message": message,
+        "mode": "single_agent",
+        "details": details,
+    }
