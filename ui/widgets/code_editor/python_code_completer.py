@@ -404,6 +404,48 @@ class PythonCodeCompleter(QObject):
 
         return sorted(words, key=sort_key)
 
+    def _is_inside_string(self) -> bool:
+        """检测光标是否位于字符串字面量内部（避免字符串内弹出补全）。"""
+        cursor = self._editor.textCursor()
+        block = cursor.block()
+        col = cursor.positionInBlock()
+        text_before = block.text()[:col]
+
+        # 上一行处于三引号字符串内部（依赖 syntax highlighter 设置的 block state）
+        prev_block = block.previous()
+        if prev_block.isValid() and prev_block.userState() in (1, 2):
+            return True
+
+        in_single = False
+        in_double = False
+        i = 0
+        while i < len(text_before):
+            ch = text_before[i]
+
+            # 三引号优先匹配
+            if text_before[i:i + 3] == '"""' and not in_single:
+                in_double = not in_double
+                i += 3
+                continue
+            if text_before[i:i + 3] == "'''" and not in_double:
+                in_single = not in_single
+                i += 3
+                continue
+
+            # 转义字符跳过
+            if ch == '\\':
+                i += 2
+                continue
+
+            if ch == '"' and not in_single:
+                in_double = not in_double
+            elif ch == "'" and not in_double:
+                in_single = not in_single
+
+            i += 1
+
+        return in_single or in_double
+
     def _trigger_completion(self):
         """触发代码补全的核心逻辑。
 
@@ -414,6 +456,11 @@ class PythonCodeCompleter(QObject):
             if not self._editor.isVisible():
                 return
         except RuntimeError:
+            return
+
+        # 字符串内部不触发补全
+        if self._is_inside_string():
+            self._completer.popup().hide()
             return
 
         cursor = self._editor.textCursor()
@@ -486,6 +533,7 @@ class PythonCodeCompleter(QObject):
             popup.show()
 
     def _insert_completion(self, text: str):
+        self._trigger_timer.stop()
         self._editor.blockSignals(True)
         try:
             cursor = self._editor.textCursor()
@@ -527,3 +575,4 @@ class PythonCodeCompleter(QObject):
             self._usage_counts[text] = self._usage_counts.get(text, 0) + 1
         finally:
             self._editor.blockSignals(False)
+            self._completer.popup().hide()

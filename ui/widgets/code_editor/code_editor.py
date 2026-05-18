@@ -71,9 +71,10 @@ class CodeEditor(QPlainTextEdit):
         self.cursorPositionChanged.connect(self.highlight_current_line)
         
         # Initialize
+        self._bracket_match_selections = []
         self.update_line_number_area_width(0)
         self.highlight_current_line()
-        
+
         # Completer support placeholders
         self._completer = None
         self._auto_pair_expected_close_pos = None
@@ -121,7 +122,21 @@ class CodeEditor(QPlainTextEdit):
             selection.cursor = self.textCursor()
             selection.cursor.clearSelection()
             extra_selections.append(selection)
-        
+
+        # Bracket/quote match highlights
+        doc = self.document()
+        for pos, length in self._bracket_match_selections:
+            if pos < 0 or pos + length > len(self.toPlainText()):
+                continue
+            sel = QTextEdit.ExtraSelection()
+            sel.format.setBackground(QColor("#c8c8c8"))
+            sel.format.setForeground(QColor("#1a1a1a"))
+            c = QTextCursor(doc)
+            c.setPosition(pos)
+            c.setPosition(pos + length, QTextCursor.KeepAnchor)
+            sel.cursor = c
+            extra_selections.append(sel)
+
         self.setExtraSelections(extra_selections)
 
     # --- Folding Logic ---
@@ -308,7 +323,7 @@ class CodeEditor(QPlainTextEdit):
             if pos <= 0: return False
             left = self.document().characterAt(pos - 1)
             right = self.document().characterAt(pos)
-            
+
             pairs = {'(': ')', '[': ']', '{': '}', "'": "'", '"': '"'}
             if left in pairs and pairs[left] == right:
                 cursor.beginEditBlock()
@@ -317,6 +332,25 @@ class CodeEditor(QPlainTextEdit):
                 cursor.endEditBlock()
                 self.setTextCursor(cursor)
                 return True
+
+            # Backspace 删除一个 tab 宽度（行首空白区域）
+            block_text = cursor.block().text()
+            col = cursor.positionInBlock()
+            if col > 0:
+                prefix = block_text[:col]
+                if prefix and prefix.strip() == "":
+                    # 光标前全是空白，删一个 indent_width 的空格
+                    remove_n = self.indent_width
+                    if col < self.indent_width:
+                        remove_n = col
+                    cursor.beginEditBlock()
+                    cursor.setPosition(cursor.block().position() + col - remove_n)
+                    cursor.setPosition(cursor.block().position() + col, QTextCursor.KeepAnchor)
+                    cursor.removeSelectedText()
+                    cursor.endEditBlock()
+                    self.setTextCursor(cursor)
+                    return True
+
             return False
         
         text = event.text()
@@ -362,6 +396,11 @@ class CodeEditor(QPlainTextEdit):
 
     def keyPressEvent(self, event):
         if self._handle_auto_pair_key(event):
+            return
+
+        # Ctrl+/ 注释切换
+        if event.key() == Qt.Key_Slash and (event.modifiers() & Qt.ControlModifier):
+            self._toggle_comment()
             return
 
         # Tab handling for indentation
@@ -443,5 +482,61 @@ class CodeEditor(QPlainTextEdit):
                 cursor.removeSelectedText()
                 
             if not cursor.movePosition(QTextCursor.Down): break
-            
+
         cursor.endEditBlock()
+
+    def _toggle_comment(self):
+        """Ctrl+/ 注释切换：全选行均已注释则取消，否则注释。"""
+        cursor = self.textCursor()
+
+        if cursor.hasSelection():
+            start = cursor.selectionStart()
+            end = cursor.selectionEnd()
+        else:
+            start = cursor.block().position()
+            end = cursor.block().position() + cursor.block().length()
+
+        # 第一遍：收集行数据，判断是否全部已注释
+        work = QTextCursor(self.document())
+        work.setPosition(start)
+        work.movePosition(QTextCursor.StartOfLine)
+        line_entries = []  # (block_number, text)
+        all_commented = True
+        while work.position() <= end:
+            block = work.block()
+            text = block.text()
+            stripped = text.lstrip()
+            if stripped and not stripped.startswith("# "):
+                all_commented = False
+            line_entries.append((block.blockNumber(), text))
+            if not work.movePosition(QTextCursor.Down):
+                break
+
+        # 第二遍：从下往上逐行替换（避免位置偏移），屏蔽信号防止触发补全
+        self.blockSignals(True)
+        cursor.beginEditBlock()
+        for block_num, text in reversed(line_entries):
+            if not text.strip():
+                continue
+
+            indent = len(text) - len(text.lstrip())
+            content = text.lstrip()
+
+            if all_commented:
+                if content.startswith("# "):
+                    new_text = " " * indent + content[2:]
+                elif content.startswith("#"):
+                    new_text = " " * indent + content[1:]
+                else:
+                    continue
+            else:
+                new_text = " " * indent + "# " + content
+
+            block = self.document().findBlockByNumber(block_num)
+            # 只替换文本内容，保留换行符（block.length() 包含换行符）
+            work.setPosition(block.position())
+            work.setPosition(block.position() + block.length() - 1, QTextCursor.KeepAnchor)
+            work.insertText(new_text)
+
+        cursor.endEditBlock()
+        self.blockSignals(False)

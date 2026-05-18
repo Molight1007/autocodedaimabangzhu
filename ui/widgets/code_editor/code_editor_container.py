@@ -5,6 +5,7 @@ from PySide6.QtWidgets import QWidget, QVBoxLayout
 from .code_editor import CodeEditor
 from .python_syntax_highlighter import PythonSyntaxHighlighter
 from .python_code_completer import PythonCodeCompleter
+from .bracket_match_highlighter import BracketMatchHighlighter
 
 
 # code_editor_container.py 中修改
@@ -19,10 +20,12 @@ class CodeEditorContainer(QWidget):
 
         self._highlighter = None
         self._completer = None
+        self._bracket_matcher = None
         self._dispatch_api = None
 
         self._highlighter = PythonSyntaxHighlighter(self.editor.document())
         self._completer = PythonCodeCompleter(self.editor, self)
+        self._bracket_matcher = BracketMatchHighlighter(self.editor, self)
 
         # 关键：将补全器引用传递给编辑器
         self.editor._completer = self._completer  # 直接设置属性
