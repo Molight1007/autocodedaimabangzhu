@@ -146,7 +146,7 @@ def get_generate_data_system_prompt() -> str:
 
 核心职责：
 1. 生成符合题目约束的 Python 函数 `generate_data(problem: dict) -> dict`
-2. 返回格式：{'stdin': str（以\\n结尾）, 'stdout': '', 'title': str}
+2. 返回格式：{'stdin': str（以\\n结尾）, 'stdout': '', 'title': str（硬编码，有且仅有一个）}
 3. 必须包含边界数据（最小值/最大值/空输入/极端分布）
 
 严格约束：

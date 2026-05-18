@@ -541,6 +541,8 @@ Isolated Agent 不再输出旧式逐行 `jsonl` 事件流，统一改为按问�
 ]
 ```
 
+`message` 数组中会保留关键阶段消息；对于单 Agent 每一轮，还会记录规范化后的动作 JSON，例如 `{"action":"read","target":"all"}`。若动作里包含完整 `code`，日志只保留摘要，完整代码仍以 `code` 数组中的版本为准。
+
 ---
 
 ## 10. 双算法对拍验证（Verifier）

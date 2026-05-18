@@ -12,6 +12,28 @@ if PROJECT_ROOT not in sys.path:
 
 
 class TestVerifierTraceStore(unittest.TestCase):
+    def test_single_agent_trace_message_keeps_action_payload(self):
+        from services.isolated_agent.controller.autonomous_loop import _build_trace_message_item
+        from services.isolated_agent.session.state import AgentSessionState
+
+        state = AgentSessionState(session_id="sess-1", current_code="print(1)\n")
+        item = _build_trace_message_item(
+            state=state,
+            event="action_payload",
+            payload={"attempt": 2, "payload": {"action": "read", "target": "all"}},
+        )
+
+        self.assertEqual(item["stage"], "action_payload")
+        self.assertEqual(item["details"]["attempt"], 2)
+        self.assertEqual(item["details"]["payload"]["action"], "read")
+        self.assertEqual(item["details"]["payload"]["target"], "all")
+
+    def test_cross_runner_keeps_agent_step_messages_for_action_debug(self):
+        from services.isolated_agent.verifier.cross_runner import _should_capture_progress_message
+
+        self.assertTrue(_should_capture_progress_message({"stage": "agent_step"}))
+        self.assertFalse(_should_capture_progress_message({"stage": "compare_progress"}))
+
     def test_resolve_logs_dir_points_to_project_root_logs(self):
         from services.isolated_agent.verifier.agent_utils.trace import _resolve_logs_dir
 

@@ -81,7 +81,7 @@ def _safe_report_progress(
 
 def _should_capture_progress_message(payload: Dict[str, Any]) -> bool:
     stage = str((payload or {}).get("stage") or "")
-    return stage not in {"agent_step", "compare_progress"}
+    return stage != "compare_progress"
 
 
 def generate_dual_codes(
@@ -647,6 +647,7 @@ def _run_single_agent(
                     "attempt": attempt,
                     "result_type": result_type,
                     "message": f"Agent-{slot.upper()}[{algo_name}] 第{attempt}轮 {action}" + (f" → {result_type}" if result_type else ""),
+                    "details": {"payload": dict((step_info or {}).get("action_payload") or {})},
                 },
                 trace_run_id=trace_run_id,
             )
@@ -967,6 +968,7 @@ def _retry_single_agent_after_mismatch(
                 "attempt": attempt,
                 "result_type": result_type,
                 "message": f"Agent-{slot.upper()}[{algo_name}] 修复第{attempt}轮 {action}" + (f" → {result_type}" if result_type else ""),
+                "details": {"payload": dict((step_info or {}).get("action_payload") or {})},
             },
             trace_run_id=trace_run_id,
         )

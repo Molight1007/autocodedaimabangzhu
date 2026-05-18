@@ -241,6 +241,7 @@
 
 - `agent_trace.json` 记录所有单 Agent 与双算法对拍的运行对象，每个对象包含 `run_id / status / problem / message / code / summary`。
 - `agent_runs/<run_id>.json` 保存单次运行的独立归档，便于单问题排错与溯源。
+- `message` 中会保留阶段消息和关键动作 JSON；例如 `read/run/modify/finalize` 的规范化 payload 会写入 `details.payload`，便于定位卡壳轮次。
 
 日志原则：
 

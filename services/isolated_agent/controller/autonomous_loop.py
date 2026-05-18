@@ -113,6 +113,15 @@ def run_autonomous_loop(
             _append_trace(state, "loop_stopped", {"attempt": attempt, "reason": "interruption_requested_after_llm"})
             break
         action_payload = _normalize_llm_action(llm_output)
+        if action_payload:
+            _append_trace(
+                state,
+                "action_payload",
+                {
+                    "attempt": attempt,
+                    "payload": dict(action_payload or {}),
+                },
+            )
         if not action_payload:
             protocol_errors += 1
             state.push_event(
@@ -158,6 +167,7 @@ def run_autonomous_loop(
             "attempt": attempt,
             "max_attempts": max_attempts,
             "action": str(action_payload.get("action") or ""),
+            "action_payload": dict(action_payload or {}),
             "type": result_type,
             "version": int(state.version),
             "code": state.current_code,
@@ -426,6 +436,12 @@ def _build_trace_message_item(
                 "context_rounds": int(data.get("context_rounds") or 0),
             }
         )
+    elif evt == "action_payload":
+        attempt = int(data.get("attempt") or 0)
+        payload = _compact_action_payload(data.get("payload"))
+        action = str(payload.get("action") or "")
+        message = f"第{attempt}轮 动作决策: {action or 'unknown'}"
+        details.update({"attempt": attempt, "payload": payload})
     elif evt == "dispatch_result":
         attempt = int(data.get("attempt") or 0)
         action = str(data.get("action") or "")
@@ -471,3 +487,43 @@ def _build_trace_message_item(
         "mode": "single_agent",
         "details": details,
     }
+
+
+def _compact_action_payload(payload: Any) -> Dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {}
+    compact: Dict[str, Any] = {}
+    for key, value in payload.items():
+        name = str(key or "")
+        if name == "code":
+            code_text = str(value or "")
+            compact["code"] = {
+                "stored_in_code_versions": True,
+                "hash": _sha256_text(code_text),
+                "chars": len(code_text),
+                "lines": len(code_text.splitlines()),
+                "preview": _clip_preview(code_text, head=240, tail=80),
+            }
+            continue
+        if name == "cases" and isinstance(value, list):
+            compact["cases"] = [_compact_case_item(one) for one in value[:2]]
+            compact["case_count"] = len(value)
+            continue
+        compact[name] = value
+    return compact
+
+
+def _compact_case_item(case: Any) -> Any:
+    if not isinstance(case, dict):
+        return case
+    one = dict(case)
+    if "stdin" in one:
+        one["stdin"] = _clip_preview(one.get("stdin"), head=160, tail=40)
+    return one
+
+
+def _clip_preview(raw: Any, *, head: int, tail: int) -> str:
+    text = str(raw or "")
+    if len(text) <= head + tail + 20:
+        return text
+    return text[:head] + "\n...\n" + text[-tail:]
