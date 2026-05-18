@@ -187,6 +187,7 @@ class ProblemWorkbenchDialog(QDialog):
 
         self.editor = CodeEditorContainer(self)
         self.editor.set_dispatch_api(self._dispatch_api)
+        self.editor.enable_find_replace()
         self.editor.set_text(get_template("solve"))
         right_layout.addWidget(self.editor, 1)
         splitter.addWidget(right)

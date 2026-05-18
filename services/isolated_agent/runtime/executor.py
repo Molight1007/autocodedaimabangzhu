@@ -24,6 +24,8 @@ import tempfile
 import traceback
 from typing import Any, Callable, Dict, Optional
 
+from services.python_source_validator import validate_python_source
+
 from ..contracts.protocol import (
     ALLOWED_SELF_TEST_STATUSES,
     RESULT_GRAMMATICAL_ERROR,
@@ -220,11 +222,10 @@ def _map_self_test_status(run_type: str, run_result: Dict[str, Any]) -> str:
 
 
 def _check_syntax(code_text: str) -> str:
-    try:
-        compile(code_text, "<isolated_agent>", "exec")
+    result = validate_python_source(code_text, filename="<isolated_agent>", mode="exec")
+    if result.ok:
         return ""
-    except Exception:
-        return _clip(traceback.format_exc(), _DEFAULT_MAX_OUTPUT_CHARS)
+    return _clip(result.formatted_error or result.message, _DEFAULT_MAX_OUTPUT_CHARS)
 
 
 def _execute_subprocess(

@@ -3,7 +3,7 @@ import token
 import tokenize
 from io import StringIO
 from PySide6.QtWidgets import QPlainTextEdit, QWidget, QApplication, QTextEdit
-from PySide6.QtGui import QPainter, QColor, QFont, QTextCursor, QTextBlock, QFontMetrics, QPolygonF
+from PySide6.QtGui import QPainter, QColor, QFont, QTextCharFormat, QTextCursor, QTextBlock, QFontMetrics, QPolygonF
 from PySide6.QtCore import Qt, QRect, QSize, Signal, QPointF
 
 class LineNumberArea(QWidget):
@@ -42,6 +42,8 @@ class LineNumberArea(QWidget):
         super().mousePressEvent(event)
 
 class CodeEditor(QPlainTextEdit):
+    contentMutated = Signal()
+
     def __init__(self, parent=None):
         super().__init__(parent)
         
@@ -72,6 +74,8 @@ class CodeEditor(QPlainTextEdit):
         
         # Initialize
         self._bracket_match_selections = []
+        self._symbol_reference_selections = []
+        self._syntax_error_selections = []
         self.update_line_number_area_width(0)
         self.highlight_current_line()
 
@@ -125,12 +129,34 @@ class CodeEditor(QPlainTextEdit):
 
         # Bracket/quote match highlights
         doc = self.document()
+        for pos, length in self._symbol_reference_selections:
+            if pos < 0 or pos + length > len(self.toPlainText()):
+                continue
+            sel = QTextEdit.ExtraSelection()
+            sel.format.setBackground(QColor("#e2e5e9"))
+            c = QTextCursor(doc)
+            c.setPosition(pos)
+            c.setPosition(pos + length, QTextCursor.KeepAnchor)
+            sel.cursor = c
+            extra_selections.append(sel)
+
         for pos, length in self._bracket_match_selections:
             if pos < 0 or pos + length > len(self.toPlainText()):
                 continue
             sel = QTextEdit.ExtraSelection()
             sel.format.setBackground(QColor("#c8c8c8"))
             sel.format.setForeground(QColor("#1a1a1a"))
+            c = QTextCursor(doc)
+            c.setPosition(pos)
+            c.setPosition(pos + length, QTextCursor.KeepAnchor)
+            sel.cursor = c
+            extra_selections.append(sel)
+
+        # Syntax error highlights (wavy red underline)
+        for pos, length in self._syntax_error_selections:
+            sel = QTextEdit.ExtraSelection()
+            sel.format.setUnderlineColor(QColor("#e51400"))
+            sel.format.setUnderlineStyle(QTextCharFormat.UnderlineStyle.WaveUnderline)
             c = QTextCursor(doc)
             c.setPosition(pos)
             c.setPosition(pos + length, QTextCursor.KeepAnchor)
@@ -491,10 +517,12 @@ class CodeEditor(QPlainTextEdit):
 
         if cursor.hasSelection():
             start = cursor.selectionStart()
-            end = cursor.selectionEnd()
+            end = max(cursor.selectionEnd() - 1, start)
         else:
-            start = cursor.block().position()
-            end = cursor.block().position() + cursor.block().length()
+            block = cursor.block()
+            start = block.position()
+            # block.length() 包含行尾换行符；单行切换不应把下一行误算进来
+            end = block.position() + len(block.text())
 
         # 第一遍：收集行数据，判断是否全部已注释
         work = QTextCursor(self.document())
@@ -540,3 +568,4 @@ class CodeEditor(QPlainTextEdit):
 
         cursor.endEditBlock()
         self.blockSignals(False)
+        self.contentMutated.emit()

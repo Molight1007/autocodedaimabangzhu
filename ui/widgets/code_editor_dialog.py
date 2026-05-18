@@ -81,6 +81,7 @@ class CodeEditorDialog(QDialog):
 
         self.editor = CodeEditorContainer(self)
         self.editor.set_dispatch_api(get_default_dispatch_api())
+        self.editor.enable_find_replace()
         layout.addWidget(self.editor, 1)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
