@@ -324,6 +324,18 @@ class CodeEditorContainer(QWidget):
             pass
         self._syntax_error_hl = None
 
+    def disable_zoom(self):
+        try:
+            self.editor.disable_zoom()
+        except Exception:
+            pass
+
+    def enable_zoom(self):
+        try:
+            self.editor.enable_zoom()
+        except Exception:
+            pass
+
     def get_text(self):
         return self.editor.toPlainText()
 

@@ -207,6 +207,8 @@ def _build_splitter(layout: QVBoxLayout, dialog) -> None:
     dialog.left_editor.disable_syntax_error_highlighter()
     dialog.left_editor.disable_find_replace()
     dialog.right_editor.disable_find_replace()
+    dialog.left_editor.disable_zoom()
+    dialog.right_editor.disable_zoom()
 
     dialog.left_editor.set_text("")
     dialog.right_editor.set_text("")

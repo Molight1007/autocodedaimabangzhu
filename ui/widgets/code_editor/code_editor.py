@@ -2,68 +2,35 @@ import sys
 import token
 import tokenize
 from io import StringIO
-from PySide6.QtWidgets import QPlainTextEdit, QWidget, QApplication, QTextEdit
+from PySide6.QtWidgets import QPlainTextEdit, QApplication, QTextEdit
 from PySide6.QtGui import QPainter, QColor, QFont, QTextCharFormat, QTextCursor, QTextBlock, QFontMetrics, QPolygonF
-from PySide6.QtCore import Qt, QRect, QSize, Signal, QPointF
+from PySide6.QtCore import Qt, QRect, Signal, QPointF
 
-class LineNumberArea(QWidget):
-    def __init__(self, editor):
-        super().__init__(editor)
-        self.editor = editor
-        self.setCursor(Qt.ArrowCursor)
-
-    def sizeHint(self):
-        return QSize(self.editor.line_number_area_width(), 0)
-
-    def paintEvent(self, event):
-        self.editor.line_number_area_paint_event(event)
-        
-    def mousePressEvent(self, event):
-        if event.button() == Qt.LeftButton:
-            x = event.pos().x()
-            # If clicked in the folding area (right side)
-            if x > self.width() - self.editor.folding_area_width:
-                y = event.pos().y()
-                block = self.editor.firstVisibleBlock()
-                top = self.editor.blockBoundingGeometry(block).translated(self.editor.contentOffset()).top()
-                bottom = top + self.editor.blockBoundingRect(block).height()
-                
-                while block.isValid():
-                    if top <= y <= bottom:
-                        if self.editor.is_foldable(block):
-                            self.editor.toggle_fold(block)
-                            return
-                    
-                    block = block.next()
-                    top = bottom
-                    bottom = top + self.editor.blockBoundingRect(block).height()
-                    if top > self.height():
-                        break
-        super().mousePressEvent(event)
+from .comment_toggle_controller import CommentToggleController
+from .font_zoom_controller import EditorFontZoomController
+from .indent_guide_painter import IndentGuidePainter
+from .line_number_area import LineNumberArea
 
 class CodeEditor(QPlainTextEdit):
     contentMutated = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        
-        # Font Configuration
-        font = QFont("Consolas")
-        if not font.exactMatch():
-            font = QFont("Courier New")
-        font.setPointSize(10)
-        self.setFont(font)
-        
-        # Editor Settings
-        self.setLineWrapMode(QPlainTextEdit.NoWrap)
-        metrics = self.fontMetrics()
-        self.setTabStopDistance(metrics.horizontalAdvance(" ") * 4)
-        
+
         # Folding State
         self.indent_width = 4
         self.folding_area_width = 16
         self.folded_blocks = set() # Store block numbers that are folded
-        
+
+        # Font & Zoom
+        self._font_zoom_controller = EditorFontZoomController(self)
+        self._font_zoom_controller.initialize()
+        self._indent_guide_painter = IndentGuidePainter(self)
+        self._comment_toggle_controller = CommentToggleController(self)
+
+        # Editor Settings
+        self.setLineWrapMode(QPlainTextEdit.NoWrap)
+
         # Components
         self.line_number_area = LineNumberArea(self)
         
@@ -85,6 +52,12 @@ class CodeEditor(QPlainTextEdit):
         self._auto_pair_expected_close_char = None
         self._auto_pair_expected_close_time = 0.0
         self._auto_pair_skip_window_s = 0.8
+
+    def enable_zoom(self):
+        self._font_zoom_controller.enable_zoom()
+
+    def disable_zoom(self):
+        self._font_zoom_controller.disable_zoom()
 
     # --- Line Number Area & Layout ---
     
@@ -115,6 +88,21 @@ class CodeEditor(QPlainTextEdit):
         super().resizeEvent(event)
         cr = self.contentsRect()
         self.line_number_area.setGeometry(QRect(cr.left(), cr.top(), self.line_number_area_width(), cr.height()))
+        self._font_zoom_controller.reposition_zoom_popup()
+
+    def wheelEvent(self, event):
+        if self._font_zoom_controller.zoom_enabled and (event.modifiers() & Qt.ControlModifier):
+            delta_y = event.angleDelta().y()
+            if delta_y:
+                point_size = self._font_zoom_controller.zoom_font(1 if delta_y > 0 else -1)
+                self._font_zoom_controller.show_zoom_popup(point_size)
+                event.accept()
+                return
+        super().wheelEvent(event)
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        self._indent_guide_painter.paint(event)
 
     def highlight_current_line(self):
         extra_selections = []
@@ -426,7 +414,7 @@ class CodeEditor(QPlainTextEdit):
 
         # Ctrl+/ 注释切换
         if event.key() == Qt.Key_Slash and (event.modifiers() & Qt.ControlModifier):
-            self._toggle_comment()
+            self._comment_toggle_controller.toggle_comment()
             return
 
         # Tab handling for indentation
@@ -510,62 +498,3 @@ class CodeEditor(QPlainTextEdit):
             if not cursor.movePosition(QTextCursor.Down): break
 
         cursor.endEditBlock()
-
-    def _toggle_comment(self):
-        """Ctrl+/ 注释切换：全选行均已注释则取消，否则注释。"""
-        cursor = self.textCursor()
-
-        if cursor.hasSelection():
-            start = cursor.selectionStart()
-            end = max(cursor.selectionEnd() - 1, start)
-        else:
-            block = cursor.block()
-            start = block.position()
-            # block.length() 包含行尾换行符；单行切换不应把下一行误算进来
-            end = block.position() + len(block.text())
-
-        # 第一遍：收集行数据，判断是否全部已注释
-        work = QTextCursor(self.document())
-        work.setPosition(start)
-        work.movePosition(QTextCursor.StartOfLine)
-        line_entries = []  # (block_number, text)
-        all_commented = True
-        while work.position() <= end:
-            block = work.block()
-            text = block.text()
-            stripped = text.lstrip()
-            if stripped and not stripped.startswith("# "):
-                all_commented = False
-            line_entries.append((block.blockNumber(), text))
-            if not work.movePosition(QTextCursor.Down):
-                break
-
-        # 第二遍：从下往上逐行替换（避免位置偏移），屏蔽信号防止触发补全
-        self.blockSignals(True)
-        cursor.beginEditBlock()
-        for block_num, text in reversed(line_entries):
-            if not text.strip():
-                continue
-
-            indent = len(text) - len(text.lstrip())
-            content = text.lstrip()
-
-            if all_commented:
-                if content.startswith("# "):
-                    new_text = " " * indent + content[2:]
-                elif content.startswith("#"):
-                    new_text = " " * indent + content[1:]
-                else:
-                    continue
-            else:
-                new_text = " " * indent + "# " + content
-
-            block = self.document().findBlockByNumber(block_num)
-            # 只替换文本内容，保留换行符（block.length() 包含换行符）
-            work.setPosition(block.position())
-            work.setPosition(block.position() + block.length() - 1, QTextCursor.KeepAnchor)
-            work.insertText(new_text)
-
-        cursor.endEditBlock()
-        self.blockSignals(False)
-        self.contentMutated.emit()
