@@ -324,6 +324,18 @@ class CodeEditorContainer(QWidget):
             pass
         self._syntax_error_hl = None
 
+    def disable_symbol_reference_highlighter(self):
+        h = self._symbol_reference_hl
+        if h is None:
+            self.editor._symbol_reference_selections = []
+            self.editor.highlight_current_line()
+            return
+        try:
+            h.disable()
+        except Exception:
+            pass
+        self._symbol_reference_hl = None
+
     def disable_zoom(self):
         try:
             self.editor.disable_zoom()

@@ -48,11 +48,23 @@ class SymbolReferenceHighlighter(QObject):
     def __init__(self, editor, parent=None):
         super().__init__(parent)
         self._editor = editor
+        self._enabled = True
         self._editor._symbol_reference_selections = []
         self._editor.cursorPositionChanged.connect(self._on_cursor_moved)
 
     def _on_cursor_moved(self):
+        if not self._enabled:
+            return
         self._editor._symbol_reference_selections = self._find_matches()
+        self._editor.highlight_current_line()
+
+    def disable(self):
+        self._enabled = False
+        try:
+            self._editor.cursorPositionChanged.disconnect(self._on_cursor_moved)
+        except Exception:
+            pass
+        self._editor._symbol_reference_selections = []
         self._editor.highlight_current_line()
 
     def _find_matches(self):
