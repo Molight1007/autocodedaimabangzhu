@@ -9,6 +9,7 @@ import string
 from typing import Any, Callable, Dict, Hashable, List, Optional, TypeVar
 
 from core.models import VariableConfig
+from services.preview.range_distribution import generate_range_value as generate_range_distribution_value
 from services.preview.preview_policy import PreviewPolicy, truncate_cell
 
 
@@ -295,11 +296,12 @@ def _generate_value_for_mode(cfg: VariableConfig, env: Dict[str, Any], *, mode: 
 def _generate_range_value(var_type: str, params: Dict[str, Any], env: Dict[str, Any]) -> Any:
     vmin = _resolve_number_expr(params.get("min"), default=0, env=env)
     vmax = _resolve_number_expr(params.get("max"), default=vmin + 100, env=env)
-    if vmax < vmin:
-        vmin, vmax = vmax, vmin
-    if var_type == "float":
-        return random.uniform(vmin, vmax)
-    return random.randint(int(vmin), int(vmax))
+    return generate_range_distribution_value(
+        var_type=var_type,
+        vmin=vmin,
+        vmax=vmax,
+        params=params,
+    )
 
 
 def _generate_list_value(params: Dict[str, Any]) -> str:

@@ -1,7 +1,7 @@
 # 数据生成器 — 项目说明文档
 
 > **版本**：1.0.0　|　**技术栈**：Python + PySide6 + DeepSeek / OpenAI 兼容 API　|　**定位**：算法竞赛测试数据生成 & AI 辅助解题平台
-*最后修改时间：2026-05-19*
+*最后修改时间：2026-05-27*
 
 ---
 
@@ -241,6 +241,7 @@ class VariableConfig:
 - **类型选择**下拉框（整数 / 浮点数 / 字符）
 - **数据源选择**下拉框（数据范围 / 列表选择 / 字符集合 / 来自代码）
 - **动态参数区**（`QStackedWidget`）：根据数据源类型切换显示不同参数输入控件
+- **范围分布策略**：当数据源为 `range` 时，UI 仅显示当前后端已接通的分布策略，未实现项自动隐藏，避免配置后无实际效果
 - **分隔符**下拉框
 - **循环次数**输入（支持引用其他变量名表达式）
 - **删除按钮**（发射 `delete_requested` 信号）
@@ -254,6 +255,27 @@ class VariableConfig:
 #### `range`（数值范围）
 - `min` / `max` 支持引用已定义变量名（如将 `max` 设为 `n`，则每次生成时动态解析当前 `n` 的值）
 - 内部使用 `_resolve_number_expr()` 通过安全 AST eval 解析表达式
+- 支持 `distribution` 参数控制分布策略；未配置时默认均匀随机
+- 当前已接通的策略包括：
+  - `uniform`：范围内均匀随机
+  - `biased_low`：偏向较小值
+  - `biased_high`：偏向较大值
+  - `edge_focused`：优先生成边界值
+  - `custom_segments`：按权重从多个子规则中挑选，子规则支持范围、固定值、边界值
+- `custom_segments` 示例：
+
+```python
+params = {
+    "min": "1",
+    "max": "100000",
+    "distribution": "custom_segments",
+    "segments": [
+        {"weight": "30", "mode": "range", "min": "1", "max": "100"},
+        {"weight": "30", "mode": "fixed", "value": "1000"},
+        {"weight": "40", "mode": "edge"},
+    ],
+}
+```
 
 #### `list`（枚举列表）
 - 逗号分隔的字符串，随机选一项返回
@@ -806,7 +828,7 @@ VariablesPanel.get_configs() → List[VariableConfig]
 preview_sample.build_problem_set(configs, rows, no_duplicates)
         ↓
 _build_cases()：遍历每个 VariableConfig → _generate_value()
-  ├─ source=range  → random.randint/uniform（支持变量表达式）
+  ├─ source=range  → range_distribution.generate_range_value（支持变量表达式 + 分布策略）
   ├─ source=list   → random.choice(items)
   ├─ source=charset→ random.choice(alphabet) * length
   └─ source=code   → safe_eval(expr) 或 safe_exec(generate_data函数)
