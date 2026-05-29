@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import random
 from typing import Any, Dict, Iterable, Optional
 
@@ -33,12 +34,16 @@ def generate_range_value(
         return _generate_edge_focused(var_type=var_type, vmin=vmin, vmax=vmax, params=params)
     if distribution == "custom_segments":
         return _generate_custom_segments(var_type=var_type, vmin=vmin, vmax=vmax, params=params)
+    if distribution == "gaussian":
+        return _generate_gaussian(var_type=var_type, vmin=vmin, vmax=vmax, params=params)
+    if distribution == "poisson":
+        return _generate_poisson(var_type=var_type, vmin=vmin, vmax=vmax, params=params)
 
     return _generate_uniform(var_type=var_type, vmin=vmin, vmax=vmax)
 
 
 def supported_distributions() -> Iterable[str]:
-    return ("uniform", "biased_low", "biased_high", "edge_focused", "custom_segments")
+    return ("uniform", "biased_low", "biased_high", "edge_focused", "custom_segments", "gaussian", "poisson")
 
 
 def _generate_uniform(*, var_type: str, vmin: float, vmax: float) -> Any:
@@ -88,6 +93,33 @@ def _generate_custom_segments(*, var_type: str, vmin: float, vmax: float, params
 
     picked = random.choices(weighted_segments, weights=weights, k=1)[0]
     return _generate_segment_value(var_type=var_type, vmin=vmin, vmax=vmax, segment=picked)
+
+
+def _generate_gaussian(*, var_type: str, vmin: float, vmax: float, params: Dict[str, Any]) -> Any:
+    dist_params = params.get("distribution_params", {})
+    mean = _to_float(dist_params.get("mean"), default=(vmin + vmax) / 2)
+    stddev = _to_float(dist_params.get("stddev"), default=(vmax - vmin) / 4)
+    stddev = max(0.001, abs(stddev))
+    value = random.gauss(mean, stddev)
+    value = max(vmin, min(vmax, value))
+    if _is_float_type(var_type):
+        return float(value)
+    return int(round(value))
+
+
+def _generate_poisson(*, var_type: str, vmin: float, vmax: float, params: Dict[str, Any]) -> Any:
+    dist_params = params.get("distribution_params", {})
+    lambd = _to_float(dist_params.get("lambda"), default=4.0)
+    lambd = max(0.001, lambd)
+    L = math.exp(-lambd)
+    k = 0
+    p = 1.0
+    while p > L:
+        k += 1
+        p *= random.random()
+    value = k - 1
+    value = max(vmin, min(vmax, float(value)))
+    return int(round(value))
 
 
 def _generate_segment_value(*, var_type: str, vmin: float, vmax: float, segment: Dict[str, Any]) -> Any:

@@ -1,7 +1,7 @@
 # 数据生成器 — 项目说明文档
 
 > **版本**：1.0.0　|　**技术栈**：Python + PySide6 + DeepSeek / OpenAI 兼容 API　|　**定位**：算法竞赛测试数据生成 & AI 辅助解题平台
-*最后修改时间：2026-05-27*
+*最后修改时间：2026-05-29*
 
 ---
 
@@ -109,6 +109,8 @@
 │   ├── preview/
 │   │   ├── preview_sample.py      # 核心数据生成引擎（含沙箱执行）
 │   │   ├── preview_policy.py      # 预览策略（行数 / 字符限制）
+│   │   ├── range_distribution.py  # 数值范围分布策略实现（uniform / biased / edge / custom_segments）
+│   │   ├── distribution_registry.py  # 分布策略 JSON 注册表（动态加载 + 函数存在性校验）
 │   │   └── output_cleanup.py      # 输出目录清理工具
 │   ├── isolated_agent/            # 自治 Agent 引擎（核心模块，详见第 9 节）
 │   │   ├── facade.py              # 单一对外入口
@@ -138,7 +140,8 @@
 ├── File/
 │   ├── version.json               # 本地版本文件
 │   ├── API_Help_text.txt          # 界面内 API 帮助文本
-│   └── python_keywords.json       # Python 关键字列表（代码补全用）
+│   ├── python_keywords.json       # Python 关键字列表（代码补全用）
+│   └── distributions.json         # 分布策略注册表（name / function / params / group）
 ├── logs/                          # 运行日志目录（自动创建）
 │   ├── agent_trace.json           # Isolated Agent 统一聚合日志（单 Agent / 双算法对拍共用）
 │   └── agent_runs/                # 单问题归档目录（每次运行一个 JSON 文件）
@@ -241,7 +244,7 @@ class VariableConfig:
 - **类型选择**下拉框（整数 / 浮点数 / 字符）
 - **数据源选择**下拉框（数据范围 / 列表选择 / 字符集合 / 来自代码）
 - **动态参数区**（`QStackedWidget`）：根据数据源类型切换显示不同参数输入控件
-- **范围分布策略**：当数据源为 `range` 时，UI 仅显示当前后端已接通的分布策略，未实现项自动隐藏，避免配置后无实际效果
+- **范围分布策略**：当数据源为 `range` 时，UI 通过 `distribution_registry` 自动加载 `File/distributions.json`，仅显示函数已实现的分布策略，未实现项自动隐藏。每个分布的参数标签、占位提示、默认值均由 JSON 驱动，UI 无需硬编码
 - **分隔符**下拉框
 - **循环次数**输入（支持引用其他变量名表达式）
 - **删除按钮**（发射 `delete_requested` 信号）
@@ -276,6 +279,51 @@ params = {
     ],
 }
 ```
+
+#### 分布策略拓展机制（`File/distributions.json`）
+
+分布策略由 `distributions.json` 驱动，与 UI 代码解耦，支持运行时热加载：
+
+```json
+{
+    "uniform": {
+        "name": "均匀随机",
+        "function": "services.preview.range_distribution._generate_uniform",
+        "group": null,
+        "params": [],
+        "special_ui": null
+    },
+    "edge_focused": {
+        "name": "边界强化",
+        "function": "services.preview.range_distribution._generate_edge_focused",
+        "group": null,
+        "params": [
+            {"key": "edge_bias", "label": "边界偏向比例", "placeholder": "如 0.6", "default": 0.6}
+        ],
+        "special_ui": null
+    },
+    "gaussian": {
+        "name": "高斯分布",
+        "function": "services.preview.range_distribution._generate_gaussian",
+        "group": "高级",
+        "params": [
+            {"key": "mean", "label": "均值", "placeholder": "如 50"},
+            {"key": "stddev", "label": "标准差", "placeholder": "如 10"}
+        ],
+        "special_ui": null
+    }
+}
+```
+
+| 字段 | 说明 |
+|------|------|
+| `name` | 中文显示名 |
+| `function` | 生成函数路径（`模块.函数`），加载时自动校验存在性，不存在则自动隐藏菜单项 |
+| `group` | 分组名（如 `"高级"`），UI 渲染为 `"分组 / 名称"` 的二级菜单形式；`null` 为根级菜单 |
+| `params` | 参数列表，每个参数定义 `key`（键名）、`label`（中文标签）、`placeholder`（输入提示）、`default`（默认值） |
+| `special_ui` | `"segments"` 表示使用自定义分段概率的专用 UI 页面；`null` 为通用参数页 |
+
+添加新分布只需：① 实现生成函数 → ② 在 JSON 中注册一行 → UI 自动出现。远程更新只需替换 JSON 文件即可。
 
 #### `list`（枚举列表）
 - 逗号分隔的字符串，随机选一项返回

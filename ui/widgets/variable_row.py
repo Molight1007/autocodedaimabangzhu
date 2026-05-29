@@ -1,11 +1,12 @@
 from PySide6.QtWidgets import (
     QWidget, QHBoxLayout, QVBoxLayout, QLabel, QLineEdit, 
-    QComboBox, QPushButton, QStackedWidget, QFrame, QToolButton, QLayout
+    QComboBox, QPushButton, QStackedWidget, QFrame, QToolButton, QLayout,
+    QMessageBox, QMenu
 )
 from PySide6.QtCore import Signal, Qt, QSize
 from PySide6.QtGui import QFont, QIcon
 from core.models import VariableConfig
-from services.preview.range_distribution import supported_distributions
+from services.preview.distribution_registry import get_distribution_registry
 from ..styles.variable_row_style import VARIABLE_ROW_QSS
 from .code_editor_dialog import CodeEditorDialog
 from .common.clickable_line_edit import ClickableLineEdit
@@ -54,22 +55,8 @@ class VariableRowWidget(QFrame):
         self.type_map = {"整数": "Integer", "浮点数": "Float", "字符": "String"}
         self.source_map = {"数据范围": "Range", "列表选择": "List", "字符集合": "Charset", "来自代码": "Code"}
         self.separator_map = {"无": "", "空格": " ", "换行": "\n", "制表符": "\t", "逗号": ",", "分号": ";"}
-        full_distribution_map = {
-            "均匀随机": "uniform",
-            "偏向小值": "biased_low",
-            "偏向大值": "biased_high",
-            "边界强化": "edge_focused",
-            "高级 / 高斯分布": "gaussian",
-            "高级 / 泊松分布": "poisson",
-            "高级 / 指数分布": "exponential",
-            "高级 / 幂律分布": "power_law",
-            "自定义分段概率": "custom_segments",
-        }
-        available_distributions = set(supported_distributions())
-        self.range_distribution_map = {
-            label: key for label, key in full_distribution_map.items() if key in available_distributions
-        }
-        self._distribution_label_map = {v: k for k, v in self.range_distribution_map.items()}
+        self._distribution_registry = get_distribution_registry()
+        self._current_distribution_key = "uniform"
         self._segment_mode_map = {"范围": "range", "固定值": "fixed", "边界值": "edge"}
         self._segment_rule_rows = []
         
@@ -240,9 +227,30 @@ class VariableRowWidget(QFrame):
         lbl_strategy.setFont(self.bold_font)
         strategy_row.addWidget(lbl_strategy)
 
-        self.range_distribution_combo = QComboBox()
-        self.range_distribution_combo.addItems(list(self.range_distribution_map.keys()))
-        strategy_row.addWidget(self.range_distribution_combo)
+        self.range_distribution_btn = QPushButton("")
+        self.range_distribution_btn.setCursor(Qt.PointingHandCursor)
+        self.range_distribution_btn.setStyleSheet("""
+            QPushButton {
+                border: 1px solid #e0e0e0;
+                border-radius: 3px;
+                padding: 4px 24px 4px 10px;
+                background-color: #fcfcfc;
+                text-align: left;
+            }
+            QPushButton:hover {
+                border: 1px solid #007AFF;
+            }
+        """)
+        self.range_distribution_btn.clicked.connect(self._show_distribution_menu)
+        strategy_row.addWidget(self.range_distribution_btn)
+
+        self.range_distribution_help_btn = QPushButton("?")
+        self.range_distribution_help_btn.setFixedSize(26, 26)
+        self.range_distribution_help_btn.setCursor(Qt.PointingHandCursor)
+        self.range_distribution_help_btn.setToolTip("查看分布说明")
+        self.range_distribution_help_btn.setStyleSheet("QPushButton { font-weight: bold; border-radius: 13px; }")
+        self.range_distribution_help_btn.clicked.connect(self._show_current_distribution_help)
+        strategy_row.addWidget(self.range_distribution_help_btn)
         strategy_row.addStretch(1)
         layout_range.addLayout(strategy_row)
 
@@ -253,8 +261,6 @@ class VariableRowWidget(QFrame):
         self.params_stack.addWidget(self.page_range)
         self.range_min.textChanged.connect(self._update_header)
         self.range_max.textChanged.connect(self._update_header)
-        self.range_distribution_combo.currentIndexChanged.connect(self._on_range_distribution_changed)
-        self.range_distribution_combo.currentIndexChanged.connect(self._update_header)
         
         # Page 1: 列表选择 (List)
         self.page_list = QWidget()
@@ -328,32 +334,13 @@ class VariableRowWidget(QFrame):
 
     def _init_range_distribution_pages(self):
         self.range_distribution_page_basic = QWidget()
-        basic_layout = QHBoxLayout(self.range_distribution_page_basic)
-        basic_layout.setContentsMargins(0, 0, 0, 0)
-        basic_layout.addWidget(QLabel("当前策略无需额外参数。"))
-        basic_layout.addStretch(1)
         self.range_distribution_stack.addWidget(self.range_distribution_page_basic)
 
         self.range_distribution_page_advanced = QWidget()
-        advanced_layout = QHBoxLayout(self.range_distribution_page_advanced)
-        advanced_layout.setContentsMargins(0, 0, 0, 0)
-        advanced_layout.setSpacing(8)
-
-        self.range_advanced_label_primary = QLabel("参数")
-        advanced_layout.addWidget(self.range_advanced_label_primary)
-
-        self.range_advanced_input_primary = QLineEdit()
-        self.range_advanced_input_primary.setFixedWidth(100)
-        advanced_layout.addWidget(self.range_advanced_input_primary)
-
-        self.range_advanced_label_secondary = QLabel("参数2")
-        advanced_layout.addWidget(self.range_advanced_label_secondary)
-
-        self.range_advanced_input_secondary = QLineEdit()
-        self.range_advanced_input_secondary.setFixedWidth(100)
-        advanced_layout.addWidget(self.range_advanced_input_secondary)
-        advanced_layout.addStretch(1)
-
+        self.range_advanced_params_layout = QHBoxLayout(self.range_distribution_page_advanced)
+        self.range_advanced_params_layout.setContentsMargins(0, 0, 0, 0)
+        self.range_advanced_params_layout.setSpacing(8)
+        self._current_param_inputs: dict = {}
         self.range_distribution_stack.addWidget(self.range_distribution_page_advanced)
 
         self.range_distribution_page_segments = QWidget()
@@ -379,58 +366,110 @@ class VariableRowWidget(QFrame):
 
         self.range_distribution_stack.addWidget(self.range_distribution_page_segments)
 
-        self.range_advanced_input_primary.textChanged.connect(self._update_header)
-        self.range_advanced_input_secondary.textChanged.connect(self._update_header)
+        self._apply_distribution_selection()
 
-        self._update_advanced_distribution_fields()
-        self._on_range_distribution_changed(self.range_distribution_combo.currentIndex())
-
-    def _on_range_distribution_changed(self, index):
-        distribution = self._current_range_distribution()
-        if distribution == "custom_segments":
+    def _apply_distribution_selection(self):
+        distribution = self._current_distribution_key
+        self._update_distribution_btn_text()
+        entry = self._distribution_registry.get_entry(distribution)
+        if entry and entry.special_ui == "segments":
             self.range_distribution_stack.setCurrentWidget(self.range_distribution_page_segments)
             if not self._segment_rule_rows:
                 self._add_segment_rule()
-        elif distribution in {"gaussian", "poisson", "exponential", "power_law"}:
+        elif entry and entry.params:
             self.range_distribution_stack.setCurrentWidget(self.range_distribution_page_advanced)
             self._update_advanced_distribution_fields()
         else:
             self.range_distribution_stack.setCurrentWidget(self.range_distribution_page_basic)
         self._refresh_dynamic_layout()
+        self._update_header()
+
+    def _update_distribution_btn_text(self):
+        entry = self._distribution_registry.get_entry(self._current_distribution_key)
+        text = entry.display_name if entry else self._current_distribution_key
+        self.range_distribution_btn.setText(f"  {text}  ▼")
+
+    def _show_distribution_menu(self):
+        menu = QMenu(self)
+        menu.setStyleSheet("""
+            QMenu {
+                background-color: white;
+                border: 1px solid #d0d0d0;
+                border-radius: 4px;
+                padding: 4px 0px;
+            }
+            QMenu::item {
+                padding: 6px 30px 6px 12px;
+                color: #333333;
+            }
+            QMenu::item:selected {
+                background-color: #0078d7;
+                color: white;
+            }
+            QMenu::separator {
+                height: 1px;
+                background: #e0e0e0;
+                margin: 4px 8px;
+            }
+        """)
+        grouped = self._distribution_registry.get_grouped_entries()
+        for item in grouped:
+            if item["type"] == "item":
+                entry = item["entry"]
+                action = menu.addAction(entry.display_name)
+                action.triggered.connect(lambda checked=False, k=entry.key: self._on_distribution_selected(k))
+            elif item["type"] == "group":
+                sub_menu = menu.addMenu(item["name"] + " ▸")
+                for entry in item["entries"]:
+                    action = sub_menu.addAction(entry.name)
+                    action.triggered.connect(lambda checked=False, k=entry.key: self._on_distribution_selected(k))
+        menu.exec_(self.range_distribution_btn.mapToGlobal(self.range_distribution_btn.rect().bottomLeft()))
+
+    def _on_distribution_selected(self, key: str):
+        if self._current_distribution_key == key:
+            return
+        self._current_distribution_key = key
+        self._apply_distribution_selection()
+
+    def _show_current_distribution_help(self):
+        entry = self._distribution_registry.get_entry(self._current_distribution_key)
+        if entry and entry.description:
+            QMessageBox.information(self, f"分布说明 - {entry.display_name}", entry.description)
+        else:
+            QMessageBox.information(self, "提示", "该分布暂无详细说明。")
+
+    def _on_range_distribution_changed(self, index):
+        pass
+
+    def _clear_advanced_params(self):
+        self._current_param_inputs.clear()
+        layout = self.range_advanced_params_layout
+        while layout.count():
+            item = layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
 
     def _update_advanced_distribution_fields(self):
+        self._clear_advanced_params()
         distribution = self._current_range_distribution()
-        if distribution == "gaussian":
-            self.range_advanced_label_primary.setText("均值")
-            self.range_advanced_input_primary.setPlaceholderText("如 50")
-            self.range_advanced_label_secondary.setVisible(True)
-            self.range_advanced_input_secondary.setVisible(True)
-            self.range_advanced_label_secondary.setText("标准差")
-            self.range_advanced_input_secondary.setPlaceholderText("如 10")
-            return
-        if distribution == "poisson":
-            self.range_advanced_label_primary.setText("lambda")
-            self.range_advanced_input_primary.setPlaceholderText("如 4")
-            self.range_advanced_label_secondary.setVisible(False)
-            self.range_advanced_input_secondary.setVisible(False)
-            return
-        if distribution == "exponential":
-            self.range_advanced_label_primary.setText("lambda")
-            self.range_advanced_input_primary.setPlaceholderText("如 1.5")
-            self.range_advanced_label_secondary.setVisible(False)
-            self.range_advanced_input_secondary.setVisible(False)
-            return
-        if distribution == "power_law":
-            self.range_advanced_label_primary.setText("alpha")
-            self.range_advanced_input_primary.setPlaceholderText("如 2.0")
-            self.range_advanced_label_secondary.setVisible(False)
-            self.range_advanced_input_secondary.setVisible(False)
+        entry = self._distribution_registry.get_entry(distribution)
+        if entry is None or not entry.params:
             return
 
-        self.range_advanced_label_primary.setText("参数")
-        self.range_advanced_input_primary.setPlaceholderText("")
-        self.range_advanced_label_secondary.setVisible(False)
-        self.range_advanced_input_secondary.setVisible(False)
+        for p_def in entry.params:
+            label = QLabel(p_def["label"])
+            label.setFont(self.bold_font)
+            input_field = QLineEdit()
+            input_field.setFixedWidth(100)
+            placeholder = p_def.get("placeholder", "")
+            if placeholder:
+                input_field.setPlaceholderText(placeholder)
+            input_field.textChanged.connect(self._update_header)
+            self._current_param_inputs[p_def["key"]] = input_field
+            self.range_advanced_params_layout.addWidget(label)
+            self.range_advanced_params_layout.addWidget(input_field)
+
+        self.range_advanced_params_layout.addStretch(1)
 
     def _add_segment_rule(self):
         row_widget = QWidget()
@@ -525,7 +564,7 @@ class VariableRowWidget(QFrame):
         self._refresh_dynamic_layout()
 
     def _current_range_distribution(self):
-        return self.range_distribution_map.get(self.range_distribution_combo.currentText(), "uniform")
+        return self._current_distribution_key
 
     def _refresh_dynamic_layout(self):
         for widget in (
@@ -564,28 +603,6 @@ class VariableRowWidget(QFrame):
         distribution = self._current_range_distribution()
         params = {"distribution": distribution}
 
-        if distribution == "edge_focused":
-            params["edge_bias"] = 0.6
-            return params
-
-        if distribution in {"gaussian", "poisson", "exponential", "power_law"}:
-            advanced_params = {}
-            primary = self.range_advanced_input_primary.text().strip()
-            secondary = self.range_advanced_input_secondary.text().strip()
-            if distribution == "gaussian":
-                if primary:
-                    advanced_params["mean"] = primary
-                if secondary:
-                    advanced_params["stddev"] = secondary
-            elif distribution in {"poisson", "exponential"}:
-                if primary:
-                    advanced_params["lambda"] = primary
-            elif distribution == "power_law" and primary:
-                advanced_params["alpha"] = primary
-            if advanced_params:
-                params["distribution_params"] = advanced_params
-            return params
-
         if distribution == "custom_segments":
             segments = []
             for rule in self._segment_rule_rows:
@@ -607,6 +624,22 @@ class VariableRowWidget(QFrame):
                 segments.append(segment)
             params["segments"] = segments
             return params
+
+        entry = self._distribution_registry.get_entry(distribution)
+        if entry and entry.params:
+            distribution_params = {}
+            for p_def in entry.params:
+                key = p_def["key"]
+                input_field = self._current_param_inputs.get(key)
+                value = ""
+                if input_field is not None:
+                    value = input_field.text().strip()
+                if value:
+                    distribution_params[key] = value
+                elif p_def.get("default") is not None:
+                    distribution_params[key] = p_def["default"]
+            if distribution_params:
+                params["distribution_params"] = distribution_params
 
         return params
 
@@ -632,7 +665,8 @@ class VariableRowWidget(QFrame):
             if vmin or vmax:
                 parts.append(f"{vmin or '…'}–{vmax or '…'}")
             distribution = self._current_range_distribution()
-            parts.append(self._distribution_label_map.get(distribution, "均匀随机"))
+            entry = self._distribution_registry.get_entry(distribution)
+            parts.append(entry.display_name if entry else "均匀随机")
             if distribution == "custom_segments":
                 parts.append(f"{len(self._segment_rule_rows)} 条规则")
         elif idx == 1:
