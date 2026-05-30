@@ -472,13 +472,18 @@ class VariableRowWidget(QFrame):
         self.range_advanced_params_layout.addStretch(1)
 
     def _add_segment_rule(self):
+        outer_widget = QWidget()
+        outer_layout = QVBoxLayout(outer_widget)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+        outer_layout.setSpacing(2)
+
         row_widget = QWidget()
         row_layout = QHBoxLayout(row_widget)
         row_layout.setContentsMargins(0, 0, 0, 0)
-        row_layout.setSpacing(6)
+        row_layout.setSpacing(4)
 
         prob_input = QLineEdit("30")
-        prob_input.setFixedWidth(60)
+        prob_input.setFixedWidth(50)
         prob_input.setAlignment(Qt.AlignCenter)
         row_layout.addWidget(prob_input)
 
@@ -490,15 +495,24 @@ class VariableRowWidget(QFrame):
         row_layout.addWidget(mode_combo)
 
         value_input_a = QLineEdit()
-        value_input_a.setFixedWidth(100)
+        value_input_a.setFixedWidth(72)
         row_layout.addWidget(value_input_a)
 
         between_label = QLabel("~")
         row_layout.addWidget(between_label)
 
         value_input_b = QLineEdit()
-        value_input_b.setFixedWidth(100)
+        value_input_b.setFixedWidth(72)
         row_layout.addWidget(value_input_b)
+
+        dist_combo = QComboBox()
+        sub_entries = self._distribution_registry.get_sub_distribution_entries()
+        self._segment_distribution_map = {}
+        for e in sub_entries:
+            label = e.name
+            self._segment_distribution_map[label] = e.key
+            dist_combo.addItem(label)
+        row_layout.addWidget(dist_combo)
 
         delete_btn = QPushButton("删除")
         delete_btn.setCursor(Qt.PointingHandCursor)
@@ -507,22 +521,30 @@ class VariableRowWidget(QFrame):
         row_layout.addStretch(1)
 
         rule = {
-            "widget": row_widget,
+            "outer_widget": outer_widget,
+            "row_widget": row_widget,
             "prob_input": prob_input,
             "mode_combo": mode_combo,
             "value_input_a": value_input_a,
             "between_label": between_label,
             "value_input_b": value_input_b,
+            "dist_combo": dist_combo,
             "delete_btn": delete_btn,
+            "sub_params_widget": None,
+            "sub_param_inputs": {},
         }
         self._segment_rule_rows.append(rule)
-        self.segment_rules_layout.addWidget(row_widget)
+        self.segment_rules_layout.addWidget(outer_widget)
+
+        outer_layout.addWidget(row_widget)
 
         mode_combo.currentIndexChanged.connect(lambda _: self._update_segment_rule_mode(rule))
         mode_combo.currentIndexChanged.connect(lambda _: self._update_header())
         prob_input.textChanged.connect(self._update_header)
         value_input_a.textChanged.connect(self._update_header)
         value_input_b.textChanged.connect(self._update_header)
+        dist_combo.currentIndexChanged.connect(lambda _: self._update_header())
+        dist_combo.currentIndexChanged.connect(lambda _: self._update_segment_sub_params(rule))
         delete_btn.clicked.connect(lambda: self._remove_segment_rule(rule))
 
         self._update_segment_rule_mode(rule)
@@ -532,8 +554,8 @@ class VariableRowWidget(QFrame):
         if rule not in self._segment_rule_rows:
             return
         self._segment_rule_rows.remove(rule)
-        rule["widget"].deleteLater()
-        self.segment_rules_layout.removeWidget(rule["widget"])
+        rule["outer_widget"].deleteLater()
+        self.segment_rules_layout.removeWidget(rule["outer_widget"])
         if not self._segment_rule_rows:
             self._add_segment_rule()
         self._update_header()
@@ -547,6 +569,8 @@ class VariableRowWidget(QFrame):
             rule["value_input_b"].setVisible(True)
             rule["value_input_a"].setPlaceholderText("最小值")
             rule["value_input_b"].setPlaceholderText("最大值")
+            rule["dist_combo"].setVisible(True)
+            self._update_segment_sub_params(rule)
             self._refresh_dynamic_layout()
             return
         if mode == "fixed":
@@ -554,6 +578,8 @@ class VariableRowWidget(QFrame):
             rule["between_label"].setVisible(False)
             rule["value_input_b"].setVisible(False)
             rule["value_input_a"].setPlaceholderText("固定值")
+            rule["dist_combo"].setVisible(False)
+            self._update_segment_sub_params(rule)
             self._refresh_dynamic_layout()
             return
 
@@ -561,7 +587,63 @@ class VariableRowWidget(QFrame):
         rule["between_label"].setVisible(False)
         rule["value_input_b"].setVisible(False)
         rule["value_input_a"].setPlaceholderText("留空使用默认边界")
+        rule["dist_combo"].setVisible(False)
+        self._update_segment_sub_params(rule)
         self._refresh_dynamic_layout()
+
+    def _update_segment_sub_params(self, rule):
+        mode = self._segment_mode_map.get(rule["mode_combo"].currentText(), "range")
+        sub_dist_label = rule["dist_combo"].currentText()
+        sub_dist_key = self._segment_distribution_map.get(sub_dist_label, "uniform")
+
+        old_widget = rule.get("sub_params_widget")
+        if old_widget is not None:
+            old_widget.hide()
+            layout = old_widget.parent().layout() if old_widget.parent() else None
+            if layout:
+                layout.removeWidget(old_widget)
+            old_widget.deleteLater()
+            rule["sub_params_widget"] = None
+            rule["sub_param_inputs"] = {}
+
+        if mode != "range" or sub_dist_key == "uniform":
+            return
+
+        entry = self._distribution_registry.get_entry(sub_dist_key)
+        if entry is None or not entry.params:
+            return
+
+        sub_widget = QWidget()
+        sub_layout = QHBoxLayout(sub_widget)
+        sub_layout.setContentsMargins(0, 0, 0, 0)
+        sub_layout.setSpacing(4)
+
+        inputs: dict = {}
+        for p_def in entry.params:
+            label = QLabel(p_def["label"])
+            label.setFont(self.bold_font)
+            inp = QLineEdit()
+            inp.setFixedWidth(60)
+            placeholder = p_def.get("placeholder", "")
+            if placeholder:
+                inp.setPlaceholderText(placeholder)
+            default_val = p_def.get("default")
+            if default_val is not None:
+                inp.setText(str(default_val))
+            inp.textChanged.connect(self._update_header)
+            inputs[p_def["key"]] = inp
+            sub_layout.addWidget(label)
+            sub_layout.addWidget(inp)
+
+        sub_layout.addStretch(1)
+
+        rule["sub_params_widget"] = sub_widget
+        rule["sub_param_inputs"] = inputs
+
+        outer_layout = rule["outer_widget"].layout()
+        if outer_layout:
+            outer_layout.addWidget(sub_widget)
+        sub_widget.show()
 
     def _current_range_distribution(self):
         return self._current_distribution_key
@@ -616,6 +698,19 @@ class VariableRowWidget(QFrame):
                 if mode == "range":
                     segment["min"] = value_a
                     segment["max"] = value_b
+                    sub_dist_label = rule["dist_combo"].currentText()
+                    sub_dist_key = self._segment_distribution_map.get(sub_dist_label, "uniform")
+                    if sub_dist_key != "uniform":
+                        segment["distribution"] = sub_dist_key
+                        sub_inputs = rule.get("sub_param_inputs", {})
+                        if sub_inputs:
+                            dist_params = {}
+                            for key, inp in sub_inputs.items():
+                                val = inp.text().strip()
+                                if val:
+                                    dist_params[key] = val
+                            if dist_params:
+                                segment["distribution_params"] = dist_params
                 elif mode == "fixed":
                     segment["value"] = value_a
                 else:

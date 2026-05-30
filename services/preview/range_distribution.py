@@ -133,6 +133,13 @@ def _generate_segment_value(*, var_type: str, vmin: float, vmax: float, segment:
     seg_max = _to_float(segment.get("max"), default=vmax)
     if seg_max < seg_min:
         seg_min, seg_max = seg_max, seg_min
+
+    sub_distribution = str(segment.get("distribution", "")).strip().lower()
+    if sub_distribution == "gaussian":
+        return _generate_gaussian(var_type=var_type, vmin=seg_min, vmax=seg_max, params=segment)
+    if sub_distribution == "poisson":
+        return _generate_poisson(var_type=var_type, vmin=seg_min, vmax=seg_max, params=segment)
+
     return _generate_uniform(var_type=var_type, vmin=seg_min, vmax=seg_max)
 
 

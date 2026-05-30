@@ -112,6 +112,16 @@ class DistributionRegistry:
             result.append({"type": "group", "name": group_name, "entries": entries})
         return result
 
+    def get_sub_distribution_entries(self) -> List[DistributionEntry]:
+        result: List[DistributionEntry] = []
+        uniform = self._entries.get("uniform")
+        if uniform:
+            result.append(uniform)
+        for entry in self._entries.values():
+            if entry.group and entry.key != "uniform":
+                result.append(entry)
+        return result
+
     @staticmethod
     def _resolve_function(qualified_path: str):
         try:
