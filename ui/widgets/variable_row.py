@@ -510,6 +510,52 @@ class VariableRowWidget(QFrame):
 
         return params
 
+    def _range_summary(self) -> str:
+        parts = []
+        vmin = self.range_min.text().strip()
+        vmax = self.range_max.text().strip()
+        if vmin or vmax:
+            parts.append(f"{vmin or '…'}–{vmax or '…'}")
+        distribution = self._current_range_distribution()
+        entry = self._distribution_registry.get_entry(distribution)
+        parts.append(entry.display_name if entry else "均匀随机")
+        if distribution == "custom_segments":
+            parts.append(f"{len(self._segment_rule_rows)} 条规则")
+        return " · ".join(parts)
+
+    def _range_params(self) -> dict:
+        params = {
+            "min": self.range_min.text(),
+            "max": self.range_max.text(),
+        }
+        params.update(self._collect_range_distribution_params())
+        return params
+
+    def _list_summary(self) -> str:
+        raw = self.list_input.text().strip()
+        if raw:
+            items = [s.strip() for s in raw.split(",") if s.strip()]
+            return f"{len(items)} 项"
+        return "空列表"
+
+    def _list_params(self) -> dict:
+        return {"items": self.list_input.text()}
+
+    def _charset_summary(self) -> str:
+        parts = []
+        length = self.char_len_input.text().strip()
+        charset = self.charset_combo.currentText()
+        if length:
+            parts.append(f"len {length}")
+        parts.append(charset)
+        return " · ".join(parts)
+
+    def _charset_params(self) -> dict:
+        return {
+            "length": self.char_len_input.text(),
+            "charset": self.charset_combo.currentText(),
+        }
+
     def _set_expanded(self, expanded: bool):
         self.details_container.setVisible(expanded)
         self.expand_btn.setArrowType(Qt.DownArrow if expanded else Qt.RightArrow)
@@ -526,33 +572,14 @@ class VariableRowWidget(QFrame):
         parts = [var_type, source]
 
         idx = self.source_combo.currentIndex()
-        if idx == 0:
-            vmin = self.range_min.text().strip()
-            vmax = self.range_max.text().strip()
-            if vmin or vmax:
-                parts.append(f"{vmin or '…'}–{vmax or '…'}")
-            distribution = self._current_range_distribution()
-            entry = self._distribution_registry.get_entry(distribution)
-            parts.append(entry.display_name if entry else "均匀随机")
-            if distribution == "custom_segments":
-                parts.append(f"{len(self._segment_rule_rows)} 条规则")
-        elif idx == 1:
-            raw = self.list_input.text().strip()
-            if raw:
-                items = [s.strip() for s in raw.split(",") if s.strip()]
-                parts.append(f"{len(items)} 项")
-            else:
-                parts.append("空列表")
-        elif idx == 2:
-            length = self.char_len_input.text().strip()
-            charset = self.charset_combo.currentText()
-            if length:
-                parts.append(f"len {length}")
-            parts.append(charset)
-        elif idx == 3:
-            code_summary = self.page_code.summary()
-            if code_summary:
-                parts.append(code_summary)
+        source_summary = {
+            0: self._range_summary,
+            1: self._list_summary,
+            2: self._charset_summary,
+            3: lambda: self.page_code.summary(),
+        }.get(idx, lambda: "")()
+        if source_summary:
+            parts.append(source_summary)
 
         parts.append(f"循环 {loop}")
         parts.append(f"分隔符 {sep_ui}")
@@ -587,19 +614,17 @@ class VariableRowWidget(QFrame):
         except ValueError:
             loop_count = 1
             
-        params = {}
+        params: dict = {}
         idx = self.source_combo.currentIndex()
-        if idx == 0: # 数据范围
-            params['min'] = self.range_min.text()
-            params['max'] = self.range_max.text()
-            params.update(self._collect_range_distribution_params())
-        elif idx == 1: # 列表选择
-            params['items'] = self.list_input.text()
-        elif idx == 2: # 字符集合
-            params['length'] = self.char_len_input.text()
-            params['charset'] = self.charset_combo.currentText()
-        elif idx == 3: # 来自代码
-            params['code'] = self.page_code.code_text()
+        params_getters = {
+            0: self._range_params,
+            1: self._list_params,
+            2: self._charset_params,
+            3: lambda: self.page_code.get_params(),
+        }
+        getter = params_getters.get(idx)
+        if getter:
+            params = getter()
             
         return VariableConfig(
             name=name,
