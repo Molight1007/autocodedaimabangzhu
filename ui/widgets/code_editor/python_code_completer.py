@@ -46,6 +46,8 @@ from .completion_parentheses import (
     collect_module_attr_metadata,
     should_insert_call_parentheses,
 )
+from .type_inferrer import TypeInferrer
+from .type_attr_cache import TypeAttrCache
 
 DEBUG_COMPLETER_TRACE = False
 
@@ -127,6 +129,9 @@ class PythonCodeCompleter(QObject):
         self._loaded_attr_modules: Set[str] = set()
         self._imported_modules: Set[str] = set()
         self._stdlib_modules: List[str] = self._build_stdlib_modules()
+
+        self._type_inferrer = TypeInferrer()
+        self._type_attr_cache = TypeAttrCache()
 
         self._rebuild_timer = QTimer(self)
         self._rebuild_timer.setSingleShot(True)
@@ -311,6 +316,8 @@ class PythonCodeCompleter(QObject):
         self._all_words = words
         self._imported_modules = self._extract_imported_modules(text)
         self._refresh_dynamic_attr_sources(self._imported_modules)
+        # 更新变量类型推断（供 obj.attr 补全使用）
+        self._type_inferrer.analyze(text)
 
     def _extract_imported_modules(self, text: str) -> Set[str]:
         imported: Set[str] = set()
@@ -481,6 +488,18 @@ class PythonCodeCompleter(QObject):
         elif obj_name and obj_name in self._attr_sources:
             base = self._attr_sources[obj_name]
             prefix = attr_prefix
+        elif obj_name:
+            # obj.attr 上下文：obj 不在已知模块中 → 尝试类型推断
+            inferred_type = self._type_inferrer.get_type(obj_name)
+            if inferred_type:
+                base = self._type_attr_cache.get_attrs(inferred_type)
+                prefix = attr_prefix
+            else:
+                base = self._all_words
+                prefix = self._current_prefix()
+                if not prefix and prev_char != ".":
+                    self._completer.popup().hide()
+                    return
         else:
             base = self._all_words
             prefix = self._current_prefix()
@@ -561,13 +580,19 @@ class PythonCodeCompleter(QObject):
                 block_text2 = cursor.block().text()
                 col2 = cursor.positionInBlock()
                 next_ch = block_text2[col2] if col2 < len(block_text2) else ""
-                if should_insert_call_parentheses(
+                should_paren = should_insert_call_parentheses(
                     completion=text,
                     next_char=next_ch,
                     attr_owner=attr_owner,
                     callable_builtins=self._callable_builtins,
                     callable_attr_sources=self._callable_attr_sources,
-                ):
+                )
+                # 类型推断扩展：属性补全时检查推断类型的可调用性
+                if not should_paren and attr_owner:
+                    inferred_type = self._type_inferrer.get_type(attr_owner)
+                    if inferred_type and text in self._type_attr_cache.get_callables(inferred_type):
+                        should_paren = True
+                if should_paren:
                     cursor.insertText("()")
                     cursor.movePosition(QTextCursor.Left)
             cursor.endEditBlock()

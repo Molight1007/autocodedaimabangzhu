@@ -1,7 +1,7 @@
 # 数据生成器 — 项目说明文档
 
 > **版本**：1.0.0　|　**技术栈**：Python + PySide6 + DeepSeek / OpenAI 兼容 API　|　**定位**：算法竞赛测试数据生成 & AI 辅助解题平台
-*最后修改时间：2026-05-29*
+*最后修改时间：2026-06-01*
 
 ---
 
@@ -78,7 +78,9 @@
 │       │   ├── python_syntax_highlighter.py   # Python 语法高亮
 │       │   ├── python_code_completer.py       # 代码补全
 │       │   ├── symbol_reference_highlighter.py # 同名标识符灰底高亮
-│       │   └── completion_parentheses.py      # 括号自动补全
+│       │   ├── completion_parentheses.py      # 括号自动补全决策
+│       │   ├── type_inferrer.py                # 变量类型推断（AST）
+│       │   └── type_attr_cache.py              # 类型属性 dir() 缓存
 │       ├── test_run/              # 测试运行子系统
 │       │   ├── run_controller.py              # 运行状态控制器
 │       │   ├── result_cache.py                # 运行结果缓存
@@ -435,7 +437,7 @@ params = {
 点击"生成"后弹出的综合工作台，包含：
 
 1. **数据预览区**：以 JSON 格式展示 `problem_set`（智能截断，单个 case 超过 80,000 字符时截断）
-2. **代码编辑器**：嵌入 `CodeEditorContainer`，支持 Python 语法高亮、代码补全、括号自动配对、`ast.parse + pyflakes` 语法/关键 lint 检测、大屏编辑界面的 `Ctrl+F / Ctrl+H` 查找替换、`Ctrl+/` 注释切换（批量改写后自动刷新错误检测）、`Ctrl + 滚轮` 字体缩放（限制最大/最小字号，并弹出 2 秒自动消失的字号提示）、按缩进层级绘制的淡色参考线，以及点击变量后的同名标识符灰底高亮；行号区、字体缩放、缩进参考线、注释切换等能力已拆分为独立子模块，AI 题目生成 / AI 解题左侧回显编辑器默认禁用同名变量高亮与缩放功能
+2. **代码编辑器**：嵌入 `CodeEditorContainer`，支持 Python 语法高亮、类型感知代码补全（关键字 + 内置函数 + 模块属性 + 用户变量 `obj.attr` 补全，通过 AST 推断变量类型并缓存 `dir()` 结果，可调用属性自动追加 `()`）、括号自动配对、`ast.parse + pyflakes` 语法/关键 lint 检测、`Ctrl+F / Ctrl+H` 查找替换、`Ctrl+/` 注释切换、`Ctrl + 滚轮` 字体缩放（带 2 秒自动消失的字号提示）、按缩进层级绘制的淡色参考线、同名标识符灰底高亮；AI 流式回显编辑器默认禁用补全、同名变量高亮与缩放功能
 3. **解题操作**：
    - **AI 生成解题代码**：调用 `build_solve_prompt` + LLM，生成 `solve(problem, data) -> dict` 函数
    - **AI 精炼对话**（`DeepSeekRefineDialog`）：打开独立对话框，支持流式输出、自治修复、双算法对拍验证
