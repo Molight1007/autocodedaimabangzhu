@@ -8,10 +8,9 @@ from PySide6.QtGui import QFont, QIcon
 from core.models import VariableConfig
 from services.preview.distribution_registry import get_distribution_registry
 from ..styles.variable_row_style import VARIABLE_ROW_QSS
-from .code_editor_dialog import CodeEditorDialog
-from .common.clickable_line_edit import ClickableLineEdit
 from .common.auto_sizing_stacked_widget import AutoSizingStackedWidget
 from ._variable_row.segment_rule_row import SegmentRuleRow
+from ._variable_row.code_source_widget import CodeSourceWidget
 
 
 class VariableRowWidget(QFrame):
@@ -24,8 +23,6 @@ class VariableRowWidget(QFrame):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("VariableRow")
-        self._code_text = ""
-        self._code_template = "generate_data"
         
         # 汉化映射字典
         self.type_map = {"整数": "Integer", "浮点数": "Float", "字符": "String"}
@@ -283,30 +280,9 @@ class VariableRowWidget(QFrame):
         self.charset_combo.currentIndexChanged.connect(self._update_header)
 
         # Page 3: 来自代码 (Code)
-        self.page_code = QWidget()
-        layout_code = QVBoxLayout(self.page_code)
-        layout_code.setContentsMargins(0, 5, 0, 0)
-        layout_code.setSpacing(8)
-
-        header_row = QHBoxLayout()
-        header_row.setSpacing(8)
-
-        lbl_code = QLabel("Python 表达式")
-        lbl_code.setFont(self.bold_font)
-        header_row.addWidget(lbl_code)
-        header_row.addStretch(1)
-
-        layout_code.addLayout(header_row)
-
-        self.code_preview = ClickableLineEdit()
-        self.code_preview.setReadOnly(True)
-        self.code_preview.setProperty("codePreview", True)
-        self.code_preview.setPlaceholderText("点击打开代码编辑器…")
-        self.code_preview.clicked.connect(self._open_code_editor_dialog)
-        layout_code.addWidget(self.code_preview)
-
+        self.page_code = CodeSourceWidget()
+        self.page_code.changed.connect(self._update_header)
         self.params_stack.addWidget(self.page_code)
-        self._sync_code_preview()
 
     def _init_range_distribution_pages(self):
         self.range_distribution_page_basic = QWidget()
@@ -574,9 +550,9 @@ class VariableRowWidget(QFrame):
                 parts.append(f"len {length}")
             parts.append(charset)
         elif idx == 3:
-            first_line = self._first_non_empty_line(self._code_text)
-            if first_line:
-                parts.append((first_line[:28] + "…") if len(first_line) > 28 else first_line)
+            code_summary = self.page_code.summary()
+            if code_summary:
+                parts.append(code_summary)
 
         parts.append(f"循环 {loop}")
         parts.append(f"分隔符 {sep_ui}")
@@ -623,7 +599,7 @@ class VariableRowWidget(QFrame):
             params['length'] = self.char_len_input.text()
             params['charset'] = self.charset_combo.currentText()
         elif idx == 3: # 来自代码
-            params['code'] = self._code_text
+            params['code'] = self.page_code.code_text()
             
         return VariableConfig(
             name=name,
@@ -634,32 +610,3 @@ class VariableRowWidget(QFrame):
             loop_count=loop_count,
             dependencies=[] 
         )
-
-    def _open_code_editor_dialog(self):
-        dlg = CodeEditorDialog(self, title="代码编辑器")
-        dlg.set_mode("generate_data")
-        if self._code_text.strip():
-            dlg.set_text(self._code_text)
-        else:
-            dlg.reset_template()
-        if dlg.exec():
-            self._code_text = dlg.get_text()
-            self._sync_code_preview()
-            self._update_header()
-
-    def _sync_code_preview(self):
-        first_line = self._first_non_empty_line(self._code_text)
-        if first_line:
-            shown = (first_line[:120] + "…") if len(first_line) > 120 else first_line
-            self.code_preview.setText(shown)
-            self.code_preview.setToolTip(first_line)
-        else:
-            self.code_preview.clear()
-            self.code_preview.setToolTip("")
-
-    def _first_non_empty_line(self, text: str) -> str:
-        for ln in (text or "").splitlines():
-            s = ln.strip()
-            if s:
-                return s
-        return ""
