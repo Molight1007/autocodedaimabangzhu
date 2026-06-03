@@ -38,12 +38,16 @@ def generate_range_value(
         return _generate_gaussian(var_type=var_type, vmin=vmin, vmax=vmax, params=params)
     if distribution == "poisson":
         return _generate_poisson(var_type=var_type, vmin=vmin, vmax=vmax, params=params)
+    if distribution == "exponential":
+        return _generate_exponential(var_type=var_type, vmin=vmin, vmax=vmax, params=params)
+    if distribution == "power_law":
+        return _generate_power_law(var_type=var_type, vmin=vmin, vmax=vmax, params=params)
 
     return _generate_uniform(var_type=var_type, vmin=vmin, vmax=vmax)
 
 
 def supported_distributions() -> Iterable[str]:
-    return ("uniform", "biased_low", "biased_high", "edge_focused", "custom_segments", "gaussian", "poisson")
+    return ("uniform", "biased_low", "biased_high", "edge_focused", "custom_segments", "gaussian", "poisson", "exponential", "power_law")
 
 
 def _generate_uniform(*, var_type: str, vmin: float, vmax: float) -> Any:
@@ -122,6 +126,29 @@ def _generate_poisson(*, var_type: str, vmin: float, vmax: float, params: Dict[s
     return int(round(value))
 
 
+def _generate_exponential(*, var_type: str, vmin: float, vmax: float, params: Dict[str, Any]) -> Any:
+    dist_params = params.get("distribution_params", {})
+    lambd = _to_float(dist_params.get("lambda"), default=1.0)
+    lambd = max(0.001, abs(lambd))
+    value = -math.log(max(1e-10, random.random())) / lambd
+    value = max(vmin, min(vmax, value))
+    if _is_float_type(var_type):
+        return float(value)
+    return int(round(value))
+
+
+def _generate_power_law(*, var_type: str, vmin: float, vmax: float, params: Dict[str, Any]) -> Any:
+    dist_params = params.get("distribution_params", {})
+    alpha = _to_float(dist_params.get("alpha"), default=2.0)
+    alpha = max(0.1, abs(alpha))
+    u = max(1e-10, random.random())
+    value = vmin / (u ** (1.0 / alpha))
+    value = max(vmin, min(vmax, value))
+    if _is_float_type(var_type):
+        return float(value)
+    return int(round(value))
+
+
 def _generate_segment_value(*, var_type: str, vmin: float, vmax: float, segment: Dict[str, Any]) -> Any:
     mode = str(segment.get("mode") or "range").strip().lower()
     if mode == "fixed":
@@ -139,6 +166,10 @@ def _generate_segment_value(*, var_type: str, vmin: float, vmax: float, segment:
         return _generate_gaussian(var_type=var_type, vmin=seg_min, vmax=seg_max, params=segment)
     if sub_distribution == "poisson":
         return _generate_poisson(var_type=var_type, vmin=seg_min, vmax=seg_max, params=segment)
+    if sub_distribution == "exponential":
+        return _generate_exponential(var_type=var_type, vmin=seg_min, vmax=seg_max, params=segment)
+    if sub_distribution == "power_law":
+        return _generate_power_law(var_type=var_type, vmin=seg_min, vmax=seg_max, params=segment)
 
     return _generate_uniform(var_type=var_type, vmin=seg_min, vmax=seg_max)
 

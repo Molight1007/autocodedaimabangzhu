@@ -5,6 +5,7 @@ import importlib
 import itertools
 import math
 import random
+import statistics
 import string
 from typing import Any, Callable, Dict, Hashable, List, Optional, TypeVar
 
@@ -517,6 +518,7 @@ def _safe_eval_expr(expr: str, env: Dict[str, Any]) -> Any:
         "itertools": itertools,
         "math": math,
         "random": random,
+        "statistics": statistics,
         "string": string,
     }
     return eval(compile(tree, "<preview_expr>", "eval"), safe_globals, env or {})
@@ -556,7 +558,7 @@ def _safe_exec_generate_data(code: str, env: Dict[str, Any]) -> Optional[str]:
     tree = ast.parse(code or "", mode="exec")
     _validate_safe_exec_ast(tree)
 
-    allowed_modules = {"random", "math", "itertools", "string"}
+    allowed_modules = {"random", "math", "itertools", "string", "statistics"}
 
     def safe_import(name, globals=None, locals=None, fromlist=(), level=0):
         root = (name or "").split(".", 1)[0]
@@ -569,6 +571,7 @@ def _safe_exec_generate_data(code: str, env: Dict[str, Any]) -> Optional[str]:
         "itertools": itertools,
         "math": math,
         "random": random,
+        "statistics": statistics,
         "string": string,
     }
 
@@ -597,7 +600,7 @@ def _safe_exec_generate_data_dict(code: str, env: Dict[str, Any]) -> Optional[Di
     tree = ast.parse(code or "", mode="exec")
     _validate_safe_exec_ast(tree)
 
-    allowed_modules = {"random", "math", "itertools", "string"}
+    allowed_modules = {"random", "math", "itertools", "string", "statistics"}
 
     def safe_import(name, globals=None, locals=None, fromlist=(), level=0):
         root = (name or "").split(".", 1)[0]
@@ -610,6 +613,7 @@ def _safe_exec_generate_data_dict(code: str, env: Dict[str, Any]) -> Optional[Di
         "itertools": itertools,
         "math": math,
         "random": random,
+        "statistics": statistics,
         "string": string,
     }
 
@@ -647,7 +651,7 @@ def _validate_safe_expr_ast(tree: ast.AST) -> None:
             elif isinstance(node.func, ast.Attribute):
                 if not isinstance(node.func.value, ast.Name):
                     raise ValueError("unsafe_attr_call")
-                if node.func.value.id not in {"random", "math", "itertools", "string"}:
+                if node.func.value.id not in {"random", "math", "itertools", "string", "statistics"}:
                     raise ValueError("unsafe_attr_call")
                 if node.func.attr.startswith("_"):
                     raise ValueError("unsafe_attr_call")
@@ -658,7 +662,7 @@ def _validate_safe_expr_ast(tree: ast.AST) -> None:
         if isinstance(node, ast.Attribute):
             if not isinstance(node.value, ast.Name):
                 raise ValueError("unsafe_attribute")
-            if node.value.id not in {"random", "math", "itertools", "string"}:
+            if node.value.id not in {"random", "math", "itertools", "string", "statistics"}:
                 raise ValueError("unsafe_attribute")
             if node.attr.startswith("_"):
                 raise ValueError("unsafe_attribute")
@@ -678,7 +682,7 @@ def _validate_safe_expr_ast(tree: ast.AST) -> None:
 
 
 def _validate_safe_exec_ast(tree: ast.AST) -> None:
-    allowed_modules = {"random", "math", "itertools", "string"}
+    allowed_modules = {"random", "math", "itertools", "string", "statistics"}
     blocked_call_names = {"exec", "eval", "compile", "open", "__import__", "input"}
 
     for node in ast.walk(tree):
