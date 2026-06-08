@@ -4,13 +4,7 @@ from typing import Any, Dict, Optional
 
 
 def build_generate_data_prompt(problem: Dict[str, Any], extra: Optional[str] = None) -> str:
-    """
-    构建测试数据生成任务的 user prompt（具体任务指令）。
-
-    角色定义和评分规则已通过 system prompt 注入，本函数只负责：
-    - 具体的题目约束数据
-    - 补充要求
-    """
+    """构建测试数据生成任务的 user prompt（具体任务指令）。"""
     extra = (extra or "").strip()
 
     lines = [
@@ -20,9 +14,25 @@ def build_generate_data_prompt(problem: Dict[str, Any], extra: Optional[str] = N
         repr(problem),
     ]
 
+    boundary_hint = (
+        "\n边界用例构造指南：\n"
+        "1. 仔细分析 problem 中的所有约束（数据规模、数值范围、结构限制、特殊条件等），\n"
+        "   在函数内定义 _fixed_boundary_cases 列表，包含若干**硬编码**的边界用例。\n"
+        "2. 边界用例的覆盖维度（根据题目类型选取适用的，无需全部覆盖）：\n"
+        "   - 规模极值：约束允许的最小/最大尺寸、最小/最大参数个数\n"
+        "   - 数值极值：所有输入项取约束范围内的最小值/最大值\n"
+        "   - 同质化输入：所有数据项取值相同、结构完全对称\n"
+        "   - 退化结构：单元素、单行/单列、仅有一个子结构、空输入（若题目允许）\n"
+        "   - 特殊分布：有序、逆序、交替、稀疏等（视题目而定）\n"
+        "   - 题目样例：描述中给出的样例数据可直接纳入固定用例\n"
+        "3. 每个固定用例的数据必须直接写死在代码中，不得在函数内用随机数生成。\n"
+        "4. 用例数量覆盖关键边界即可，5~15 个为宜，具体策略由 system prompt 指定。"
+    )
+
     if extra:
         lines += ["", "补充要求：", extra]
 
+    lines.append(boundary_hint)
     return "\n".join(lines)
 
 
@@ -137,27 +147,33 @@ finalize 前的自我审查清单（你必须思考，无需输出）：
 
 
 def get_generate_data_system_prompt() -> str:
-    """返回测试数据生成任务的系统提示词（角色定义）。
-
-    该提示词定义了数据生成专家的角色和行为约束，应作为 system prompt 使用。
-    具体的题目约束通过 user prompt 传入。
-    """
+    """返回测试数据生成任务的系统提示词（角色定义）。"""
     return """你是专业的测试数据生成器代码生成专家。
 
 核心职责：
 1. 生成符合题目约束的 Python 函数 `generate_data(problem: dict) -> dict`
-2. 返回格式：{'stdin': str（以\\n结尾）, 'stdout': '', 'title': str（硬编码，有且仅有一个）}
-3. 必须包含边界数据（最小值/最大值/空输入/极端分布）
+2. 返回格式：{'stdin': str（以\\n结尾）, 'stdout': '', 'title': str（固定为一个字符串，字符串为题目的简单描述）}
+3. 测试数据必须覆盖关键边界，确保测试有效性
 
-严格约束：
-- 禁止文件操作（open/write/read）、系统调用（subprocess/os.system）
-- 禁止动态执行（eval/exec）
-- 仅用标准库（random/math/itertools等），无print/debug/第三方库
-- 函数会被外部调用多次，代码仅负责单次逻辑，使用if判断不同约束
-- title 根据题目描述自动生成，简洁可读，多次调用保持一致
+环境说明：
+- 沙箱已预导入 random、math、itertools、string、statistics，可直接使用
+- 每次调用 generate_data 时整个脚本在全新 namespace 中重新执行，
+  因此**禁止**依赖全局变量、函数属性（如 generate_data.xxx）或闭包来跨调用保持状态
 
-安全红线：
-- 禁止文件读写、禁止网络访问、禁止系统调用、禁止危险操作"""
+数据生成策略（必须遵守，违反将导致不合格）：
+1. 函数内定义一个局部列表 _fixed_boundary_cases，内含至少 3 个**硬编码**的边界用例。
+   用例需根据 problem 具体约束精心设计，覆盖以下维度中适用的项目：
+   - 规模极值、数值极值、同质化输入、退化结构、特殊分布、题目样例
+   用例用紧凑格式存储（如解包成参数元组），实际输入字符串在选中后才构造，减少重复开销。
+2. 采用 "70% 边界 + 30% 随机" 策略：
+   - 若 random.random() < 0.7：使用 random.choice 从 _fixed_boundary_cases 中随机选取一个
+   - 否则：使用随机方法生成，随机部分也应覆盖约束范围的极端
+3. 严禁只使用 random.randint 等纯随机方式而没有定义硬编码边界用例。
+4. 严禁使用 random.sample 选取固定用例（分布不均），必须用 random.choice。
+
+约束：
+- 禁止文件操作、系统调用、动态执行（eval/exec）、网络访问、危险操作
+- 仅用标准库（random/math/itertools 等），禁止 print/debug/第三方库"""
 
 
 def get_generate_data_system_prompt_with_scoring() -> str:
@@ -179,6 +195,25 @@ def get_generate_data_system_prompt_with_scoring() -> str:
   else: score=1
 - 若 problem 含 'score_range': [min,max]，需将 score 映射到该范围"""
     return base + scoring_rules
+
+
+def get_generate_data_autonomous_guidance() -> str:
+    """返回数据生成模式下自治修复 Agent 的附加指导，追加到 Agent system prompt 尾部。
+
+    自治修复 Agent 有自己固定的 JSON 动作协议（read/run/modify/self_test/finalize），
+    本函数只追加与数据生成任务相关的策略约束，不改动协议部分。
+    """
+    return """
+
+========== 当前任务类型：测试数据生成 ==========
+你不是在解算法题，而是生成测试数据。除上述协议外，你生成的代码必须遵守以下规则：
+
+1. 函数签名：generate_data(problem: dict) -> dict
+2. 返回格式：{'stdin': str（以\\n结尾）, 'stdout': '', 'title': str}
+3. 函数内定义 _fixed_boundary_cases 列表，含至少 3 个硬编码边界用例
+4. 采用 70%边界 + 30%随机策略：random.random() < 0.7 时用 random.choice 从列表中选取
+5. 严禁依赖全局变量、函数属性或闭包跨调用保持状态
+6. 边界用例用紧凑格式存储（如参数元组），输入字符串在选中后才构造"""
 
 
 def get_solve_system_prompt() -> str:

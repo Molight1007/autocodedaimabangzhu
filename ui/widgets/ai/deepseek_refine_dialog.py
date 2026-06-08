@@ -82,6 +82,7 @@ from utils.ai_text_utils import clip_text
 from .prompt_builder import build_refine_prompt, parse_score_range
 from services.prompts.prompt_builders import (
     get_agent_system_prompt,
+    get_generate_data_autonomous_guidance,
     get_generate_data_system_prompt,
     get_generate_data_system_prompt_with_scoring,
     get_solve_system_prompt,
@@ -419,8 +420,9 @@ class DeepSeekRefineDialog(QDialog):
 
     def _build_autonomous_runtime_context(self, problem: Dict[str, Any]) -> Dict[str, Any]:
         samples = self._collect_data_samples_for_autonomous(problem)
-        # 调用 get_agent_system_prompt 获取权威 system 提示词
         system_prompt = get_agent_system_prompt()
+        if self._task_name == "generate_data":
+            system_prompt += get_generate_data_autonomous_guidance()
         return {
             "problem": dict(problem or {}),
             "data_samples": samples,
