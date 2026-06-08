@@ -2,19 +2,20 @@
 
 核心职责：
 - 驱动 “模型决策 -> 动作分发 -> 结果回填” 的闭环迭代。
-- 在不保存代码历史的前提下，利用固定题目卡 + 动态短上下文完成多轮修复。
-- 内置防死循环控制（最大尝试次数、协议错误阈值、无进展阈值）。
+- 维护 OpenAI 兼容消息窗口，固定保留 system / 题目 / 最新代码三条消息。
+- 内置防死循环控制（最大尝试次数、协议错误阈值、无进展阈值、重复动作阈值）。
 
 不负责：
 - 不实现代码执行细节（由 runtime executor 注入 dispatcher）。
 - 不管理多会话池；调用方持有并传入单个会话状态对象。
 
 数据流：
-- `problem + state.recent_events` -> 组装上下文 -> LLM 输出动作 JSON ->
-  dispatcher 执行动作 -> 结果摘要写回上下文 -> 下一轮。
+- `problem + state.current_code` -> 组装固定消息 ->
+  LLM 输出动作 JSON -> dispatcher 执行动作 ->
+  结果摘要写回动态消息窗口 -> 下一轮。
 
 约束：
-- 默认最多尝试 15 次，可通过配置覆盖。
+- 默认最多尝试 30 次，可通过配置覆盖。
 - 对外只返回最终摘要与 final_code，不暴露隐藏测试细节。
 """
 
@@ -30,22 +31,20 @@ from ..contracts.protocol import (
     ACTION_READ,
     ACTION_RUN,
     ACTION_SELF_TEST,
+    CODE_CONTEXT_MAX_CHARS,
     DEFAULT_CONTEXT_ROUNDS,
     DEFAULT_MAX_AUTONOMOUS_ATTEMPTS,
+    MAX_SAME_ACTION_ROUNDS,
     MAX_CONTEXT_ROUNDS,
+    PROBLEM_CONTEXT_MAX_CHARS,
     RESULT_FINALIZE_OK,
     RESULT_MODIFY_OK,
     RESULT_PROTOCOL_ERROR,
 )
 from ..session.state import AgentSessionState
 from ..verifier.agent_utils import append_agent_trace_code_version, append_agent_trace_message
-from .context_tools import (
-    _find_latest_read_preview,
-    build_dynamic_context,
-    build_problem_card,
-    trim_recent_events,
-)
 from .dispatcher import ActionDispatcher, RunExecutor
+from .messages import AutonomousMessageManager
 
 LlmCaller = Callable[[List[Dict[str, str]]], Any]
 
@@ -62,7 +61,10 @@ class LoopConfig:
     max_protocol_errors: int = 3
     max_no_progress_rounds: int = 5
     context_rounds: int = DEFAULT_CONTEXT_ROUNDS
-    problem_card_max_chars: int = 1800
+    problem_message_max_chars: int = PROBLEM_CONTEXT_MAX_CHARS
+    code_message_max_chars: int = CODE_CONTEXT_MAX_CHARS
+    # 兼容旧配置项：历史上这里是“题目卡”的最大长度，现已切换为固定题目消息。
+    problem_card_max_chars: int = PROBLEM_CONTEXT_MAX_CHARS
     on_step_callback: Optional[Callable[[Dict[str, Any]], None]] = None
     should_stop: Optional[Callable[[], bool]] = None
 
@@ -83,8 +85,22 @@ def run_autonomous_loop(
 
     protocol_errors = 0
     no_progress_rounds = 0
+    repeated_action_name = ""
+    repeated_action_rounds = 0
     stop_reason_override = ""
     steps: List[Dict[str, Any]] = []
+    problem_max_chars = max(512, int(cfg.problem_message_max_chars or cfg.problem_card_max_chars or PROBLEM_CONTEXT_MAX_CHARS))
+    code_max_chars = max(512, int(cfg.code_message_max_chars or CODE_CONTEXT_MAX_CHARS))
+    message_manager = AutonomousMessageManager(
+        system_prompt=_resolve_system_prompt(state),
+        problem=dict(problem or {}),
+        code_text=state.current_code,
+        version=state.version,
+        code_hash=state.code_hash,
+        max_rounds=context_rounds,
+        problem_max_chars=problem_max_chars,
+        code_max_chars=code_max_chars,
+    )
     _append_trace(
         state,
         "loop_start",
@@ -92,8 +108,10 @@ def run_autonomous_loop(
             "max_attempts": max_attempts,
             "max_protocol_errors": max_protocol_errors,
             "max_no_progress_rounds": max_no_progress_rounds,
+            "max_same_action_rounds": int(MAX_SAME_ACTION_ROUNDS),
             "context_rounds": context_rounds,
-            "problem_card_max_chars": int(cfg.problem_card_max_chars or 1800),
+            "problem_message_max_chars": problem_max_chars,
+            "code_message_max_chars": code_max_chars,
         },
     )
 
@@ -101,13 +119,7 @@ def run_autonomous_loop(
         if _should_stop(cfg):
             _append_trace(state, "loop_stopped", {"attempt": attempt, "reason": "interruption_requested"})
             break
-        messages, _ = _build_messages(
-            problem=problem,
-            state=state,
-            attempt_idx=attempt,
-            config=cfg,
-            context_rounds=context_rounds,
-        )
+        messages = message_manager.build_messages()
         llm_output = llm_caller(messages)
         if _should_stop(cfg):
             _append_trace(state, "loop_stopped", {"attempt": attempt, "reason": "interruption_requested_after_llm"})
@@ -123,6 +135,7 @@ def run_autonomous_loop(
                 },
             )
         if not action_payload:
+            message_manager.append_invalid_output(attempt=attempt, raw_output=llm_output)
             protocol_errors += 1
             state.push_event(
                 action="invalid",
@@ -150,7 +163,9 @@ def run_autonomous_loop(
                 break
             continue
 
+        before_version = int(state.version)
         before_hash = str(state.code_hash)
+        before_code = str(state.current_code or "")
         result = dispatcher.dispatch(action_payload, state)
         result_type = str((result or {}).get("type") or "")
         protocol_error_code = str((result or {}).get("error_code") or "")
@@ -162,6 +177,22 @@ def run_autonomous_loop(
                 "action": str(action_payload.get("action") or ""),
                 "result_type": result_type,
             },
+        )
+        message_manager.append_action_summary(attempt=attempt, action_payload=action_payload)
+        if (
+            int(state.version) != before_version
+            or str(state.code_hash or "") != before_hash
+            or str(state.current_code or "") != before_code
+        ):
+            message_manager.update_code(
+                code_text=state.current_code,
+                version=state.version,
+                code_hash=state.code_hash,
+            )
+        message_manager.append_result_summary(
+            attempt=attempt,
+            action_payload=action_payload,
+            result=dict(result or {}),
         )
         step_info = {
             "attempt": attempt,
@@ -226,6 +257,28 @@ def run_autonomous_loop(
 
         after_hash = str(state.code_hash)
         action_name = str(action_payload.get("action") or "")
+        if action_name == ACTION_READ:
+            repeated_action_name = ""
+            repeated_action_rounds = 0
+        elif action_name:
+            if action_name == repeated_action_name:
+                repeated_action_rounds += 1
+            else:
+                repeated_action_name = action_name
+                repeated_action_rounds = 1
+            if repeated_action_rounds >= int(MAX_SAME_ACTION_ROUNDS):
+                stop_reason_override = "same_action_limit_reached"
+                _append_trace(
+                    state,
+                    "loop_stop_reason",
+                    {
+                        "attempt": attempt,
+                        "reason": stop_reason_override,
+                        "action": action_name,
+                        "same_action_rounds": repeated_action_rounds,
+                    },
+                )
+                break
         if action_name == ACTION_MODIFY and before_hash != after_hash:
             no_progress_rounds = 0
         elif action_name in {ACTION_RUN, ACTION_MODIFY, ACTION_SELF_TEST}:
@@ -279,23 +332,7 @@ def create_autonomous_dispatcher(*, run_executor: Optional[RunExecutor] = None) 
     return ActionDispatcher(run_executor=run_executor)
 
 
-def _build_messages(
-    *,
-    problem: Dict[str, Any],
-    state: AgentSessionState,
-    attempt_idx: int,
-    config: LoopConfig,
-    context_rounds: int,
-) -> tuple[List[Dict[str, str]], str]:
-    """构造最小上下文。
-
-    只包含系统规则、固定题目卡、动态短上下文；不直接注入代码全文。
-    若模型需要代码，必须先调用 `read`。
-
-    返回 (messages, dynamic_context_text) —— dynamic_context_text 仅用于日志追踪，
-    不含 system_prompt 和 problem_card（两者已在 loop_start 中记录）。
-    """
-
+def _resolve_system_prompt(state: AgentSessionState) -> str:
     system_prompt = str(state.runtime_context.get("agent_system_prompt") or "").strip()
     if not system_prompt:
         system_prompt = (
@@ -311,25 +348,9 @@ def _build_messages(
             "5) finalize: {\"action\":\"finalize\",\"code_hash\":\"可选\"}\n"
             "关键约束：modify 没有 code 字段会被判定 protocol_error(missing_field)；run 必须有 use_current=true 或 code 字段之一。\n"
             "如果题目复杂可按需调用 read(target=data_sample) 获取当前最短测试数据源结构。\n"
-            "如果 read(target=data_sample) 返回 data_sample_too_complex，表示样本过大，需要人工提供精简样例后再继续。\n"
-            "如果你需要先查看题目和代码，请先 read(target=all)；拿到内容后再给 modify 或 run。"
+            "如果 read(target=data_sample) 返回 data_sample_too_complex，表示样本过大，需要人工提供精简样例后再继续。"
         )
-
-    problem_card_max_chars = int(config.problem_card_max_chars or 1800)
-    recent = trim_recent_events(state.recent_events, max_rounds=context_rounds)
-    latest_read_preview = _find_latest_read_preview(recent)
-    problem_text = build_problem_card(problem, max_chars=problem_card_max_chars)
-    dynamic_text = build_dynamic_context(
-        attempt_idx=attempt_idx,
-        session_id=state.session_id,
-        version=state.version,
-        code_hash=state.code_hash,
-        recent_events=recent,
-        latest_read_preview=latest_read_preview,
-        version_snapshots=state.version_snapshots,
-    )
-    user_text = f"{problem_text}\n\n{dynamic_text}\n请输出下一步 JSON 动作。"
-    return [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_text}], dynamic_text
+    return system_prompt
 
 
 def _normalize_llm_action(raw: Any) -> Dict[str, Any]:

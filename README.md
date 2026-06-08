@@ -1,7 +1,7 @@
 # 数据生成器 — 项目说明文档
 
 > **版本**：1.0.0　|　**技术栈**：Python + PySide6 + DeepSeek / OpenAI 兼容 API　|　**定位**：算法竞赛测试数据生成 & AI 辅助解题平台
-*最后修改时间：2026-06-03*
+*最后修改时间：2026-06-08*
 
 ---
 
@@ -448,7 +448,7 @@ params = {
 
 核心功能：
 - **普通模式**：单次 LLM 调用，流式展示思维链（`reasoning_content`）和代码（`content`）
-- **自治修复模式**：启动 `AutonomousFixWorker`（QThread），驱动 Isolated Agent 引擎多轮迭代，UI 实时更新每步动作日志
+- **自治修复模式**：启动 `AutonomousFixWorker`（QThread），驱动 Isolated Agent 引擎多轮迭代；固定保留 system / 题目 / 最新代码三条消息，动态区仅保留最近 15 轮交互
 - **双算法对拍验证**：与自治修复**互斥独立**，勾选后直接调用 `verify_with_cross_agent`，不再事先运行 `solve_with_agent`，需手动开启
 
 ---
@@ -466,7 +466,8 @@ facade.py          ← 外部调用唯一入口
        ├─ api.py               ← create_session / run_autonomous_session
        ├─ autonomous_loop.py   ← 自治循环主驱动
        ├─ dispatcher.py        ← 动作分发路由
-       └─ context_tools.py     ← 上下文组装工具
+       ├─ messages.py          ← 自治消息窗口管理
+       └─ context_tools.py     ← 兼容保留的上下文工具
   └─ session/
        └─ state.py             ← 会话状态容器
   └─ runtime/
@@ -494,7 +495,7 @@ result = solve_with_agent(
         "checker": None,           # 自定义校验函数（可选）
         "agent_system_prompt": "", # 自定义系统提示词（可选）
     },
-    max_attempts=15,               # 最大自治轮数
+    max_attempts=30,               # 最大自治轮数
     context_rounds=15,             # 保留的历史事件数
     session_id="my-session",       # 会话 ID
     on_step_callback=callback,     # 每步回调（可选，用于 UI 更新）
@@ -550,18 +551,18 @@ Agent 每轮只能输出一个合法 JSON 动作，协议定义在 `contracts/pr
 ### 自治循环（`controller/autonomous_loop.py`）
 
 ```
-初始化 LoopConfig（max_attempts=15, max_protocol_errors=3, max_no_progress_rounds=5）
+初始化 LoopConfig（max_attempts=30, max_protocol_errors=3, max_no_progress_rounds=5）
 
 for attempt in range(1, max_attempts+1):
     1. 检查中断信号（should_stop）
-    2. 组装上下文消息（system_prompt + 固定题目卡 + 动态上下文）
+    2. 组装上下文消息（system_prompt + 固定题目 + 当前最新代码 + 最近 15 轮动态消息）
     3. 调用 llm_caller(messages) → 获取 LLM 输出
     4. 解析 LLM 输出为 action_payload（JSON）
        ├─ 解析失败 → protocol_error++，若达上限则退出
     5. dispatcher.dispatch(action_payload, state) → 执行动作
     6. 记录 step_info，触发 on_step_callback
     7. 若 result_type == finalize_ok → 返回 passed=True
-    8. 若连续 5 轮无代码变化 → 退出（no_progress_limit_reached）
+    8. 若连续 5 轮无代码变化，或连续 5 轮卡在同一个非 read 动作 → 退出
 
 返回 passed=False + final_code + summary
 ```
@@ -569,7 +570,7 @@ for attempt in range(1, max_attempts+1):
 **防死循环机制**：
 - `max_protocol_errors=3`：连续 3 次协议错误则退出
 - `max_no_progress_rounds=5`：连续 5 轮 run/modify/self_test 而代码哈希不变则退出
-- `max_attempts=15`：硬上限
+- `max_attempts=30`：硬上限
 
 ### 沙箱执行器（`runtime/executor.py`）
 
@@ -906,8 +907,8 @@ facade.solve_with_agent(problem, candidate_code, llm_caller, runtime_context)
 create_session(session_id, candidate_code, ...)
         ↓
 run_autonomous_loop(state, problem, llm_caller, dispatcher)
-  for attempt 1..15:
-    build_messages(problem, state.recent_events)
+  for attempt 1..30:
+    build_messages(system, problem, latest_code, recent_dialog_turns)
     llm_caller(messages) → action_json
     dispatcher.dispatch(action_json, state):
       read   → 返回代码/题目/数据样本
@@ -915,6 +916,8 @@ run_autonomous_loop(state, problem, llm_caller, dispatcher)
       run    → guard检查 → subprocess执行 → checker判断right/wrong
       self_test → 多用例稳定性验证
       finalize → can_finalize()? → 成功退出
+    append_message(assistant_action_summary, user_result_summary)
+    update_fixed_code_message_if_needed()
     push_event(action, result_type, ...)
     on_step_callback(step_info) → 更新 UI
         ↓
@@ -946,7 +949,7 @@ facade.verify_with_cross_agent(problem, candidate_code, test_cases, llm_caller_f
 | **Agent 与 UI 解耦** | Agent 引擎纯 Python，不依赖 PySide6；UI 通过 `on_step_callback` 注入回调 | Agent 可独立测试和复用，UI 层替换不影响业务逻辑 |
 | **子进程执行沙箱** | 用 `subprocess.run` 在独立进程执行候选代码 | 彻底隔离，主进程不受候选代码崩溃/无限循环影响 |
 | **双重安全检查** | 执行前 AST 静态守卫 + 运行时子进程隔离 | AST 拦截明显危险代码，子进程提供运行时隔离兜底 |
-| **分层上下文设计** | Agent 上下文采用“固定题目卡 + 动态上下文”双层结构，不默认注入完整代码 | 在保持题意稳定的同时控制 token 消耗，并提高稳定前缀缓存命中；完整原题/代码由 `read` 按需获取 |
+| **固定消息窗口设计** | Agent 上下文固定保留 system / 题目 / 最新代码三条消息，后续仅保留最近 15 轮动态交互 | 在显著降低“失忆”概率的同时控制 token 消耗，完整原题/代码仍可由 `read` 按需获取 |
 | **对拍隔离** | 两个 Agent 完全独立会话，prompt 强制指定不同算法路径 | 防止 LLM 在同一上下文中生成结构相似的"两份"代码 |
 | **降级策略** | Verifier 在任何异常情况下均降级为 skip，不抛异常；若仅单边 Agent 成功则保留该代码返回 | 对拍验证是加分项，不能因验证失败阻塞主流程，同时尽量保留已得到的可用代码 |
 | **版本哈希追踪** | `code_hash = SHA256(current_code)` | 检测无进展循环（modify 后哈希不变 = Agent 在原地打转） |
@@ -1010,7 +1013,7 @@ result = solve_with_agent(
     candidate_code="def solve(problem, data): return {'stdout': ''}",
     llm_caller=llm_caller,
     runtime_context={"stdin": "2\n1 2\n", "expected_stdout": "3\n"},
-    max_attempts=15,
+    max_attempts=30,
 )
 print(result["passed"])      # True/False
 print(result["final_code"])  # 最终代码
