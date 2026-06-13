@@ -12,6 +12,7 @@ from typing import Any, Callable, Dict, Hashable, List, Optional, TypeVar
 from core.models import VariableConfig
 from services.preview.range_distribution import generate_range_value as generate_range_distribution_value
 from services.preview.preview_policy import PreviewPolicy, truncate_cell
+from utils.text_syntax import expand_charset_spec, parse_escaped_csv
 
 
 T = TypeVar("T")
@@ -173,7 +174,7 @@ def _build_cases(configs: List[VariableConfig], rows: int, *, no_duplicates: boo
 
 
 def _generate_cell_text_and_extra(cfg: VariableConfig, env: Dict[str, Any]) -> tuple[str, Optional[Dict[str, Any]]]:
-    loop_count = _resolve_int_expr(cfg.loop_count, default=1, env=env, min_value=1)
+    loop_count = _resolve_loop_count(cfg.loop_count, env)
 
     sep = "" if cfg.separator is None else str(cfg.separator)
     parts: List[str] = []
@@ -240,7 +241,7 @@ def _build_code_fallback_data(error: Any, meta: Optional[Dict[str, Any]] = None)
 
 
 def _preview_cell(cfg: VariableConfig, policy: PreviewPolicy, env: Dict[str, Any]) -> Any:
-    loop_count = _resolve_int_expr(cfg.loop_count, default=1, env=env, min_value=1)
+    loop_count = _resolve_loop_count(cfg.loop_count, env)
 
     max_items = max(1, int(policy.max_loop_items_per_cell))
     emit_count = min(loop_count, max_items)
@@ -307,7 +308,7 @@ def _generate_range_value(var_type: str, params: Dict[str, Any], env: Dict[str, 
 
 def _generate_list_value(params: Dict[str, Any]) -> str:
     raw = str(params.get("items") or "")
-    items = [s.strip() for s in raw.split(",") if s.strip()]
+    items = parse_escaped_csv(raw)
     if not items:
         return ""
     return random.choice(items)
@@ -316,10 +317,10 @@ def _generate_list_value(params: Dict[str, Any]) -> str:
 def _generate_charset_value(params: Dict[str, Any], env: Dict[str, Any]) -> str:
     min_len, max_len = _resolve_range_or_single_expr(params.get("length"), default_min=10, default_max=10, env=env)
     length = random.randint(int(min_len), int(max_len))
-    charset = str(params.get("charset") or "a-zA-Z0-9")
-    alphabet = _charset_to_alphabet(charset)
+    charset = str(params.get("charset") or "a-zA-Z0-9").strip()
+    alphabet = expand_charset_spec(charset)
     if not alphabet:
-        alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+        alphabet = expand_charset_spec("a-zA-Z0-9")
     return "".join(random.choice(alphabet) for _ in range(max(0, length)))
 
 
@@ -457,14 +458,13 @@ def _resolve_range_or_single_expr(value: Any, default_min: float, default_max: f
         return n, n
 
 
-def _charset_to_alphabet(charset: str) -> str:
-    mapping = {
-        "a-z": "abcdefghijklmnopqrstuvwxyz",
-        "A-Z": "ABCDEFGHIJKLMNOPQRSTUVWXYZ",
-        "0-9": "0123456789",
-        "a-zA-Z0-9": "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
-    }
-    return mapping.get(charset, "")
+def _resolve_loop_count(value: Any, env: Dict[str, Any]) -> int:
+    min_count, max_count = _resolve_range_or_single_expr(value, default_min=1, default_max=1, env=env)
+    lo = max(1, int(min_count))
+    hi = max(1, int(max_count))
+    if hi < lo:
+        lo, hi = hi, lo
+    return random.randint(lo, hi)
 
 
 def _unique_column_names(names: List[str]) -> List[str]:

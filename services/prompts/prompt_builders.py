@@ -152,7 +152,7 @@ def get_generate_data_system_prompt() -> str:
 
 核心职责：
 1. 生成符合题目约束的 Python 函数 `generate_data(problem: dict) -> dict`
-2. 返回格式：{'stdin': str（以\\n结尾）, 'stdout': '', 'title': str（固定为一个字符串，字符串为题目的简单描述）}
+2. 返回格式：{'stdin': str（以\\n结尾）, 'stdout': '', 'title': str（固定为一个字符串，字符串为对本题的极简描述，禁止过长）}
 3. 测试数据必须覆盖关键边界，确保测试有效性
 
 环境说明：

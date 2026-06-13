@@ -7,6 +7,7 @@ from PySide6.QtCore import Signal, Qt, QSize
 from PySide6.QtGui import QFont, QIcon
 from core.models import VariableConfig
 from services.preview.distribution_registry import get_distribution_registry
+from utils.text_syntax import parse_escaped_csv
 from ..styles.variable_row_style import VARIABLE_ROW_QSS
 from .common.auto_sizing_stacked_widget import AutoSizingStackedWidget
 from ._variable_row.segment_rule_row import SegmentRuleRow
@@ -125,6 +126,8 @@ class VariableRowWidget(QFrame):
         self.loop_input = QLineEdit("1")
         self.loop_input.setFixedWidth(60)
         self.loop_input.setAlignment(Qt.AlignCenter)
+        self.loop_input.setPlaceholderText("1 or 1,1000")
+        self.loop_input.setToolTip("支持固定次数、变量表达式，或使用 1,1000 表示随机循环次数区间")
         self.top_row_layout.addWidget(self.loop_input)
 
         lbl_sep = QLabel("分隔符")
@@ -272,12 +275,24 @@ class VariableRowWidget(QFrame):
         layout_charset.addWidget(lbl_set)
         
         self.charset_combo = QComboBox()
-        self.charset_combo.addItems(["a-z", "A-Z", "0-9", "a-zA-Z0-9", "自定义"])
+        self.charset_combo.setEditable(True)
+        self.charset_combo.addItems([
+            "a-z",
+            "A-Z",
+            "0-9",
+            "a-zA-Z0-9",
+            "A-Z,a-z,0-9",
+            r"A-Z,a-z,0-9,。,！,？,<,>",
+        ])
+        self.charset_combo.setCurrentText("a-zA-Z0-9")
+        self.charset_combo.setToolTip("支持 A-Z / a-z / 0-9 关键字，也支持逗号分隔的字面量；英文逗号请写成 \\,")
+        if self.charset_combo.lineEdit() is not None:
+            self.charset_combo.lineEdit().setPlaceholderText(r"A-Z,a-z,0-9,。,！,？,<,> 或 hello,world,\,")
         layout_charset.addWidget(self.charset_combo)
         
         self.params_stack.addWidget(self.page_charset)
         self.char_len_input.textChanged.connect(self._update_header)
-        self.charset_combo.currentIndexChanged.connect(self._update_header)
+        self.charset_combo.currentTextChanged.connect(self._update_header)
 
         # Page 3: 来自代码 (Code)
         self.page_code = CodeSourceWidget()
@@ -534,7 +549,7 @@ class VariableRowWidget(QFrame):
     def _list_summary(self) -> str:
         raw = self.list_input.text().strip()
         if raw:
-            items = [s.strip() for s in raw.split(",") if s.strip()]
+            items = parse_escaped_csv(raw)
             return f"{len(items)} 项"
         return "空列表"
 
@@ -609,10 +624,7 @@ class VariableRowWidget(QFrame):
         ui_sep = self.separator_combo.currentText()
         separator = self.separator_map.get(ui_sep, "\n")
         
-        try:
-            loop_count = int(self.loop_input.text())
-        except ValueError:
-            loop_count = 1
+        loop_count = self.loop_input.text().strip() or "1"
             
         params: dict = {}
         idx = self.source_combo.currentIndex()

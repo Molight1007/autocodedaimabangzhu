@@ -8,7 +8,7 @@ TEMPLATE_GENERATE_DATA = """def generate_data(problem: dict) -> dict:
 
     返回值 dict 约定（最小要求）：
     - stdin: str                # 必须，整份输入内容，建议以 '\\n' 结尾
-    - stdout: str               # 必须保留键，可留空字符串
+    - stdout: str               # 必须保留键，但留空字符串
     - meta: dict                # 可选，元信息，如种子、备注、难度标签等
     - title: str                # 可选，ZIP标题，不写和旧版保持一致
 
@@ -42,11 +42,11 @@ TEMPLATE_SOLVE = """def solve(problem: dict, data: dict) -> dict:
     - meta: dict                 # 可选，调试或统计信息，如耗时、使用策略等
 
     警告：
-    - 解题代码同样会在本机运行，请避免执行高风险系统操作
+    - 解题代码会在本机运行，请避免执行高风险系统操作
     \"\"\"
     # 数据提取示例：
     # 1. 获取标准输入文本（如果是标准输入输出题目）
-    # stdin_text = data.get("stdin", "")
+    stdin_text = data.get("stdin", "")
     
     # 2. 获取变量字典（如果是函数式或需要特定变量）
     # vars_data = data.get("vars", {})
