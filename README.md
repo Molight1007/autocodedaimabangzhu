@@ -170,7 +170,7 @@ class VariableConfig:
     source_type: str     # 数据源：'range' | 'list' | 'charset' | 'code'
     params: Dict[str, Any]  # 数据源参数（见下表）
     separator: str       # 输出分隔符：'' | ' ' | '\n' | '\t' | ',' | ';'
-    loop_count: int      # 循环生成次数（支持固定值、变量表达式，或区间如 "1,1000"）
+    loop_count: int      # 循环生成次数（支持固定值、变量表达式，或区间如 "1,10"）
     dependencies: List[str]  # 依赖的变量名列表（用于构建依赖图）
 ```
 
@@ -180,7 +180,7 @@ class VariableConfig:
 |---------------|---------------|------|
 | `range` | `min`, `max` | 数值范围，支持表达式（如 `"n*2"`） |
 | `list` | `items` | 逗号分隔的枚举值，如 `"yes,no,maybe"`；英文逗号可写为 `\,` |
-| `charset` | `charset`, `length` | 支持 `A-Z` / `a-z` / `0-9` 关键字与逗号分隔字面量混写，如 `"A-Z,a-z,0-9,。,！,？,<,>"`；区间关键字可无逗号直接拼接且顺序无关，如 `"a-zA-Z"`、`"A-Za-z0-9"`；英文逗号可写为 `\,`，`length` 支持范围表达式 |
+| `charset` | `charset`, `length` | 支持 `A-Z` / `a-z` / `0-9` 关键字与逗号分隔字面量混写，如 `"A-Z,a-z,0-9,。,！,？,<,>"`；区间关键字可无逗号直接拼接且顺序无关，如 `"a-zA-Z"`、`"A-Za-z0-9"`；英文逗号可写为 `\,`，`length` 支持固定值、变量表达式或区间如 `"1,10"` |
 | `code` | `code` | Python 代码，可定义 `generate_data(problem) -> dict` 函数，或单行表达式 |
 
 ### `problem_set` 结构
@@ -248,7 +248,7 @@ class VariableConfig:
 - **动态参数区**（`QStackedWidget`）：根据数据源类型切换显示不同参数输入控件
 - **范围分布策略**：当数据源为 `range` 时，UI 通过 `distribution_registry` 自动加载 `File/distributions.json`，仅显示函数已实现的分布策略，未实现项自动隐藏。每个分布的参数标签、占位提示、默认值均由 JSON 驱动，UI 无需硬编码
 - **分隔符**下拉框
-- **循环次数**输入（支持固定值、引用其他变量名表达式，或 `1,1000` 这种随机区间）
+- **循环次数**输入（支持固定值、引用其他变量名表达式，或 `1,10` 这种随机区间；每次循环生成一段，再按分隔符拼接）
 - **删除按钮**（发射 `delete_requested` 信号）
 
 ---
@@ -372,11 +372,12 @@ params = {
 ```
 对每个测试点（case）：
   for 每个 VariableConfig cfg：
-    1. 解析 loop_count（支持变量引用表达式，也支持 `1,1000` 这种随机区间）
+    1. 解析 loop_count（支持变量引用表达式，也支持 `1,10` 这种随机区间）
     2. 循环 loop_count 次调用 _generate_value(cfg, env)
     3. 将生成值追加到 stdin_parts
     4. 将变量值写入 vars_dict 和 env（供后续变量引用）
     5. 若 cfg 是 code 类型且返回 dict，提取 meta/stdout/title 等附加信息
+  说明：对 `charset` 类型，单次 `_generate_value()` 会先按 `length` 生成一段字符，所以最终总字符量近似为“单段长度 × 循环次数”，再叠加分隔符本身
   拼接所有 stdin_parts，确保末尾有 '\n'
   返回 case = { stdin, stdout, meta, vars }
 ```

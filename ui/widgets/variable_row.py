@@ -126,8 +126,8 @@ class VariableRowWidget(QFrame):
         self.loop_input = QLineEdit("1")
         self.loop_input.setFixedWidth(60)
         self.loop_input.setAlignment(Qt.AlignCenter)
-        self.loop_input.setPlaceholderText("1 or 1,1000")
-        self.loop_input.setToolTip("支持固定次数、变量表达式，或使用 1,1000 表示随机循环次数区间")
+        self.loop_input.setPlaceholderText("1 or 1,10")
+        self.loop_input.setToolTip("支持固定次数、变量表达式，或使用 1,10 表示随机循环次数区间；每次循环生成一段，再按分隔符拼接")
         self.top_row_layout.addWidget(self.loop_input)
 
         lbl_sep = QLabel("分隔符")
@@ -268,6 +268,8 @@ class VariableRowWidget(QFrame):
         
         self.char_len_input = QLineEdit("10")
         self.char_len_input.setFixedWidth(60)
+        self.char_len_input.setPlaceholderText("10 or 1,10")
+        self.char_len_input.setToolTip("支持固定长度、变量表达式，或使用 1,10 表示随机长度区间；每次循环都会先按这里生成一段")
         layout_charset.addWidget(self.char_len_input)
         
         lbl_set = QLabel("字符集:")
