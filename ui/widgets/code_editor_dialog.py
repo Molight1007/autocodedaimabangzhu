@@ -71,7 +71,7 @@ class CodeEditorDialog(QDialog):
         self.btn_reset_template.clicked.connect(self.reset_template)
         toolbar_layout.addWidget(self.btn_reset_template)
 
-        self.btn_ask_gpt = QPushButton("问问DeepSeek")
+        self.btn_ask_gpt = QPushButton("问问 AI")
         self.btn_ask_gpt.setObjectName("PrimaryBtn")
         self.btn_ask_gpt.setCursor(Qt.PointingHandCursor)
         self.btn_ask_gpt.clicked.connect(self.ask_gpt)
@@ -157,7 +157,7 @@ class CodeEditorDialog(QDialog):
 
             dlg = DeepSeekRefineDialog(
                 self,
-                title="DeepSeek 精炼",
+                title="AI 精炼",
                 task_name=self._mode,
                 source_code=source,
                 prompt=prompt,
@@ -166,7 +166,7 @@ class CodeEditorDialog(QDialog):
             if dlg.exec():
                 self.set_text(dlg.get_refined_code())
         except Exception as e:
-            QMessageBox.information(self, "提示", f"问问DeepSeek 暂不可用：{e}")
+            QMessageBox.information(self, "提示", f"问问 AI 暂不可用：{e}")
 
     def _sync_mode_label(self):
         if self._mode == "solve":

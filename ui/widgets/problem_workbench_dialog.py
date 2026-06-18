@@ -151,7 +151,7 @@ class ProblemWorkbenchDialog(QDialog):
         self.btn_reset.clicked.connect(self._reset_template)
         toolbar_layout.addWidget(self.btn_reset)
 
-        self.btn_ask = QPushButton("问问DeepSeek")
+        self.btn_ask = QPushButton("问问 AI")
         self.btn_ask.setObjectName("PrimaryBtn")
         self.btn_ask.setCursor(Qt.PointingHandCursor)
         self.btn_ask.clicked.connect(self._ask_deepseek)
@@ -304,7 +304,7 @@ class ProblemWorkbenchDialog(QDialog):
         prompt = self._build_refine_prompt(source, sample_stdin, sample_stdout)
         self._refine_dialog = DeepSeekRefineDialog(
             self,
-            title="DeepSeek 精炼",
+            title="AI 精炼",
             task_name="solve",
             source_code=source,
             prompt=prompt,
@@ -323,7 +323,7 @@ class ProblemWorkbenchDialog(QDialog):
                 self.editor.set_text(dlg.get_refined_code())
                 self._ai_session_ready = True
         except Exception as e:
-            QMessageBox.information(self, "提示", f"问问DeepSeek 暂不可用：{e}")
+            QMessageBox.information(self, "提示", f"问问 AI 暂不可用：{e}")
 
     def _open_test_run(self):
         dlg = TestRunDialog(

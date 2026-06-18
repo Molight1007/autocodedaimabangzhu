@@ -63,21 +63,25 @@ from typing import Any, Dict, List, Optional
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
     QDialog,
+    QMenu,
 )
 
 from ..common.message_box import MessageBox
 from utils.markdown_renderer import render_markdown_to_html
 
-from services.ai.deepseek_config import (
-    get_deepseek_api_key,
-    get_deepseek_base_url,
-    get_deepseek_model,
-    set_deepseek_api_key,
-    set_deepseek_model,
-)
 from services.ai.workers import StreamWorker, ModelsWorker
 from services.ai.chat_session import ChatSession
 from services.ai.errors import MissingApiKeyError
+from services.ai.provider_config import (
+    get_current_provider,
+    get_provider_api_key,
+    get_provider_base_url,
+    get_provider_label,
+    get_provider_model,
+    set_current_provider,
+    set_provider_api_key,
+    set_provider_model,
+)
 from utils.ai_text_utils import clip_text
 from .prompt_builder import build_refine_prompt, parse_score_range
 from services.prompts.prompt_builders import (
@@ -101,7 +105,7 @@ class DeepSeekRefineDialog(QDialog):
         self,
         parent=None,
         *,
-        title: str = "DeepSeek 精炼",
+        title: str = "AI 精炼",
         task_name: str = "generate_data",
         source_code: str = "",
         prompt: str = "",
@@ -127,6 +131,9 @@ class DeepSeekRefineDialog(QDialog):
         # ChatSession 延迟到 send_request 中创建，以便根据评分范围动态选择 system prompt
         self._chat_session: Optional[ChatSession] = None
         self._pending_turn_prompts: Dict[int, str] = {}
+        self._available_models: List[Dict[str, Any]] = []
+        self._selected_model_info: Dict[str, Any] = {}
+        self._model_menu: Optional[QMenu] = None
 
         build_dialog_ui(self)
 
@@ -144,9 +151,86 @@ class DeepSeekRefineDialog(QDialog):
         )
         self._autonomous_handler.finished.connect(self._on_autonomous_handler_finished)
         self._autonomous_handler.error_occurred.connect(self._on_autonomous_handler_error)
+        self._apply_fallback_model()
 
     def get_refined_code(self) -> str:
         return self.right_editor.get_text()
+
+    def _current_provider(self) -> str:
+        return str(self.provider_combo.currentData() or get_current_provider()).strip().lower() or "deepseek"
+
+    def _current_provider_label(self) -> str:
+        return get_provider_label(self._current_provider())
+
+    def _current_model(self) -> str:
+        selected = str((self._selected_model_info or {}).get("id") or "").strip()
+        if selected:
+            return selected
+        return get_provider_model(self._current_provider())
+
+    def _set_selected_model(self, model_info: Dict[str, Any], *, persist: bool = True) -> None:
+        info = dict(model_info or {})
+        model_id = str(info.get("id") or "").strip()
+        if not model_id:
+            return
+        self._selected_model_info = info
+        self.model_button.setText(model_id)
+        self.model_button.setToolTip(str(info.get("description") or model_id))
+        self.model_price_label.setText(f"价格: {str(info.get('price_text') or '价格待定')}")
+        vendor_text = str(info.get("vendor_name") or self._current_provider_label())
+        self.model_vendor_label.setText(f"分类: {vendor_text}")
+        if persist:
+            set_provider_model(self._current_provider(), model_id)
+
+    def _find_model_info(self, model_id: str) -> Dict[str, Any]:
+        target = str(model_id or "").strip()
+        for item in self._available_models:
+            if str(item.get("id") or "").strip() == target:
+                return dict(item)
+        return {}
+
+    def _apply_fallback_model(self) -> None:
+        current = get_provider_model(self._current_provider())
+        info = self._find_model_info(current)
+        if not info and self._available_models:
+            info = dict(self._available_models[0] or {})
+        if info:
+            self._set_selected_model(info, persist=True)
+            return
+        fallback_id = current or "未配置模型"
+        self._selected_model_info = {"id": fallback_id}
+        self.model_button.setText(fallback_id)
+        self.model_price_label.setText("价格: 待定")
+        self.model_vendor_label.setText(f"分类: {self._current_provider_label()}")
+
+    def _rebuild_model_menu(self) -> None:
+        menu = QMenu(self)
+        provider = self._current_provider()
+        if provider == "nuwa":
+            groups: Dict[str, List[Dict[str, Any]]] = {}
+            for item in self._available_models:
+                vendor = str(item.get("vendor_name") or "其它").strip() or "其它"
+                groups.setdefault(vendor, []).append(item)
+            for vendor in sorted(groups.keys(), key=str.lower):
+                sub_menu = menu.addMenu(vendor)
+                for item in groups[vendor]:
+                    model_id = str(item.get("id") or "").strip()
+                    action = sub_menu.addAction(model_id)
+                    action.setToolTip(str(item.get("price_text") or "价格待定"))
+                    action.triggered.connect(lambda checked=False, info=dict(item): self._set_selected_model(info, persist=True))
+        else:
+            for item in self._available_models:
+                model_id = str(item.get("id") or "").strip()
+                action = menu.addAction(model_id)
+                action.setToolTip(str(item.get("price_text") or "价格待定"))
+                action.triggered.connect(lambda checked=False, info=dict(item): self._set_selected_model(info, persist=True))
+        self._model_menu = menu
+
+    def _show_model_menu(self) -> None:
+        if self._model_menu is None:
+            self._rebuild_model_menu()
+        if self._model_menu is not None:
+            self._model_menu.exec(self.model_button.mapToGlobal(self.model_button.rect().bottomLeft()))
 
     def _resolve_system_prompt(self, task_name: str, has_scoring: bool = False) -> str:
         """根据任务类型返回对应的 system prompt（角色定义）。
@@ -199,17 +283,20 @@ class DeepSeekRefineDialog(QDialog):
         MessageBox.information(self, "自治修复说明", html_text)
 
     def _configure_key(self):
-        dlg = ApiKeyDialog(self)
+        provider_label = self._current_provider_label()
+        dlg = ApiKeyDialog(self, title=f"配置 {provider_label} API Key", provider_label=provider_label)
         if dlg.exec():
-            set_deepseek_api_key(dlg.get_api_key())
+            set_provider_api_key(self._current_provider(), dlg.get_api_key())
 
     def _ensure_key(self) -> bool:
-        if get_deepseek_api_key():
+        provider = self._current_provider()
+        provider_label = self._current_provider_label()
+        if get_provider_api_key(provider):
             return True
-        dlg = ApiKeyDialog(self)
+        dlg = ApiKeyDialog(self, title=f"配置 {provider_label} API Key", provider_label=provider_label)
         if not dlg.exec():
             return False
-        set_deepseek_api_key(dlg.get_api_key())
+        set_provider_api_key(provider, dlg.get_api_key())
         return True
 
     def _set_busy(self, busy: bool):
@@ -224,7 +311,8 @@ class DeepSeekRefineDialog(QDialog):
         self.btn_config_key.setEnabled(not busy)
         self.btn_toggle_layout.setEnabled(not busy)
         self.btn_refresh_models.setEnabled(not busy)
-        self.model_combo.setEnabled(not busy)
+        self.provider_combo.setEnabled(not busy)
+        self.model_button.setEnabled(not busy)
         self.mode_combo.setEnabled(not busy)
         self.btn_mode_help.setEnabled(not busy)
         self.cross_validation_checkbox.setEnabled(not busy)
@@ -234,45 +322,37 @@ class DeepSeekRefineDialog(QDialog):
         self.score_min_input.setReadOnly(bool(busy))
         self.score_max_input.setReadOnly(bool(busy))
 
-    def _on_model_changed(self, model: str):
-        model = str(model or "").strip()
-        if model:
-            set_deepseek_model(model)
+    def _on_provider_changed(self, index: int):
+        provider = str(self.provider_combo.itemData(index) or "").strip().lower()
+        if not provider:
+            return
+        set_current_provider(provider)
+        self._available_models = []
+        self._selected_model_info = {}
+        self._model_menu = None
+        self._apply_fallback_model()
+        self.refresh_models(silent=(provider == "deepseek"))
 
     def refresh_models(self, silent: bool = False):
         if self._models_worker is not None and self._models_worker.isRunning():
             return
-        if not get_deepseek_api_key():
+        provider = self._current_provider()
+        if provider == "deepseek" and not get_provider_api_key(provider):
             if silent:
                 return
             if not self._ensure_key():
                 return
         self.status_badge.setText("加载模型…")
-        self._models_worker = ModelsWorker(self)
+        self._models_worker = ModelsWorker(provider=provider, parent=self)
         self._models_worker.ok.connect(self._on_models_ok)
         self._models_worker.err.connect(lambda m: self._on_models_err(m, silent=silent))
         self._models_worker.finished.connect(lambda: self.status_badge.setText("就绪"))
         self._models_worker.start()
 
     def _on_models_ok(self, models: list):
-        current = self.model_combo.currentText()
-        self.model_combo.blockSignals(True)
-        try:
-            self.model_combo.clear()
-            for m in models or []:
-                self.model_combo.addItem(str(m))
-            if current:
-                idx = self.model_combo.findText(current)
-                if idx >= 0:
-                    self.model_combo.setCurrentIndex(idx)
-        finally:
-            self.model_combo.blockSignals(False)
-
-        if not self.model_combo.currentText():
-            fallback = get_deepseek_model()
-            if fallback:
-                self.model_combo.addItem(fallback)
-                self.model_combo.setCurrentText(fallback)
+        self._available_models = [dict(item or {}) for item in models or []]
+        self._rebuild_model_menu()
+        self._apply_fallback_model()
 
     def _on_models_err(self, message: str, *, silent: bool):
         if silent:
@@ -344,16 +424,18 @@ class DeepSeekRefineDialog(QDialog):
             task_name=self._task_name,
         )
 
-        api_key = get_deepseek_api_key()
+        provider = self._current_provider()
+        provider_label = self._current_provider_label()
+        api_key = get_provider_api_key(provider)
         if not api_key:
             self._set_busy(False)
             self.status_badge.setText("就绪")
             self.btn_send.setText("发送请求")
-            MessageBox.information(self, "提示", "未配置 DeepSeek API Key。")
+            MessageBox.information(self, "提示", f"未配置 {provider_label} API Key。")
             return
 
-        model = str(self.model_combo.currentText() or get_deepseek_model()).strip() or get_deepseek_model()
-        base_url = get_deepseek_base_url()
+        model = self._current_model()
+        base_url = get_provider_base_url(provider)
         messages = self._chat_session.preview_with_user(prompt)
         total_chars = sum(len(str((m or {}).get("content") or "")) for m in messages)
         if total_chars > 110_000:
@@ -403,9 +485,10 @@ class DeepSeekRefineDialog(QDialog):
             problem["description"] = str(user_problem)
         runtime_context = self._build_autonomous_runtime_context(problem)
 
-        model = str(self.model_combo.currentText() or get_deepseek_model()).strip() or get_deepseek_model()
-        api_key = get_deepseek_api_key()
-        base_url = get_deepseek_base_url()
+        provider = self._current_provider()
+        model = self._current_model()
+        api_key = get_provider_api_key(provider) or ""
+        base_url = get_provider_base_url(provider)
 
         self._autonomous_handler.start(
             problem=problem,
@@ -543,11 +626,11 @@ class DeepSeekRefineDialog(QDialog):
             self._chat_session.reset()
             MessageBox.information(self, "提示", "本次请求上下文过长，已自动清空会话历史。请精简测试数据后重试。")
             return
-        if "deepseek_api_key_missing" in (message or ""):
+        if "_api_key_missing" in (message or ""):
             try:
                 raise MissingApiKeyError(message)
             except MissingApiKeyError:
-                MessageBox.information(self, "提示", "未配置 DeepSeek API Key。")
+                MessageBox.information(self, "提示", f"未配置 {self._current_provider_label()} API Key。")
                 return
         MessageBox.information(self, "提示", f"生成失败：{message}")
 

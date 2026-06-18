@@ -17,12 +17,13 @@ from ...styles.api_key_dialog_style import API_KEY_DIALOG_QSS
 
 
 class ApiKeyDialog(QDialog):
-    def __init__(self, parent=None, *, title: str = "配置 DeepSeek API Key"):
+    def __init__(self, parent=None, *, title: str = "配置 API Key", provider_label: str = "AI"):
         super().__init__(parent)
         self.setWindowTitle(title)
         self.setModal(True)
         self.resize(720, 320)
         self.setStyleSheet(API_KEY_DIALOG_QSS)
+        self._provider_label = str(provider_label or "AI").strip() or "AI"
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(14, 14, 14, 14)
@@ -33,7 +34,7 @@ class ApiKeyDialog(QDialog):
         header_layout.setContentsMargins(0, 0, 0, 0)
         header_layout.setSpacing(2)
 
-        title_label = QLabel("DeepSeek API Key")
+        title_label = QLabel(f"{self._provider_label} API Key")
         title_label.setObjectName("Title")
         header_layout.addWidget(title_label)
 
@@ -58,7 +59,7 @@ class ApiKeyDialog(QDialog):
         row.addWidget(field_label)
 
         self.key_input = QLineEdit()
-        self.key_input.setPlaceholderText("粘贴你的 DeepSeek API Key（不回显）")
+        self.key_input.setPlaceholderText(f"粘贴你的 {self._provider_label} API Key（不回显）")
         self.key_input.setEchoMode(QLineEdit.Password)
         row.addWidget(self.key_input, 1)
 
@@ -101,4 +102,3 @@ class ApiKeyDialog(QDialog):
             QMessageBox.information(self, "提示", "API Key 不能为空。")
             return
         self.accept()
-

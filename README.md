@@ -1,7 +1,7 @@
 # 数据生成器 — 项目说明文档
 
-> **版本**：1.0.0　|　**技术栈**：Python + PySide6 + DeepSeek / OpenAI 兼容 API　|　**定位**：算法竞赛测试数据生成 & AI 辅助解题平台
-*最后修改时间：2026-06-13*
+> **版本**：1.0.0　|　**技术栈**：Python + PySide6 + 多平台 OpenAI 兼容 API（DeepSeek / Nuwa）　|　**定位**：算法竞赛测试数据生成 & AI 辅助解题平台
+*最后修改时间：2026-06-18*
 
 ---
 
@@ -397,15 +397,31 @@ params = {
 - **同步调用**：封装非流式请求
 - 超时默认 90 秒
 
-### 模型配置（`services/ai/deepseek_config.py`）
+### 平台配置（`services/ai/provider_config.py`）
 
-| 配置项 | 默认值 | 存储键 |
-|--------|--------|--------|
-| API Key | — | `deepseek/api_key` |
-| Base URL | `https://api.deepseek.com` | `deepseek/base_url` |
-| Model | `deepseek-reasoner` | `deepseek/model` |
+当前 AI 层已从单一 DeepSeek 配置升级为“平台 + 模型”双层配置：
 
-配置通过 `SecureSettingsStore`（基于 `QSettings`，组织名 `PyQtApp`，应用名 `DataGenerator`）持久化存储。
+| 平台 | 默认 Base URL | 默认模型 | 存储前缀 |
+|------|---------------|----------|----------|
+| `deepseek` | `https://api.deepseek.com` | `deepseek-reasoner` | `llm/providers/deepseek/*` |
+| `nuwa` | `https://api.nuwaflux.com/v1` | `claude-sonnet-4-6` | `llm/providers/nuwa/*` |
+
+公共配置项：
+
+| 配置项 | 存储键 |
+|--------|--------|
+| 当前平台 | `llm/current_provider` |
+| API Key | `llm/providers/<provider>/api_key` |
+| Base URL | `llm/providers/<provider>/base_url` |
+| Model | `llm/providers/<provider>/model` |
+
+配置通过 `SecureSettingsStore`（基于 `QSettings`，组织名 `PyQtApp`，应用名 `DataGenerator`）持久化存储；原 `deepseek_config.py` 仍保留兼容包装函数。
+
+### 模型目录（`services/ai/model_catalog.py`）
+
+- **DeepSeek**：继续通过远端 `/models` 动态拉取；未配置 Key 时回退到默认模型
+- **Nuwa**：从本地 `File/nuwa.json` 读取模型目录，按 `vendor_name` 分组，并展示输入/输出单价
+- **价格文本**：统一格式为“输入 ￥X / 输出 ￥Y / 1M tokens”，供 UI 直接展示
 
 ### 异步 Worker（`services/ai/workers.py`）
 
@@ -448,6 +464,9 @@ params = {
 ### `DeepSeekRefineDialog`（AI 解题对话框）
 
 核心功能：
+- **平台切换**：工具栏新增“平台”下拉，支持 `DeepSeek` 与 `Nuwa` 两类入口；切换平台后独立记忆各自 API Key / Base URL / 默认模型
+- **分级模型菜单**：DeepSeek 直接列出模型；Nuwa 根据 `vendor_name` 构建分级菜单，例如 `Nuwa -> Anthropic -> claude-sonnet-*`
+- **价格展示**：选中模型后实时显示输入/输出单价；Nuwa 的价格信息来自 `File/nuwa.json`
 - **普通模式**：单次 LLM 调用，流式展示思维链（`reasoning_content`）和代码（`content`）
 - **自治修复模式**：启动 `AutonomousFixWorker`（QThread），驱动 Isolated Agent 引擎多轮迭代；固定保留 system / 题目 / 最新代码三条消息，动态区仅保留最近 15 轮交互
 - **双算法对拍验证**：与自治修复**互斥独立**，勾选后直接调用 `verify_with_cross_agent`，不再事先运行 `solve_with_agent`，需手动开启
@@ -962,10 +981,11 @@ facade.verify_with_cross_agent(problem, candidate_code, test_cases, llm_caller_f
 
 ### 接入新的 LLM 提供商
 
-1. 在 `services/ai/` 下新增配置文件（参考 `deepseek_config.py`）
-2. 实现 `llm_caller` 函数：`(messages: List[Dict]) -> str`，接收消息列表，返回模型输出字符串
-3. 在 `services/ai/default_dispatch.py` 中注册新的分发入口
-4. Agent 引擎无需任何修改，直接传入新的 `llm_caller` 即可
+1. 在 `services/ai/provider_config.py` 的 `PROVIDER_DEFS` 中注册平台元信息（显示名 / 默认 Base URL / 默认模型）
+2. 若平台支持 OpenAI 兼容协议，优先复用 `openai_compat_http.py`，只需切换 `base_url` 与模型 ID
+3. 在 `services/ai/model_catalog.py` 中补充该平台的模型来源：远端 `/models` 或本地 JSON 文件
+4. 若 UI 需要分组展示，在模型数据中补充 `vendor_name`、价格字段与描述信息
+5. Agent 引擎无需修改，继续通过 `AutonomousFixHandler` 传入 `model / api_key / base_url` 即可
 
 ### 新增数据源类型
 

@@ -1,5 +1,5 @@
 import logging
-from typing import Dict, List
+from typing import Any, Dict, List
 
 from PySide6.QtCore import QThread, Signal
 
@@ -74,8 +74,12 @@ class ModelsWorker(QThread):
     ok = Signal(list)
     err = Signal(str)
 
+    def __init__(self, *, provider: str, parent=None):
+        super().__init__(parent)
+        self._provider = str(provider or "").strip().lower() or "deepseek"
+
     def run(self):
         try:
-            self.ok.emit(list_models())
+            self.ok.emit(list_models(self._provider))
         except Exception as e:
             self.err.emit(str(e))

@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (
 )
 
 from ...code_editor.code_editor_container import CodeEditorContainer
+from services.ai.provider_config import get_current_provider, get_provider_defs
 
 
 def build_dialog_ui(dialog) -> None:
@@ -70,71 +71,99 @@ def _build_header(layout: QVBoxLayout, dialog) -> None:
 
 
 def _build_toolbar(layout: QVBoxLayout, dialog) -> None:
-    from services.ai.deepseek_config import get_deepseek_model
-
     toolbar = QWidget()
     toolbar.setObjectName("Toolbar")
-    toolbar_layout = QHBoxLayout(toolbar)
-    toolbar_layout.setContentsMargins(10, 8, 10, 8)
-    toolbar_layout.setSpacing(10)
+    root_layout = QVBoxLayout(toolbar)
+    root_layout.setContentsMargins(10, 8, 10, 8)
+    root_layout.setSpacing(6)
 
-    dialog.model_combo = QComboBox()
-    dialog.model_combo.setMinimumWidth(200)
-    dialog.model_combo.addItem(get_deepseek_model())
-    dialog.model_combo.setCurrentText(get_deepseek_model())
-    dialog.model_combo.currentTextChanged.connect(dialog._on_model_changed)
-    toolbar_layout.addWidget(dialog.model_combo)
+    top_row = QHBoxLayout()
+    top_row.setSpacing(10)
+
+    top_row.addWidget(QLabel("平台:"))
+    dialog.provider_combo = QComboBox()
+    dialog.provider_combo.setMinimumWidth(120)
+    provider_defs = get_provider_defs()
+    for provider, meta in provider_defs.items():
+        dialog.provider_combo.addItem(str(meta.get("label") or provider), provider)
+    current_provider = get_current_provider()
+    idx = dialog.provider_combo.findData(current_provider)
+    if idx >= 0:
+        dialog.provider_combo.setCurrentIndex(idx)
+    dialog.provider_combo.currentIndexChanged.connect(dialog._on_provider_changed)
+    top_row.addWidget(dialog.provider_combo)
+
+    top_row.addWidget(QLabel("模型:"))
+    dialog.model_button = QPushButton("选择模型")
+    dialog.model_button.setCursor(Qt.PointingHandCursor)
+    dialog.model_button.setMinimumWidth(280)
+    dialog.model_button.clicked.connect(dialog._show_model_menu)
+    top_row.addWidget(dialog.model_button)
 
     dialog.btn_refresh_models = QPushButton("刷新模型")
     dialog.btn_refresh_models.setCursor(Qt.PointingHandCursor)
     dialog.btn_refresh_models.clicked.connect(dialog.refresh_models)
-    toolbar_layout.addWidget(dialog.btn_refresh_models)
+    top_row.addWidget(dialog.btn_refresh_models)
 
     dialog.status_badge = QLabel("就绪")
     dialog.status_badge.setObjectName("StatusBadge")
-    toolbar_layout.addWidget(dialog.status_badge)
+    top_row.addWidget(dialog.status_badge)
 
-    toolbar_layout.addStretch(1)
+    top_row.addStretch(1)
 
     dialog.btn_config_key = QPushButton("配置 Key")
     dialog.btn_config_key.setCursor(Qt.PointingHandCursor)
     dialog.btn_config_key.clicked.connect(dialog._configure_key)
-    toolbar_layout.addWidget(dialog.btn_config_key)
+    top_row.addWidget(dialog.btn_config_key)
 
     dialog.btn_toggle_layout = QPushButton("切换上下")
     dialog.btn_toggle_layout.setCursor(Qt.PointingHandCursor)
     dialog.btn_toggle_layout.clicked.connect(dialog._toggle_splitter_orientation)
-    toolbar_layout.addWidget(dialog.btn_toggle_layout)
+    top_row.addWidget(dialog.btn_toggle_layout)
 
     dialog.mode_combo = QComboBox()
     dialog.mode_combo.addItem("普通请求")
     dialog.mode_combo.addItem("自治修复")
     dialog.mode_combo.setFixedWidth(90)
     dialog.mode_combo.currentTextChanged.connect(dialog._on_mode_changed)
-    toolbar_layout.addWidget(dialog.mode_combo)
+    top_row.addWidget(dialog.mode_combo)
 
     dialog.cross_validation_checkbox = QCheckBox("双算法验证")
     dialog.cross_validation_checkbox.setCursor(Qt.PointingHandCursor)
     dialog.cross_validation_checkbox.setVisible(False)
-    toolbar_layout.addWidget(dialog.cross_validation_checkbox)
+    top_row.addWidget(dialog.cross_validation_checkbox)
 
     dialog.btn_mode_help = QLabel("<a href='#' style='color:#4a90d9;text-decoration:none;'>?</a>")
     dialog.btn_mode_help.setCursor(Qt.PointingHandCursor)
     dialog.btn_mode_help.setVisible(False)
     dialog.btn_mode_help.linkActivated.connect(dialog._show_mode_help)
-    toolbar_layout.addWidget(dialog.btn_mode_help)
+    top_row.addWidget(dialog.btn_mode_help)
 
     dialog.btn_send = QPushButton("发送请求")
     dialog.btn_send.setObjectName("PrimaryBtn")
     dialog.btn_send.setCursor(Qt.PointingHandCursor)
     dialog.btn_send.clicked.connect(dialog.send_request)
-    toolbar_layout.addWidget(dialog.btn_send)
+    top_row.addWidget(dialog.btn_send)
 
     dialog.btn_cancel = QPushButton("取消")
     dialog.btn_cancel.setCursor(Qt.PointingHandCursor)
     dialog.btn_cancel.setVisible(False)
     dialog.btn_cancel.clicked.connect(dialog._cancel_current_request)
-    toolbar_layout.addWidget(dialog.btn_cancel)
+    top_row.addWidget(dialog.btn_cancel)
+
+    root_layout.addLayout(top_row)
+
+    bottom_row = QHBoxLayout()
+    bottom_row.setSpacing(12)
+    dialog.model_price_label = QLabel("价格: 待定")
+    dialog.model_price_label.setObjectName("DialogHint")
+    bottom_row.addWidget(dialog.model_price_label)
+
+    dialog.model_vendor_label = QLabel("分类: -")
+    dialog.model_vendor_label.setObjectName("DialogHint")
+    bottom_row.addWidget(dialog.model_vendor_label)
+    bottom_row.addStretch(1)
+    root_layout.addLayout(bottom_row)
 
     layout.addWidget(toolbar)
 
