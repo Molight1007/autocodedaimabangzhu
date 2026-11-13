@@ -61,3 +61,6 @@ upload.bat
 Git使用指南.md
 File/key.txt
 tests/
+
+# 临时文件目录
+.tmp/
