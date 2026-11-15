@@ -1,3 +1,0 @@
-class MissingApiKeyError(RuntimeError):
-    pass
-
