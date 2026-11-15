@@ -1,0 +1,16 @@
+# autoCode 分层门禁允许清单（tools/check_layering.py 读取）
+#
+# 格式（三段缺一不可，理由必填）：
+#   相对路径:行号:规则  # 理由
+#   - 相对路径：相对 autocode/ 包目录，用 / 分隔
+#   - 行号：违规所在行（size-file 用 1）；行号参与 identity，
+#     因此**同一文件新增同类违规不会被历史条目兜住**，必须重新评审
+#   - 规则：Violation.rule，如 size-file / size-function /
+#     layer-engine-import / layer-utils-import / layer-ui-import /
+#     layer-llm-import / engine-banned-name
+#   - 每条都会在门禁输出里逐条打印（含理由），不允许静默放过
+#   - 声明了但不再触发的条目会被列为"失效条目"，且同样使退出码为 1
+#     （强制清理，防止清单腐烂成噪声）；缺理由视为格式错误
+#
+# 纪律：能改代码解决的一律改代码；只有"保持行为不变就无法满足"的历史遗留才登记。
+# 当前为空：P0 移植代码已全部满足 R2/R4。

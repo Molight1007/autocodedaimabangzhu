@@ -1,0 +1,800 @@
+"""预生成流水线（设计 §5，P4）：一次付费、产物永久复用。
+
+顺序固定流水线，每阶段**独立落库、独立可重跑**：
+
+    ① spec      题面 → spec JSON          门：schema + grammar 定义 + 样例回放解析
+    ② generator 写 generator.py（不写数据）门：子进程执行 → grammar.parse+validate → 多 profile 覆盖
+    ③ 参考解    ref_py / ref_cpp / brute   门：编译 → 样例全过 → 小规模对拍
+    ④⑤ 分层数据 sample/boundary/exhaustive/stress + 期望输出（adversarial 暂缺，如实标）
+    ⑥ 提示      L1/L2/L3（LLM，禁代码）+ L4（引用已验证参考解，不调 LLM）
+
+失败口径：任一阶段门不过 → `problems.status='failed'`、`failed_stage=<stage>`、错误原文入
+`problem_stage_runs.error_text`，**不静默降级成 prepared**。
+
+预算：`Budget(max_calls=40)`，每次 LLM 调用记 1；超限立刻 `BudgetExhausted` → failed_stage=budget。
+
+文件分工（R4 行数门禁）：
+- 数据结构/词表 → `prep_models.py`
+- 纯判定规则  → `prep_rules.py`
+- SQL 写入     → `prep_store.py`
+- 本文件只做编排 + 每阶段的门
+"""
+
+from __future__ import annotations
+
+import time
+import traceback
+import uuid
+from typing import Any, Dict, List, Optional, Sequence, Tuple
+
+from ..engine.datagen import grammar as grammar_engine
+from ..engine.datagen import input_parser
+from ..engine.runner import VERDICT_AC, compiler_report, run_case
+from ..engine.verify import cross_check as cross_check_engine
+from ..prompts import loader as prompts
+from ..store.db import Database, get_db
+from . import judge
+from .prep_models import (
+    DEFAULT_MAX_CALLS,
+    DEFAULT_TOKEN_CAP,
+    GENERATOR_TIMEOUT_MS,
+    MAX_BRUTE_ATTEMPTS,
+    MAX_GENERATOR_ATTEMPTS,
+    MAX_HINTS_ATTEMPTS,
+    MAX_REF_ATTEMPTS,
+    MAX_SPEC_ATTEMPTS,
+    ORACLE_TIMEOUT_MS,
+    SAMPLE_TIMEOUT_MS,
+    STAGE_DATASETS,
+    STAGE_GENERATOR,
+    STAGE_HINTS,
+    STAGE_REFERENCES,
+    STAGE_SPEC,
+    STATUS_FAILED,
+    STATUS_PREPARED,
+    STATUS_PREPARING,
+    THINKING_POLICY,
+    Budget,
+    BudgetExhausted,
+    PrepReport,
+    RefArtifact,
+    StageFailure,
+    StageRecord,
+    stage_key,
+)
+from .prep_rules import (
+    agree,
+    available_langs,
+    normalize_spec,
+    peer_consistent,
+    replay_samples,
+    references_ready,
+    spec_block,
+    statement_excerpt,
+    user_blocks,
+)
+from .prep_store import PrepStore
+from .solutions import build_all, explain, mark_primary, similar_local
+from .spec_fallback import parser_fallback
+
+__all__ = [
+    "Budget",
+    "BudgetExhausted",
+    "PrepReport",
+    "PrepService",
+    "RefArtifact",
+    "StageFailure",
+    "StageRecord",
+    "STAGE_SPEC",
+    "STAGE_GENERATOR",
+    "STAGE_REFERENCES",
+    "STAGE_DATASETS",
+    "STAGE_HINTS",
+]
+
+
+#: 分阶段思考策略与 tag→stage 解析见 `prep_models.THINKING_POLICY / stage_key`。
+
+
+class PrepService:
+    """流水线编排器。`client` 允许注入（测试用桩），默认按环境变量建真实客户端。"""
+
+    def __init__(
+        self,
+        db: Optional[Database] = None,
+        *,
+        client: Any = None,
+        max_calls: int = DEFAULT_MAX_CALLS,
+        budget: Optional[Budget] = None,
+        call_cap: Optional[int] = None,
+        deadline_ts: Optional[float] = None,
+        verbose: bool = False,
+        cross_cases: int = 12,
+        exhaustive_cases: int = 30,
+        stress_cases: int = 2,
+        boundary_cases: int = 3,
+    ) -> None:
+        self.db = db or get_db()
+        self.store = PrepStore(self.db)
+        self.client = client
+        # 批量跑时由外部注入共享 Budget（全局熔断）与单题 call_cap / deadline
+        self.budget = budget or Budget(max_calls=max_calls)
+        self.call_cap = int(call_cap if call_cap is not None else self.budget.max_calls)
+        self.deadline_ts = deadline_ts
+        self._calls_this_run = 0
+        self._tokens_this_run = 0
+        self.token_cap = int(DEFAULT_TOKEN_CAP)
+        self.verbose = verbose
+        self.cross_cases = max(1, cross_cases)
+        self.exhaustive_cases = max(1, exhaustive_cases)
+        self.stress_cases = max(1, stress_cases)
+        self.boundary_cases = max(1, boundary_cases)
+        self._notes: List[str] = []
+        self._cross_result: Any = None
+        self._cross_outputs: Dict[str, Dict[str, str]] = {}
+        self._problem_id: Optional[int] = None
+        self.allow_parser_fallback = True
+        self.enable_llm_extras = True
+
+    def prepare(self, problem_id: int) -> PrepReport:
+        started = time.perf_counter()
+        report = PrepReport(problem_id=int(problem_id))
+        self._notes = []
+        self._problem_id = int(problem_id)
+        self._calls_this_run = 0
+        self._tokens_this_run = 0
+        problem = self.store.load_problem(int(problem_id))
+        if problem is None:
+            report.error = f"题目 {problem_id} 不存在"
+            report.failed_stage = STAGE_SPEC
+            return report
+        samples = self.store.load_samples(int(problem_id))
+        if not samples:
+            report.error = "题目没有可用样例（ingest 未解出内联样例），拒绝开始预生成"
+            report.failed_stage = STAGE_SPEC
+            self.store.mark_failed(int(problem_id), STAGE_SPEC, report.error)
+            return report
+        if self.client is None:
+            from ..llm.client import LlmClient
+
+            self.client = LlmClient(verbose=self.verbose)
+        # 每次 HTTP 尝试都落库（含失败/重试），否则失败重试的 token 无法审计
+        self.client.recorder = self.store.record_llm_call
+
+        self.store.update_problem(int(problem_id), status=STATUS_PREPARING, failed_stage=None)
+        try:
+            spec = self._run_stage(report, STAGE_SPEC, self._stage_spec, problem, samples)
+            report.spec = {key: value for key, value in spec.items() if key != "samples"}
+            problem["spec_json"] = spec_block(spec, drop_samples=False)
+
+            generator_code = self._run_stage(
+                report, STAGE_GENERATOR, self._stage_generator, problem, spec
+            )
+            report.generator_ok = True
+
+            refs = self._run_stage(
+                report, STAGE_REFERENCES, self._stage_references, problem, spec, samples, generator_code
+            )
+            report.refs = list(refs.values())
+            ready, missing = references_ready(refs)
+            if not ready:
+                raise StageFailure(STAGE_REFERENCES, f"参考解未通过对拍认证：{', '.join(missing)}")
+            codes = {"generator": generator_code}
+            for key, artifact in refs.items():
+                codes[key] = artifact.code
+            hits = self.store.check_injection_followed(int(problem_id), codes)
+            if hits:
+                self._note(f"生成代码命中题面注入标识符（injection_followed）：{sorted(hits)}")
+            report.injection_followed = bool(hits)
+            report.injection_hits_in_code = sorted(hits or [])
+            report.layers = self._run_stage(
+                report, STAGE_DATASETS, self._stage_datasets, int(problem_id), spec,
+                generator_code, refs,
+            )
+            report.hints = self._run_stage(
+                report, STAGE_HINTS, self._stage_hints, problem, spec, refs
+            )
+            try:
+                analysis = explain(self, problem, spec) if self.enable_llm_extras else None
+                if analysis:
+                    similar_local(self, int(problem_id), analysis.get("tags") or [])
+            except StageFailure as exc:
+                self._note(f"题解生成失败：{exc.message[:120]}")
+            self.store.update_problem(
+                int(problem_id),
+                status=STATUS_PREPARED,
+                failed_stage=None,
+                tier=spec.get("tier") or "A",
+                lang_available=",".join(available_langs()),
+            )
+            report.ok = True
+        except BudgetExhausted as exc:
+            report.failed_stage = "budget"
+            report.error = str(exc)
+            self.store.mark_failed(int(problem_id), "budget", str(exc))
+        except StageFailure as exc:
+            report.failed_stage = exc.stage
+            report.error = f"{exc.message}\n{exc.detail}".strip()
+            self.store.mark_failed(int(problem_id), exc.stage, report.error)
+        finally:
+            report.elapsed_ms = (time.perf_counter() - started) * 1000.0
+            report.budget = self.budget.to_dict()
+            report.llm_calls = self._calls_this_run
+            for note in self._notes:
+                if note not in report.notes:
+                    report.notes.append(note)
+        return report
+
+    # ── 阶段骨架 ────────────────────────────────────────────────────────────
+    def _run_stage(self, report: PrepReport, stage: str, func: Any, *args: Any) -> Any:
+        """跑一个阶段：记录 stage_runs、把任何异常收敛成 StageFailure。"""
+        if self.deadline_ts is not None and time.monotonic() > self.deadline_ts:
+            error = f"单题超过时限（进入阶段 {stage} 前 deadline 已到）"
+            report.stages.append(StageRecord(stage, False, 0.0, error=error))
+            self.store.record_stage_run(report.problem_id, stage, detail="", error=error)
+            raise StageFailure("timeout", error)
+        started = time.perf_counter()
+        self._log(f"== 阶段 {stage} 开始 ==")
+        try:
+            value, detail = func(*args)
+        except (BudgetExhausted, StageFailure) as exc:
+            elapsed = (time.perf_counter() - started) * 1000.0
+            error = getattr(exc, "detail", "") or str(exc)
+            if isinstance(exc, BudgetExhausted):
+                error = str(exc)
+            report.stages.append(StageRecord(stage, False, elapsed, error=error))
+            self.store.record_stage_run(report.problem_id, stage, detail="", error=error)
+            raise
+        except Exception as exc:  # noqa: BLE001 - 任何异常都归到该阶段，禁止静默
+            elapsed = (time.perf_counter() - started) * 1000.0
+            detail_text = traceback.format_exc(limit=3)[-1500:]
+            report.stages.append(StageRecord(stage, False, elapsed, error=repr(exc)))
+            self.store.record_stage_run(report.problem_id, stage, detail="", error=detail_text)
+            raise StageFailure(stage, f"阶段异常：{exc}", detail=detail_text) from exc
+        elapsed = (time.perf_counter() - started) * 1000.0
+        report.stages.append(StageRecord(stage, True, elapsed, detail=detail))
+        self.store.record_stage_run(report.problem_id, stage, detail=detail, error="")
+        self._log(f"== 阶段 {stage} 通过（{elapsed:.0f}ms）：{detail}")
+        return value
+
+    # ── ① spec ──────────────────────────────────────────────────────────────
+    def _stage_spec(
+        self, problem: Dict[str, Any], samples: List[Dict[str, str]]
+    ) -> Tuple[Dict[str, Any], str]:
+        base_user = user_blocks(statement_excerpt(problem), samples)
+        feedback = ""
+        last_error = ""
+        last_spec = None
+        for attempt in range(1, MAX_SPEC_ATTEMPTS + 1):
+            result = self._chat(prompts.SPEC, base_user + feedback, tag=f"spec#{attempt}")
+            spec, problems = normalize_spec(result.json_obj or {})
+            last_spec = spec
+            if problems:
+                last_error = "；".join(problems)
+                feedback = f"\n\n上一次输出不合格：{last_error}\n请严格按字段要求重出完整 JSON。"
+                continue
+            sample_errors = replay_samples(spec, samples)
+            if sample_errors:
+                last_error = "样例回放失败：" + "；".join(sample_errors[:3])
+                feedback = (
+                    f"\n\n上一次的 input_grammar 无法解析题面样例：{last_error}\n"
+                    "请修正节点顺序 / count 引用 / allow_empty 后重出完整 JSON。"
+                )
+                continue
+            spec["samples"] = samples
+            self.store.save_spec(int(problem["id"]), spec)
+            detail = (
+                f"tier={spec.get('tier')} checker={spec.get('checker_type')} "
+                f"output_type={spec.get('output_type')} grammar=[{grammar_engine.describe(spec['input_grammar'])}] "
+                f"constraints={len(spec.get('constraints_exec') or [])} 条 "
+                f"样例回放 {len(samples)}/{len(samples)} 通过"
+            )
+            return spec, detail
+        fallback, fallback_detail = parser_fallback(self, problem, last_spec, samples, last_error)
+        if fallback is not None:
+            return fallback, fallback_detail
+        raise StageFailure(STAGE_SPEC, f"spec 连续 {MAX_SPEC_ATTEMPTS} 次不合格", detail=fallback_detail)
+
+    def _normalize_spec(self, raw: Dict[str, Any]) -> Tuple[Dict[str, Any], List[str]]:
+        return normalize_spec(raw)
+
+    # ── ② generator ─────────────────────────────────────────────────────────
+    def _stage_generator(
+        self, problem: Dict[str, Any], spec: Dict[str, Any]
+    ) -> Tuple[str, str]:
+        base_user = (
+            user_blocks(statement_excerpt(problem), spec.get("samples") or [])
+            + "\n\n## 已确认的 spec\n"
+            + spec_block(spec)
+        )
+        feedback = ""
+        last_error = ""
+        last_code = ""
+        for attempt in range(1, MAX_GENERATOR_ATTEMPTS + 1):
+            result = self._chat(
+                prompts.GENERATOR, base_user + feedback, tag=f"generator#{attempt}",
+                max_tokens=16384, json_mode=False,
+            )
+            code = judge.extract_code(result.content, "python")
+            last_code = code
+            ok, detail = self._probe_generator(spec, code)
+            if ok:
+                self.store.save_generator(int(problem["id"]), code, verified=1)
+                return code, detail
+            last_error = detail
+            feedback = (
+                "\n\n上一次生成的 generator.py 未通过验证，错误如下：\n"
+                + detail[:1800]
+                + "\n上一次的代码：\n```python\n" + last_code[:6000] + "\n```\n请在这份代码上定位修改，不要从零重写。"
+            )
+        if last_code.strip():
+            self.store.save_generator(int(problem["id"]), last_code, verified=0)
+        raise StageFailure(
+            STAGE_GENERATOR,
+            f"generator 连续 {MAX_GENERATOR_ATTEMPTS} 次未通过",
+            detail=last_error,
+        )
+
+    def _probe_generator(self, spec: Dict[str, Any], code: str) -> Tuple[bool, str]:
+        """子进程跑 generator（禁进程内 exec），用 grammar 校验产出。"""
+        if not code.strip():
+            return False, "返回内容里没有代码"
+        checks: List[str] = []
+        for profile, seed in (("tiny", 1), ("edge", 2), ("max", 3), ("small", 4)):
+            result = run_case("python", code, "", GENERATOR_TIMEOUT_MS, args=(str(seed), profile))
+            verdict = str(result.get("verdict"))
+            if verdict != VERDICT_AC:
+                return False, (
+                    f"profile={profile} seed={seed} 执行失败 verdict={verdict}\n"
+                    f"stderr={str(result.get('stderr') or '')[:800]}"
+                )
+            text = str(result.get("stdout") or "")
+            if not text.strip():
+                return False, f"profile={profile} 没有输出任何数据"
+            try:
+                parsed = input_parser.parse_input(spec, text)
+            except grammar_engine.GrammarError as exc:
+                return False, f"profile={profile} 输出不符合 input_grammar：{exc.render()}"
+            violations = input_parser.validate_input(spec, parsed)
+            if violations:
+                return False, f"profile={profile} 校验失败：{violations[0]}"
+            checks.append(f"{profile}:{len(text)}B")
+        return True, "profiles=" + ",".join(checks)
+
+    # ── ③ 参考解 + 小规模对拍 ────────────────────────────────────────────────
+    def _stage_references(
+        self,
+        problem: Dict[str, Any],
+        spec: Dict[str, Any],
+        samples: List[Dict[str, str]],
+        generator_code: str,
+    ) -> Tuple[Dict[str, RefArtifact], str]:
+        sample_cases = [
+            {"id": f"sample{i}", "input": sample.get("input", ""), "expected": sample.get("output", "")}
+            for i, sample in enumerate(samples, start=1)
+        ]
+        refs: Dict[str, RefArtifact] = build_all(self, problem, spec, samples, sample_cases)
+        self.store.save_references(int(problem["id"]), refs)
+
+        tiny_cases, rejected = self._generate_cases(
+            spec, generator_code, profile="tiny", count=self.cross_cases, seed_base=1000
+        )
+        cross_detail = self._cross_check(spec, refs, tiny_cases)
+        if rejected:
+            cross_detail += f"，生成被拒 {rejected} 条"
+        self._verify_from_cross(refs, tiny_cases)
+        mark_primary(refs)
+        self.store.save_references(int(problem["id"]), refs)
+        return refs, cross_detail
+
+    def _build_solution(
+        self,
+        problem: Dict[str, Any],
+        spec: Dict[str, Any],
+        samples: List[Dict[str, str]],
+        *,
+        lang: str,
+        role: str,
+        template: str,
+        cases: List[Dict[str, Any]],
+        attempts: int,
+        approach_hint: str = "",
+    ) -> RefArtifact:
+        artifact = RefArtifact(lang=lang, role=role, code="", samples_total=len(cases))
+        base_user = (
+            user_blocks(statement_excerpt(problem), samples)
+            + f"\n\n## 目标语言\nlang = {lang}\n\n## 已确认的 spec\n"
+            + spec_block(spec)
+        )
+        if approach_hint:
+            base_user += f"\n\n## 指定解法\n{approach_hint}\n必须按这个思路实现，不要换成别的算法。"
+        feedback = ""
+        last_error = ""
+        for attempt in range(1, attempts + 1):
+            fresh = attempt % 2 == 0  # 偶数次独立重写（换思路），避免在同一错解上打转
+            result = self._chat(
+                template, base_user if fresh else base_user + feedback,
+                tag=f"{role}_{lang}#{attempt}", max_tokens=32768, json_mode=False,
+                temperature=0.0 if attempt == 1 else (0.8 if fresh else 0.35),
+            )
+            code = judge.extract_code(result.content, lang)
+            last_code = code
+            banned = self.store.load_tags(int(problem["id"])).get("injection_tokens") or []
+            hit = [name for name in banned if name in code]
+            if hit:
+                last_error = f"代码使用了题面注入要求的标识符 {hit}，必须改名后重出"; feedback = "\n\n" + last_error
+                continue
+            batch = judge.run_solution(
+                lang,
+                code,
+                cases,
+                checker_type=spec.get("checker_type", "exact"),
+                float_eps=float(spec.get("float_eps") or 1e-6),
+                time_limit_ms=SAMPLE_TIMEOUT_MS,
+            )
+            if batch.compile_error:
+                last_error = batch.compile_error
+            elif not batch.all_accepted:
+                last_error = judge.failure_hint(batch, cases=cases)
+            else:
+                artifact.code = code
+                artifact.samples_passed = sum(1 for run in batch.runs if run.accepted)
+                artifact.verify_record = {"sample_max_elapsed_ms": batch.max_elapsed_ms}
+                return artifact
+            feedback = ("\n\n上一次提交的代码未通过样例。错误与输入/期望/实际如下：\n" + last_error[:2200]
+                        + "\n上一次的代码：\n```" + lang + "\n" + last_code[:6000] + "\n```\n请在这份代码上定位修改。")
+        raise StageFailure(STAGE_REFERENCES, f"{role}({lang}) 连续 {attempts} 次未通过样例", detail=last_error[:2000])
+
+    def _cross_check(
+        self,
+        spec: Dict[str, Any],
+        refs: Dict[str, RefArtifact],
+        tiny_cases: List[Dict[str, Any]],
+    ) -> str:
+        """小规模对拍：ref_py 为基准，ref_cpp / brute 对齐；分歧不投票，直接降级。"""
+        self._cross_outputs = {}
+        self._cross_result = None
+        if not tiny_cases:
+            return "无小规模用例，未对拍"
+        outputs: Dict[str, Dict[str, str]] = {}
+        elapsed: Dict[str, float] = {}
+        for key, artifact in refs.items():
+            batch = judge.run_solution(
+                artifact.lang,
+                artifact.code,
+                tiny_cases,
+                checker_type=spec.get("checker_type", "exact"),
+                float_eps=float(spec.get("float_eps") or 1e-6),
+                time_limit_ms=ORACLE_TIMEOUT_MS,
+                compare_expected=False,
+            )
+            if batch.compile_error:
+                self._note(f"{key} 对拍编译失败：{batch.compile_error[:200]}")
+                continue
+            outputs[key] = judge.batch_outputs(batch)
+            elapsed[key] = batch.max_elapsed_ms
+        baseline_key = "python/reference"
+        if baseline_key not in outputs:
+            return "ref_py 未产出，未对拍"
+        candidates = {key: value for key, value in outputs.items() if key != baseline_key}
+        result = cross_check_engine.cross_check(
+            baseline_name=baseline_key,
+            baseline=outputs[baseline_key],
+            candidates=candidates,
+            checker_type=spec.get("checker_type", "exact"),
+            float_eps=float(spec.get("float_eps") or 1e-6),
+        )
+        self._cross_result = result
+        self._cross_outputs = outputs
+        spend = {key: round(value, 1) for key, value in elapsed.items()}
+        return (
+            f"{len(tiny_cases)} 例 × {sorted(outputs)} | 一致={result.ok} "
+            f"分歧={len(result.disagreements)} 缺输出={result.missing_cases} "
+            f"max_elapsed_ms={spend}"
+        )
+
+    def _verify_from_cross(
+        self, refs: Dict[str, RefArtifact], tiny_cases: List[Dict[str, Any]]
+    ) -> None:
+        """把对拍结论回写每份产物的 verified（样例全过 && 对拍一致 才置 1）。"""
+        result = self._cross_result
+        outputs = self._cross_outputs
+        for key, artifact in refs.items():
+            artifact.cross_ok = False
+            record = dict(artifact.verify_record)
+            record.update(
+                {
+                    "samples_passed": artifact.samples_passed,
+                    "samples_total": artifact.samples_total,
+                    "small_cases": len(tiny_cases),
+                    "max_n_covered": "tiny",
+                    "disagreements": (result.disagreements[:3] if result else []),
+                }
+            )
+            if artifact.samples_total and artifact.samples_passed < artifact.samples_total:
+                artifact.verified = 0
+                artifact.verification_level = cross_check_engine.TRUST_REFERENCE_ONLY
+                artifact.degrade_reason = "样例未全过"
+            elif peer_consistent(key, result, outputs):
+                artifact.cross_ok = True
+                artifact.verified = 1
+                artifact.verification_level = cross_check_engine.TRUST_CROSS_VERIFIED
+                artifact.degrade_reason = ""
+            else:
+                artifact.verified = 0
+                artifact.verification_level = cross_check_engine.TRUST_REFERENCE_ONLY
+                artifact.degrade_reason = "小规模对拍不一致（见 verify_record.disagreements）"
+            artifact.verify_record = record
+
+    # ── ④⑤ 分层数据 + 期望输出 ───────────────────────────────────────────────
+    def _stage_datasets(
+        self,
+        problem_id: int,
+        spec: Dict[str, Any],
+        generator_code: str,
+        refs: Dict[str, RefArtifact],
+    ) -> Tuple[Dict[str, int], str]:
+        layers: Dict[str, List[Dict[str, Any]]] = {}
+        layers["sample"] = [
+            {
+                "id": f"sample{i}",
+                "input": sample.get("input", ""),
+                "expected": sample.get("output", ""),
+                "seed": None,
+                "size_class": "sample",
+            }
+            for i, sample in enumerate(spec.get("samples") or [], start=1)
+            if str(sample.get("input") or "").strip()
+        ]
+        layers["boundary"], rejected_edge = self._generate_cases(
+            spec, generator_code, profile="edge", count=self.boundary_cases, seed_base=500
+        )
+        layers["exhaustive"], rejected_tiny = self._generate_cases(
+            spec, generator_code, profile="tiny", count=self.exhaustive_cases, seed_base=2000
+        )
+        layers["stress"], rejected_max = self._generate_cases(
+            spec, generator_code, profile="max", count=self.stress_cases, seed_base=9000
+        )
+        self._note("adversarial 层未实现（缺专用生成模板），本次不产出")
+        if rejected_edge or rejected_tiny or rejected_max:
+            self._note(
+                f"生成被 grammar/constraints 拒绝：edge={rejected_edge} "
+                f"tiny={rejected_tiny} max={rejected_max}"
+            )
+
+        rows: List[Dict[str, Any]] = []
+        for layer, cases in layers.items():
+            if not cases:
+                self._note(f"{layer} 层没有合法数据（生成全被拒），跳过")
+                continue
+            rows.extend(self._build_layer_rows(spec, refs, layer=layer, cases=cases))
+        counts = self.store.save_cases(problem_id, rows)
+        return counts, " ".join(f"{layer}={count}" for layer, count in sorted(counts.items()))
+
+    def _build_layer_rows(
+        self,
+        spec: Dict[str, Any],
+        refs: Dict[str, RefArtifact],
+        *,
+        layer: str,
+        cases: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        checker = spec.get("checker_type", "exact")
+        eps = float(spec.get("float_eps") or 1e-6)
+        impls: Dict[str, Dict[str, str]] = {}
+        for key, artifact in refs.items():
+            if artifact.role == "brute" and layer == "stress":
+                continue  # 大数据层不跑暴力解（无 oracle 意义，且会跑到天荒地老）
+            batch = judge.run_solution(
+                artifact.lang, artifact.code, cases, checker_type=checker,
+                float_eps=eps, time_limit_ms=ORACLE_TIMEOUT_MS, compare_expected=False,
+            )
+            if batch.compile_error:
+                self._note(f"{key} 在 {layer} 层编译失败，跳过该实现")
+                continue
+            impls[key] = judge.batch_outputs(batch)
+        if not impls:
+            raise StageFailure(STAGE_DATASETS, f"{layer} 层没有任何实现产出期望输出")
+
+        rows: List[Dict[str, Any]] = []
+        for case in cases:
+            case_id = case["id"]
+            values = {key: outputs.get(case_id) for key, outputs in impls.items()}
+            verdict = self._agree(values, checker, eps)
+            if verdict["output"] is None:
+                self._note(f"{layer}/{case_id} 无一致期望输出，跳过")
+                continue
+            trust = cross_check_engine.decide_trust_level(
+                layer=layer,
+                agreeing_impls=verdict["agreeing"],
+                disagreeing_impls=0 if verdict["consistent"] else 1,
+            )
+            source = cross_check_engine.source_of_truth_for(layer, impls=verdict["agreeing"])
+            if layer == "sample":
+                trust = cross_check_engine.TRUST_ORACLE
+                source = cross_check_engine.SOURCE_SAMPLE
+            if trust == cross_check_engine.TRUST_CONFLICT:
+                self._note(f"{layer}/{case_id} 各实现分歧，标 conflict 待人工复核")
+            rows.append(
+                {
+                    "layer": layer,
+                    "input": case["input"],
+                    "expected": verdict["output"],
+                    "seed": case.get("seed"),
+                    "size_class": case.get("size_class") or layer,
+                    "source": source,
+                    "trust": trust,
+                    "impls": verdict["agreeing"],
+                }
+            )
+        return rows
+
+    def _agree(self, values: Dict[str, Optional[str]], checker: str, eps: float) -> Dict[str, Any]:
+        return agree(values, checker, eps)
+
+    # ── ⑥ 提示 ──────────────────────────────────────────────────────────────
+    def _stage_hints(
+        self,
+        problem: Dict[str, Any],
+        spec: Dict[str, Any],
+        refs: Dict[str, RefArtifact],
+    ) -> Tuple[List[Dict[str, Any]], str]:
+        base_user = (
+            user_blocks(statement_excerpt(problem), spec.get("samples") or [])
+            + "\n\n## 已确认的 spec\n"
+            + spec_block(spec)
+        )
+        ref_code = refs.get("python/reference")
+        feedback = ""
+        last_error = ""
+        batch_id = f"{problem['id']}-{uuid.uuid4().hex[:8]}"
+        for attempt in range(1, MAX_HINTS_ATTEMPTS + 1):
+            result = self._chat(
+                prompts.HINTS, base_user + feedback, tag=f"hints#{attempt}", max_tokens=8192
+            )
+            payload = result.json_obj or {}
+            levels = {level: str(payload.get(level) or "").strip() for level in ("L1", "L2", "L3")}
+            missing = [level for level, value in levels.items() if not value]
+            if missing:
+                last_error = f"缺字段 {missing}"
+                feedback = f"\n\n上一次输出缺少 {missing}，请重出完整 JSON。"
+                continue
+            flagged = {
+                level: reason
+                for level in levels
+                for reason in [judge.hint_quality_issue(levels[level])]
+                if reason
+            }
+            rows: List[Dict[str, Any]] = [
+                {
+                    "level": index,
+                    "content": levels[level],
+                    "quality_flag": 1 if level in flagged else 0,
+                    "flagged_reason": flagged.get(level, ""),
+                }
+                for index, level in enumerate(("L1", "L2", "L3"), start=1)
+            ]
+            if flagged:
+                self._note(f"L1~L3 含代码特征，已打 quality_flag：{flagged}")
+            if ref_code is not None and ref_code.verified:
+                rows.append(
+                    {"level": 4, "content": ref_code.code, "quality_flag": 0, "flagged_reason": ""}
+                )
+            else:
+                self._note("L4 未生成：参考解 verified=0，不把未验证代码当答案")
+            self.store.save_hints(int(problem["id"]), rows, batch_id)
+            detail = " ".join(
+                f"L{row['level']}={len(row['content'])}字" + ("(flag)" if row["quality_flag"] else "")
+                for row in rows
+            )
+            summary = [
+                {
+                    "level": row["level"],
+                    "chars": len(row["content"]),
+                    "quality_flag": row["quality_flag"],
+                    "flagged_reason": row["flagged_reason"],
+                }
+                for row in rows
+            ]
+            return summary, detail
+        raise StageFailure(
+            STAGE_HINTS, f"hints 连续 {MAX_HINTS_ATTEMPTS} 次不合格", detail=last_error
+        )
+
+    # ── 数据生成工具 ────────────────────────────────────────────────────────
+    def _generate_cases(
+        self,
+        spec: Dict[str, Any],
+        generator_code: str,
+        *,
+        profile: str,
+        count: int,
+        seed_base: int,
+    ) -> Tuple[List[Dict[str, Any]], int]:
+        """子进程调 generator 出数据，逐条过 grammar + constraints（不合法即丢弃并计数）。"""
+        cases: List[Dict[str, Any]] = []
+        rejected = 0
+        for offset in range(count):
+            seed = seed_base + offset
+            result = run_case(
+                "python", generator_code, "", GENERATOR_TIMEOUT_MS, args=(str(seed), profile)
+            )
+            if str(result.get("verdict")) != VERDICT_AC:
+                rejected += 1
+                continue
+            text = str(result.get("stdout") or "")
+            try:
+                parsed = input_parser.parse_input(spec, text)
+            except grammar_engine.GrammarError:
+                rejected += 1
+                continue
+            if input_parser.validate_input(spec, parsed):
+                rejected += 1
+                continue
+            checks = grammar_engine.evaluate_constraints(spec.get("constraints_exec") or [], parsed)
+            # 只对"确实求值为假"的约束拒数据；写不出来的约束是未判定，不能反过来卡死生成
+            if any(check.evaluated and not check.ok for check in checks):
+                rejected += 1
+                continue
+            cases.append(
+                {
+                    "id": f"{profile}{seed}",
+                    "input": text,
+                    "seed": seed,
+                    "size_class": profile,
+                }
+            )
+        return cases, rejected
+
+    def _account(self, spent: int, before_tokens: int, usage: Any = None) -> None:
+        """记一次调用（含失败重试）：次数进预算，token 按客户端累计差值算。"""
+        used = max(0, int(getattr(self.client.usage, "total_tokens", 0)) - before_tokens)
+        calls = max(1, int(spent))
+        self.budget.record(usage, calls=calls)
+        self._calls_this_run += calls
+        self._tokens_this_run += used
+        if self._tokens_this_run > self.token_cap:
+            raise BudgetExhausted(
+                f"本题 token 超上限（{self._tokens_this_run}/{self.token_cap}）"
+            )
+
+    def _chat(self, template_name: str, user_content: str, *, tag: str,
+              max_tokens: int = 4096, json_mode: bool = True,
+              temperature: float = 0.2) -> Any:
+        """一次 LLM 调用（json_mode=False 用于要代码的阶段；重试同样计费，失败也记）。"""
+        if self.deadline_ts is not None and time.monotonic() > self.deadline_ts:
+            raise StageFailure("timeout", f"单题超过时限（deadline 已到，tag={tag}）")
+        if self._calls_this_run >= self.call_cap or self._tokens_this_run >= self.token_cap:
+            raise BudgetExhausted(
+                f"本题预算已到（calls {self._calls_this_run}/{self.call_cap}，"
+                f"tokens {self._tokens_this_run}/{self.token_cap}）"
+            )
+        self.budget.ensure()
+        messages = [{"role": "system", "content": prompts.load(template_name)},
+                    {"role": "user", "content": user_content}]
+        stage = stage_key(tag)
+        thinking, thinking_budget = THINKING_POLICY.get(stage, ("default", 0))
+        before_tokens = int(getattr(self.client.usage, "total_tokens", 0))
+        try:
+            result = self.client.chat(
+                messages,
+                json_mode=json_mode,
+                tag=tag,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                stage=stage,
+                problem_id=self._problem_id,
+                thinking=thinking,
+                thinking_budget=thinking_budget,
+            )
+        except Exception as exc:  # 失败也要记账：重试同样花钱
+            self._account(int(getattr(exc, "attempts", 1) or 1), before_tokens)
+            raise
+        self._account(int(result.attempts), before_tokens, result.usage)
+        return result
+
+    def _note(self, message: str) -> None:
+        self._notes.append(message); self._log(f"[note] {message}")
+    def _log(self, message: str) -> None:
+        if self.verbose:
+            print(message)

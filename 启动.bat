@@ -1,11 +1,39 @@
 @echo off
-chcp 65001 >nul
+setlocal
+chcp 936 >nul
 cd /d "%~dp0"
-if not exist ".venv\Scripts\pythonw.exe" (
-    echo [é”™è¯¯] æœªæ‰¾åˆ°è™šæ‹Ÿç¯å¢ƒï¼Œè¯·å…ˆæ‰§è¡Œï¼š
-    echo   python -m venv .venv
-    echo   .venv\Scripts\pip install PySide6 markdown pyflakes
+
+if not exist "%~dp0autocode\desktop\app.py" (
+    echo [´íÎó] Î´ÕÒµ½ autocode ×ÀÃæ°æ£¬ÇëÈ·ÈÏÏÂÔØÍêÕû¡£
     pause
     exit /b 1
 )
-start "" ".venv\Scripts\pythonw.exe" main.py
+
+if not exist "%~dp0.venv\Scripts\python.exe" (
+    echo [Ê×´ÎÔËĞĞ] ÕıÔÚ´´½¨ĞéÄâ»·¾³...
+    where py >nul 2>&1
+    if not errorlevel 1 (
+        py -3 -m venv "%~dp0.venv"
+    ) else (
+        python -m venv "%~dp0.venv"
+    )
+    if errorlevel 1 (
+        echo [´íÎó] ´´½¨ĞéÄâ»·¾³Ê§°Ü¡£ÇëÏÈ°²×° Python 3.10+ ²¢¼ÓÈë PATH¡£
+        pause
+        exit /b 1
+    )
+)
+
+"%~dp0.venv\Scripts\python.exe" -c "import webview, psutil" >nul 2>&1
+if errorlevel 1 (
+    echo [Ê×´ÎÔËĞĞ] ÕıÔÚ°²×°ÒÀÀµ...
+    "%~dp0.venv\Scripts\python.exe" -m pip install -r "%~dp0requirements.txt"
+    if errorlevel 1 (
+        echo [´íÎó] ÒÀÀµ°²×°Ê§°Ü£¬Çë¼ì²éÍøÂçºóÖØÊÔ¡£
+        pause
+        exit /b 1
+    )
+)
+
+start "" /d "%~dp0" "%~dp0.venv\Scripts\pythonw.exe" "%~dp0run_desktop.pyw"
+exit /b 0

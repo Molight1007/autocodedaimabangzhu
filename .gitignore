@@ -60,7 +60,20 @@ build_exe.bat
 upload.bat
 Git使用指南.md
 File/key.txt
-tests/
+# 旧工程测试目录（仅根级；必须带前导斜杠，否则 tests/ 会连带忽略 autocode/tests/）
+# 注意：此处不要再加 !autocode/tests/** —— 否定模式会让 `git check-ignore -v` 把它当作
+# "匹配到的规则"输出并返回 0，反而制造"测试被忽略"的假警报（`-q` 不受否定模式影响，
+# 所以加了只会污染 `-v` 的读者，没有任何收益）。改为由
+# autocode/tests/test_kernel_import.py::TestRepositoryHygiene 运行 git check-ignore -q 守卫。
+/tests/
 
 # 临时文件目录
 .tmp/
+
+# autoCode 本地数据（R5：SQLite 库及 -wal/-shm 不得进仓库）
+/data/
+
+# 本地设计文档（架构设计等，仅本地保留）
+/docs/
+/架构设计.md
+exports/

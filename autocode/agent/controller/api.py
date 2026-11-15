@@ -1,0 +1,84 @@
+"""Isolated Agent 对外控制层入口。
+
+核心职责：
+- 提供可直接接入的最小 API：创建会话、分发动作、自治循环。
+- 隔离调用方与内部类实现，后续替换 dispatcher 时保持外部接口稳定。
+
+上下文分层机制（本文件负责参数落地，不负责提示词拼装）：
+- 规则 A（固定消息）：循环层固定保留 system / 原始题目 / 当前最新代码三条消息，其中题目与代码只做超长裁剪。
+- 规则 B（动态区裁剪）：后续交互按“assistant 动作摘要 + user 结果摘要”追加，只保留最近 N 轮动态消息（默认 15，最大 30）。
+- 本文件通过 `context_rounds/max_recent_events` 将窗口配置下沉到状态与循环层，确保行为一致。
+
+不负责：
+- 不持有全局会话池；调用方需自行管理 session 生命周期。
+- 不存储长对话历史；仅维护当前权威代码、短摘要窗口和有限版本快照。
+"""
+
+from __future__ import annotations
+
+from typing import Any, Callable, Dict, Optional
+
+from ..contracts.protocol import DEFAULT_CONTEXT_ROUNDS, DEFAULT_MAX_AUTONOMOUS_ATTEMPTS, MAX_CONTEXT_ROUNDS
+from ..runtime import build_default_run_executor
+from ..session.state import AgentSessionState
+from .autonomous_loop import LoopConfig, create_autonomous_dispatcher, run_autonomous_loop
+from .dispatcher import ActionDispatcher, RunExecutor
+
+
+def create_session(
+    *,
+    session_id: str,
+    candidate_code: str,
+    max_recent_events: int = DEFAULT_CONTEXT_ROUNDS,
+    runtime_context: Optional[Dict[str, Any]] = None,
+) -> AgentSessionState:
+    state = AgentSessionState(
+        session_id=str(session_id or "").strip() or "isolated-agent-session",
+        current_code=str(candidate_code or ""),
+        max_recent_events=min(MAX_CONTEXT_ROUNDS, max(1, int(max_recent_events or DEFAULT_CONTEXT_ROUNDS))),
+    )
+    if isinstance(runtime_context, dict) and runtime_context:
+        state.runtime_context = dict(runtime_context)
+    return state
+
+
+def dispatch_action(
+    *,
+    payload: Dict[str, Any],
+    state: AgentSessionState,
+    run_executor: Optional[RunExecutor] = None,
+) -> Dict[str, Any]:
+    executor = run_executor or build_default_run_executor()
+    dispatcher = ActionDispatcher(run_executor=executor)
+    return dispatcher.dispatch(payload, state)
+
+
+def run_autonomous_session(
+    *,
+    state: AgentSessionState,
+    problem: Dict[str, Any],
+    llm_caller,
+    run_executor: Optional[RunExecutor] = None,
+    max_attempts: int = DEFAULT_MAX_AUTONOMOUS_ATTEMPTS,
+    context_rounds: int = DEFAULT_CONTEXT_ROUNDS,
+    on_step_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+    should_stop: Optional[Callable[[], bool]] = None,
+) -> Dict[str, Any]:
+    if "problem" not in state.runtime_context:
+        state.runtime_context["problem"] = dict(problem or {})
+
+    dispatcher = create_autonomous_dispatcher(run_executor=run_executor or build_default_run_executor())
+    rounds = min(MAX_CONTEXT_ROUNDS, max(1, int(context_rounds or DEFAULT_CONTEXT_ROUNDS)))
+    config = LoopConfig(
+        max_attempts=max_attempts,
+        context_rounds=rounds,
+        on_step_callback=on_step_callback,
+        should_stop=should_stop,
+    )
+    return run_autonomous_loop(
+        state=state,
+        problem=dict(problem or {}),
+        llm_caller=llm_caller,
+        dispatcher=dispatcher,
+        config=config,
+    )
