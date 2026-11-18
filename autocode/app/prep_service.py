@@ -5,7 +5,7 @@
     ① spec      题面 → spec JSON          门：schema + grammar 定义 + 样例回放解析
     ② generator 写 generator.py（不写数据）门：子进程执行 → grammar.parse+validate → 多 profile 覆盖
     ③ 参考解    ref_py / ref_cpp / brute   门：编译 → 样例全过 → 小规模对拍
-    ④⑤ 分层数据 sample/boundary/exhaustive/stress + 期望输出（adversarial 暂缺，如实标）
+    ④⑤ 分层数据 sample/boundary/exhaustive/stress + 期望输出（adversarial 需错解输入，由独立入口按需生成）
     ⑥ 提示      L1/L2/L3（LLM，禁代码）+ L4（引用已验证参考解，不调 LLM）
 
 失败口径：任一阶段门不过 → `problems.status='failed'`、`failed_stage=<stage>`、错误原文入
@@ -585,7 +585,10 @@ class PrepService(LlmStageMixin):
         layers["stress"], rejected_max = self._generate_cases(
             spec, generator_code, profile="max", count=self.stress_cases, seed_base=9000
         )
-        self._note("adversarial 层未实现（缺专用生成模板），本次不产出")
+        self._note(
+            "adversarial 层需学生错解，由独立入口 generate_adversarial 按需生成，"
+            "prepare 不产出"
+        )
         if rejected_edge or rejected_tiny or rejected_max:
             self._note(
                 f"生成被 grammar/constraints 拒绝：edge={rejected_edge} "
