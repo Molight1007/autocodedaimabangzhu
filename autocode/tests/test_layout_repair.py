@@ -6,6 +6,7 @@ import unittest
 
 from autocode.app.layout_repair import (
     normalize_chars,
+    restore_merged_lines,
     sanitize_sample,
     strip_number_column,
 )
@@ -41,6 +42,15 @@ class TestLayoutRepair(unittest.TestCase):
         self.assertIn("9 7\nPar les soirs bleus dete jirai dans les sentiers", inp)
         self.assertIn("PICOTE PAR LES BLES", inp)
         self.assertIn("merged_lines_restored", notes)
+
+    def test_two_line_input_not_misread_as_merged(self) -> None:
+        """两行正常数据不能被当成“压平行”：`5 2` 里的 m=2 不是行号。"""
+        text = "5 2\n10 50 10 10 20\n"
+        restored, hit = restore_merged_lines(text)
+        self.assertFalse(hit)
+        self.assertEqual(restored, text)
+        inp, _, _ = sanitize_sample(text, "586\n")
+        self.assertEqual(inp, text)
 
     def test_output_line_number_stripped_with_input(self) -> None:
         inp, out, notes = sanitize_sample("1\n4\n2\n1 2 3 4\n", "1\n10\n")

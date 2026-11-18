@@ -218,12 +218,60 @@ THINKING_POLICY: Dict[str, Tuple[str, int]] = {
 }
 
 
+#: 分阶段温度策略（与 THINKING_POLICY 同风格）：显式传 temperature 时以调用点为准。
+#: 口径：
+#: - 结构化抽取 / 代码生成 / 判题相关 → 0.0（同输入要同输出，可复现、可审计）；
+#: - 教学文本（hints/explanation）→ 0.4（要一点表达多样性，但不能跑题）；
+#: - 解析类补充（method_analysis/code_notes）→ 0.2（贴着既有代码讲，少发挥）；
+#: - plan（列解法清单）→ 0.3；diagnose（错因诊断）→ 0.2（要指向具体证据）。
+TEMPERATURE_POLICY: Dict[str, float] = {
+    "spec": 0.0,
+    "generator": 0.0,
+    "reference": 0.0,
+    "brute": 0.0,
+    "parser": 0.0,
+    "hints": 0.4,
+    "explanation": 0.4,
+    "method_analysis": 0.2,
+    "code_notes": 0.2,
+    "plan": 0.3,
+    "diagnose": 0.2,
+}
+
+#: 未命中策略表时的兜底温度（历史默认值，保持向后兼容）。
+DEFAULT_TEMPERATURE = 0.2
+
+#: stage_key 的识别顺序：长前缀在前，避免 `plan` 抢走 `planner`、`reference` 抢走自身以外的东西。
+#: `agent*` 是 ref_agent 的试跑模式（tag=`agent_python#1`），策略与 reference 相同；
+#: `student_diagnose` 与 `diagnose` 归一到同一策略键。
+_STAGE_PREFIXES: tuple[str, ...] = (
+    "method_analysis",
+    "code_notes",
+    "student_diagnose",
+    "diagnose",
+    "explanation",
+    "reference",
+    "generator",
+    "parser",
+    "brute",
+    "hints",
+    "spec",
+    "plan",
+    "agent",
+)
+
+
 def stage_key(tag: str) -> str:
-    """从 tag（如 `reference_python#2`）提取策略键。"""
+    """从 tag（如 `reference_python#2`）提取策略键（温度/思考策略共用）。"""
     head = str(tag or "").split("#")[0]
     if head.startswith("alt"):
         return "reference"
-    for key in ("reference", "generator", "hints", "brute", "spec", "parser", "plan", "explanation"):
+    for key in _STAGE_PREFIXES:
         if head.startswith(key):
+            # 归一口径：student_diagnose → diagnose；agent（ref_agent 试跑）→ reference
+            if key == "student_diagnose":
+                return "diagnose"
+            if key == "agent":
+                return "reference"
             return key
     return ""

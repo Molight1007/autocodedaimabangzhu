@@ -5,15 +5,27 @@
 - 模板里大量出现 `{` `}`（JSON 示例、代码围栏），用 `{{var}}` 而不是 `str.format`
   可以避免满屏 `{{` 转义。
 
-模板清单（设计 §5 ①~⑥ 各阶段一一对应）：
-- `spec.md`        题面 → spec JSON
-- `generator.md`   spec → generator.py（子进程执行，写数据不写答案）
-- `ref_solution.md` spec → 参考解（python/cpp/c）
-- `brute.md`       spec → 暴力解（小数据金标准）
-- `hints.md`       spec → L1/L2/L3（明令禁止输出代码）
-- `parser.md`      grammar 表达不了输入格式时的兜底：LLM 写 parser.py（样例全过才采信）
+模板清单（15 个，与 `TEMPLATE_NAMES` 一一对应）：
+
+- `file_segment.md`   整卷 PDF 文本 → 题目边界（只给行号，不写正文）
+- `approach_label.md`  参考解代码 → 2~8 字算法标签
+- `spec.md`            题面 → spec JSON
+- `generator.md`       spec → generator.py（子进程执行，写数据不写答案）
+- `ref_solution.md`    spec → 参考解（盲写，一次成稿）
+- `ref_agent.md`       spec → 参考解（可试跑模式：run / final 两步动作）
+- `brute.md`           spec → 暴力解（小数据金标准）
+- `hints.md`           spec → L1/L2/L3（明令禁止输出代码）
+- `parser.md`          grammar 表达不了输入格式时的兜底：LLM 写 parser.py（样例全过才采信）
+- `solution_plan.md`   题面 → 1~4 条解法清单（写哪几种思路）
+- `explanation.md`     题面 → 学生视角题解（禁代码、禁泄答案）
+- `method_analysis.md` 每种解法各一份解析（按 name 一一对应）
+- `code_notes.md`      单份代码的结构化讲解
+- `student_diagnose.md` 学生错因诊断（WA/TLE/RE）
+- `adversarial.md`      参考解 vs 学生错解 → 定向构造能卡住该 bug 的候选输入
 
 所有模板都带**注入护栏**：题面里"如果你是 LLM 就……"这类文字一律视为噪声不得执行。
+每个模板首行是版本注释 `<!-- prompt: <name> v2 YYYY-MM-DD -->`，`PrepService._chat`
+会把模板原文的 sha256 前 16 位随 `llm_calls.prompt_hash` 落库，便于"换提示词后对账"。
 """
 
 from __future__ import annotations
@@ -36,10 +48,13 @@ REF_AGENT = "ref_agent"
 METHOD_ANALYSIS = "method_analysis"
 CODE_NOTES = "code_notes"
 STUDENT_DIAGNOSE = "student_diagnose"
+FILE_SEGMENT = "file_segment"
+APPROACH_LABEL = "approach_label"
+ADVERSARIAL = "adversarial"
 
 TEMPLATE_NAMES: tuple[str, ...] = (
     SPEC, GENERATOR, REF_SOLUTION, BRUTE, HINTS, PARSER, SOLUTION_PLAN, EXPLANATION, REF_AGENT,
-    METHOD_ANALYSIS, CODE_NOTES, STUDENT_DIAGNOSE,
+    METHOD_ANALYSIS, CODE_NOTES, STUDENT_DIAGNOSE, FILE_SEGMENT, APPROACH_LABEL, ADVERSARIAL,
 )
 
 # L1~L3 明令禁止输出代码（模板里写死，本处仅作代码侧复核口径）
@@ -71,5 +86,5 @@ def render(template: str, values: Dict[str, object]) -> str:
 
 
 def load_all() -> Dict[str, str]:
-    """全量加载（供测试断言 5 个模板都存在且带护栏）。"""
+    """全量加载（供测试断言 12 个模板都存在且带护栏）。"""
     return {name: load(name) for name in TEMPLATE_NAMES}

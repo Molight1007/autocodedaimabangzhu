@@ -12,8 +12,8 @@
 
 实测坑（已内建处理）：
 - **推理模型**（如 `deepseek-v4-flash`）：`max_tokens` 太小会被 reasoning 吃光，
-  `content` 返回空串。故 max_tokens 下限 4096、空 content 视为失败并**加倍重试**，
-  `reasoning_tokens` 单独记账（不混进 completion_tokens 解释）。
+  `content` 返回空串。默认下限 4096（可用 `respect_max_tokens` 跳过）；空 content
+  视为失败、关 thinking 后重试，`reasoning_tokens` 单独记账（不混进 completion）。
 - **JSON 输出**：先试 `response_format={"type":"json_object"}`；若服务端 400 不支持，
   自动退回"围栏提取 + 括号配平截取"，并在本次进程内记住该能力，避免反复 400。
 
@@ -27,12 +27,14 @@ from __future__ import annotations
 
 import json
 import os
+import queue
+import threading
 import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional
+from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
 DEFAULT_BASE_URL = "https://api.deepseek.com/v1"
 DEFAULT_MODEL = "deepseek-chat"
@@ -276,7 +278,9 @@ def extract_json_object(text: str) -> Optional[Dict[str, Any]]:
         candidates.append(balanced)
     for chunk in candidates:
         try:
-            parsed = json.loads(chunk)
+            # strict=False：模型常在 L1~L3 里直接输出真实换行（未转义 \n），
+            # 严格模式会整份判失败，重试也只是再烧一次调用。
+            parsed = json.loads(chunk, strict=False)
         except (json.JSONDecodeError, ValueError):
             continue
         if isinstance(parsed, dict):
@@ -334,51 +338,67 @@ class LlmClient:
         problem_id: Optional[int] = None,
         thinking: str = "default",
         thinking_budget: int = 0,
+        prompt_hash: str = "",
+        respect_max_tokens: bool = False,
+        on_truncate: str = "grow",
+        wall_clock_s: Optional[float] = None,
+        deadline_ts: Optional[float] = None,
+        expect: Optional[Callable[[Dict[str, Any]], Optional[str]]] = None,
     ) -> ChatResult:
-        """发一次对话请求。`json_mode=True` 时要求返回可解析 JSON 对象。
+        """发一次对话请求；`json_mode=True` 要求返回可解析 JSON 对象。
 
-        `thinking`：`disabled` / `enabled` / `default`。推理模型把大量 token 花在
-        reasoning 上，结构化抽取类阶段（spec/hints/brute）关掉它可省 60%+ 输出；
-        代码生成类阶段保留但设 `budget_tokens` 上限。服务端不认该字段时自动降级。
+        5 个可选护栏参数（语义见各 helper 的 docstring）：`respect_max_tokens` /
+        `on_truncate` / `wall_clock_s` / `deadline_ts` / `expect`，**默认全部保持旧行为**。
+        `thinking`：`disabled`/`enabled`/`default`；`prompt_hash` 是只落库的模板版本指纹。
         """
         if not messages:
             raise LlmConfigError("messages 不能为空")
         self.calls += 1
-        budget_tokens = max(MIN_MAX_TOKENS, int(max_tokens))
+        if respect_max_tokens:
+            budget_tokens = min(MAX_TOKENS_CAP, max(1, int(max_tokens)))
+        else:
+            budget_tokens = max(MIN_MAX_TOKENS, int(max_tokens))
         attempts_allowed = 1 + max(0, int(self.config.max_retries))
         last_error = ""
         attempt_messages = list(messages)
         empty_retry_done = False
         truncated_retry_done = False
         for attempt in range(1, attempts_allowed + 1):
-            payload: Dict[str, Any] = {
-                "model": self.config.model,
-                "messages": attempt_messages,
-                "temperature": temperature,
-                "max_tokens": budget_tokens,
-                "stream": False,
-            }
-            if thinking in ("disabled", "enabled") and self._thinking_supported:
-                payload["thinking"] = {"type": thinking}
-                if thinking == "enabled" and thinking_budget > 0:
-                    payload["thinking"]["budget_tokens"] = int(thinking_budget)
-            use_json_mode = bool(json_mode and self._json_mode_supported)
-            if use_json_mode:
-                payload["response_format"] = {"type": "json_object"}
+            # 整题墙钟：调用前先查，调用中由 _post_bounded 卡住（旧实现只查调用前）。
+            remaining: Optional[float] = None
+            if deadline_ts is not None:
+                remaining = float(deadline_ts) - time.monotonic()
+                if remaining <= 0:
+                    last_error = "整题墙钟预算已耗尽"
+                    break
+            effective_wall = remaining if wall_clock_s is None else (
+                remaining if remaining is not None and remaining < wall_clock_s else wall_clock_s
+            )
+            payload, use_json_mode = self._payload_for(
+                attempt_messages, temperature=temperature, budget_tokens=budget_tokens,
+                thinking=thinking, thinking_budget=thinking_budget, json_mode=json_mode,
+            )
             started = time.perf_counter()
+            single_timeout = timeout_s or self.config.timeout_s
+            if effective_wall is not None and effective_wall > 0:
+                single_timeout = max(1, min(int(single_timeout), int(effective_wall) + 1))
             try:
-                body = self._post(payload, timeout_s=timeout_s or self.config.timeout_s)
+                body = self._post_bounded(
+                    payload, timeout_s=single_timeout, wall_clock_s=effective_wall
+                )
             except LlmConfigError as exc:
                 self._record_attempt(stage, problem_id, attempt, tag, False, f"config:{exc.status}",
-                                     ChatUsage(), 0.0)
-                if self._handle_config_error(exc, json_mode=json_mode, tag=tag):
-                    continue  # 已降级（关 JSON 模式 / 换 key / 去 thinking），立刻重试
+                                     ChatUsage(), 0.0, prompt_hash)
+                if self._handle_config_error(exc, payload=payload, json_mode=json_mode, tag=tag):
+                    continue  # 已按实际发送的参数精确降级，立刻重试
                 self.failures += 1
                 raise
             except LlmError as exc:
                 self._record_attempt(stage, problem_id, attempt, tag, False,
-                                     f"http:{type(exc).__name__}", ChatUsage(), 0.0)
+                                     f"http:{type(exc).__name__}", ChatUsage(), 0.0, prompt_hash)
                 last_error = str(exc)
+                if deadline_ts is not None and time.monotonic() >= float(deadline_ts):
+                    break
                 self._backoff(attempt, attempts_allowed, last_error, tag)
                 continue
             elapsed_ms = round((time.perf_counter() - started) * 1000.0, 1)
@@ -387,37 +407,21 @@ class LlmClient:
             )
             # 每次尝试都计入用量：重试/空返回/解析失败同样计费，不能只记成功
             self._accumulate(result)
-            truncated = result.finish_reason == "length"
-            ok = (
-                bool(result.content.strip())
-                and not truncated
-                and (not json_mode or result.json_obj is not None)
-            )
-            self._record_attempt(
-                stage, problem_id, attempt, tag, ok,
-                "" if ok else (
-                    "truncated" if truncated else
-                    ("empty_content" if not result.content.strip() else "json_invalid")
-                ),
-                result.usage, elapsed_ms,
+            truncated, schema_error = self._classify_attempt(
+                result, json_mode=json_mode, expect=expect, stage=stage, problem_id=problem_id,
+                attempt=attempt, tag=tag, elapsed_ms=elapsed_ms, prompt_hash=prompt_hash,
             )
             if truncated:
-                # 被 max_tokens 截断的代码是残缺的，不能当成功；重发一次并要求精简
                 last_error = f"输出被 max_tokens={budget_tokens} 截断"
-                if truncated_retry_done:
+                if truncated_retry_done or on_truncate == "stop":
                     break
                 truncated_retry_done = True
-                attempt_messages = list(messages) + [
-                    {"role": "assistant", "content": result.content[:1500]},
-                    {
-                        "role": "user",
-                        "content": "上一次输出因长度上限被截断。请精简到最小可用实现后重出完整代码，"
-                                   "不要省略关键逻辑，不要重复注释。",
-                    },
-                ]
+                # 提示词要求"少写"，扩预算只会怂恿模型写更长（v2 实测教训）。
+                hint, budget_tokens = self._truncate_retry(
+                    json_mode=json_mode, on_truncate=on_truncate, budget_tokens=budget_tokens
+                )
+                attempt_messages = self._correction(messages, hint)
                 self._backoff(attempt, attempts_allowed, last_error, tag)
-                # 截断说明"代码确实比上限长"：先加倍上限；到顶后再要求精简
-                budget_tokens = min(MAX_TOKENS_CAP, max(budget_tokens * 2, 16384))
                 continue
             if not result.content.strip():
                 # 推理模型把 token 全花在 reasoning 上的典型表现：content 空
@@ -436,17 +440,10 @@ class LlmClient:
                 budget_tokens = min(MAX_TOKENS_CAP, max(budget_tokens, 8192))
                 self._backoff(attempt, attempts_allowed, last_error, tag)
                 continue
-            if json_mode and result.json_obj is None:
-                last_error = "JSON 解析失败（模型未按 JSON 输出）"
-                # 带纠正消息重试：只重发相同提示往往还会错，白烧一次
-                attempt_messages = list(messages) + [
-                    {"role": "assistant", "content": result.content[:2000]},
-                    {
-                        "role": "user",
-                        "content": "上一次输出不是合法 JSON。只输出一个 JSON 对象："
-                                   "不要 markdown 围栏、不要解释、不要前后缀。",
-                    },
-                ]
+            if json_mode and (result.json_obj is None or schema_error):
+                hint, last_error = self._json_retry(schema_error)
+                # 不回喂残缺输出：模型会把半截 JSON 当成"续写上文"，越补越坏。
+                attempt_messages = self._correction(messages, hint)
                 self._backoff(attempt, attempts_allowed, last_error, tag, content=result.content)
                 continue
             if self.verbose:
@@ -462,21 +459,175 @@ class LlmClient:
         )
 
     # ── 内部 ────────────────────────────────────────────────────────────────
-    def _handle_config_error(self, exc: LlmConfigError, *, json_mode: bool, tag: str) -> bool:
+    def _payload_for(
+        self, attempt_messages: List[Dict[str, str]], *, temperature: float,
+        budget_tokens: int, thinking: str, thinking_budget: int, json_mode: bool,
+    ) -> Tuple[Dict[str, Any], bool]:
+        """构造请求体，返回 (payload, 本次是否真的启用 json_mode)。"""
+        payload: Dict[str, Any] = {
+            "model": self.config.model,
+            "messages": attempt_messages,
+            "temperature": temperature,
+            "max_tokens": budget_tokens,
+            "stream": False,
+        }
+        if thinking in ("disabled", "enabled") and self._thinking_supported:
+            payload["thinking"] = {"type": thinking}
+            if thinking == "enabled" and thinking_budget > 0:
+                payload["thinking"]["budget_tokens"] = int(thinking_budget)
+        use_json_mode = bool(json_mode and self._json_mode_supported)
+        if use_json_mode:
+            payload["response_format"] = {"type": "json_object"}
+        return payload, use_json_mode
+
+    def _classify_attempt(
+        self, result: ChatResult, *, json_mode: bool,
+        expect: Optional[Callable[[Dict[str, Any]], Optional[str]]],
+        stage: str, problem_id: Optional[int], attempt: int, tag: str,
+        elapsed_ms: float, prompt_hash: str,
+    ) -> Tuple[bool, str]:
+        """判断响应是否可用并落库记账，返回 (truncated, schema_error)。
+
+        `expect` 修「只判能否解析成 dict」的漏洞：`cases` 写成 `test_cases` 会静默拿到
+        0 条候选，现在记 `schema_invalid` 并带原因重试。
+        """
+        truncated = result.finish_reason == "length"
+        schema_error = ""
+        if json_mode and result.json_obj is not None and expect is not None:
+            try:
+                schema_error = str(expect(result.json_obj) or "")
+            except Exception as exc:  # noqa: BLE001 - 校验器异常不能吞掉主流程
+                schema_error = f"结构校验器异常：{type(exc).__name__}: {exc}"
+        ok = (
+            bool(result.content.strip())
+            and not truncated
+            and (not json_mode or result.json_obj is not None)
+            and not schema_error
+        )
+        self._record_attempt(
+            stage, problem_id, attempt, tag, ok,
+            "" if ok else (
+                "truncated" if truncated else
+                ("empty_content" if not result.content.strip() else
+                 ("schema_invalid" if schema_error else "json_invalid"))
+            ),
+            result.usage, elapsed_ms, prompt_hash,
+        )
+        return truncated, schema_error
+
+    def _truncate_retry(
+        self, *, json_mode: bool, on_truncate: str, budget_tokens: int
+    ) -> Tuple[str, int]:
+        """截断后的纠错文案与新预算，返回 (hint, new_budget_tokens)。
+
+        `shrink`：提示词要求「少写」，扩预算只会怂恿模型写更长（v2 实测 16384 仍截断、
+        41s/19872 tokens 全废）；`grow`（默认）沿用旧的翻倍策略。
+        """
+        if on_truncate == "shrink":
+            hint = (
+                "上一次输出因长度上限被截断。请**丢弃上次输出，从零重出**："
+                "减少条目数量、缩短每条字段值，保证一次性给完整对象，不要续写上次内容。"
+                if json_mode else
+                "上一次输出因长度上限被截断。请丢弃上次输出，从零重出精简的完整代码，"
+                "删掉注释与空行，但不要省略关键逻辑。"
+            )
+            return hint, budget_tokens
+        at_cap = budget_tokens >= MAX_TOKENS_CAP
+        new_budget = min(MAX_TOKENS_CAP, max(budget_tokens * 2, 16384))
+        hint = (
+            "上一次输出因长度上限被截断。预算已到顶，请只输出核心实现，"
+            "删除注释/空行/冗余分支，不要续写上次内容。"
+            if at_cap else
+            "上一次输出因长度上限被截断。请精简到最小可用实现后重出完整代码，"
+            "不要省略关键逻辑，不要重复注释。"
+        )
+        return hint, new_budget
+
+    @staticmethod
+    def _json_retry(schema_error: str) -> Tuple[str, str]:
+        """JSON 不合格的纠错文案，返回 (hint, last_error)。"""
+        if schema_error:
+            last_error = f"JSON 结构不符合要求：{schema_error[:200]}"
+            hint = (
+                f"上一次输出的 JSON 结构不对：{schema_error[:300]}。"
+                "请丢弃上次输出，从零重出一个完整 JSON 对象，字段名严格按模板，"
+                "该是数组的地方必须是数组，不要 markdown 围栏、不要解释。"
+            )
+        else:
+            last_error = "JSON 解析失败（模型未按 JSON 输出）"
+            hint = (
+                "上一次输出不是合法 JSON。请丢弃上次输出，从零重出一个完整 JSON 对象："
+                "不要 markdown 围栏、不要解释、不要前后缀。"
+            )
+        return hint, last_error
+
+    @staticmethod
+    def _correction(messages: List[Dict[str, str]], hint: str) -> List[Dict[str, str]]:
+        """构造纠错重发消息：**不回喂残缺输出**（模型会当成"续写上文"），只留占位。
+
+        旧实现把 `result.content[:1500]` 半截 JSON/代码作为 assistant 回喂，实测
+        adversarial 两次截断重试都没救回来 —— 半截对象会诱导模型补尾而不是重写。
+        """
+        return list(messages) + [
+            {"role": "assistant", "content": "（上一次输出不合格，已丢弃）"},
+            {"role": "user", "content": hint},
+        ]
+
+    def _post_bounded(
+        self, payload: Mapping[str, Any], *, timeout_s: int, wall_clock_s: Optional[float]
+    ) -> Dict[str, Any]:
+        """给单次 HTTP 加**总墙钟**上限。
+
+        `urlopen(timeout=)` 是 socket 的「两次 recv 间隔」超时：推理模型持续分块吐字时
+        每次 recv 都重置计时器，永不触发（实测 spec#1 单次 702s，突破 180s 整题预算）。
+        这里用 daemon 线程 + 有界 queue 等待，超时即放弃；daemon 不阻塞进程退出。
+        `wall_clock_s=None`（默认）走原来的直连路径，零行为变化。
+        """
+        if wall_clock_s is None or wall_clock_s <= 0:
+            return self._post(payload, timeout_s=timeout_s)
+        box: "queue.Queue[tuple[str, Any]]" = queue.Queue(maxsize=1)
+
+        def worker() -> None:
+            try:
+                box.put(("ok", self._post(payload, timeout_s=timeout_s)))
+            except BaseException as exc:  # noqa: BLE001 - 子线程异常要透传回主线程
+                box.put(("err", exc))
+
+        threading.Thread(target=worker, daemon=True).start()
+        try:
+            kind, value = box.get(timeout=float(wall_clock_s))
+        except queue.Empty as exc:
+            raise LlmError(f"墙钟超时（{wall_clock_s:.0f}s）") from exc
+        if kind == "err":
+            raise value
+        return value
+
+    def _handle_config_error(
+        self, exc: LlmConfigError, *, payload: Mapping[str, Any], json_mode: bool, tag: str
+    ) -> bool:
         """把"可自愈"的 4xx 处理掉并返回 True（调用方立即重试）。
 
-        - 400 + 用了 response_format：服务端不支持 JSON mode → 关掉该能力重试。
+        - 400：**按本次请求实际发了什么**归因。旧实现仅凭错误体里有没有 "thinking"
+          字样决定，服务端若返回 "Unrecognized request argument" 就会误关
+          `response_format`，下一次仍带 thinking → 再 400 → 彻底失败。
         - 401 + 当前用的是环境变量 key：回退 `File/key.txt`（仅一次）。
         """
         status = int(getattr(exc, "status", 0) or 0)
-        if status == 400 and self._thinking_supported and "thinking" in str(exc).lower():
-            self._thinking_supported = False
-            self._log(f"[llm] {tag or 'chat'} 服务端不支持 thinking 参数，后续不再发送")
-            return True
-        if status == 400 and json_mode and self._json_mode_supported:
-            self._json_mode_supported = False
-            self._log(f"[llm] {tag or 'chat'} 服务端不支持 response_format，退回围栏/配平提取")
-            return True
+        detail = str(exc).lower()
+        sent_thinking = "thinking" in payload
+        sent_format = "response_format" in payload
+        if status == 400:
+            blames_format = any(k in detail for k in ("response_format", "json_object", "json mode"))
+            # 错误体没点名谁时，优先关"自造的未知字段"thinking，别误伤 json_mode。
+            if sent_thinking and ("thinking" in detail or not blames_format):
+                if self._thinking_supported:
+                    self._thinking_supported = False
+                    self._log(f"[llm] {tag or 'chat'} 服务端不支持 thinking 参数，后续不再发送")
+                    return True
+            if sent_format and json_mode and self._json_mode_supported:
+                self._json_mode_supported = False
+                self._log(f"[llm] {tag or 'chat'} 服务端不支持 response_format，退回围栏/配平提取")
+                return True
         if status == 401 and not self._file_fallback_done:
             self._file_fallback_done = True
             file_key = read_key_file(self._key_file)
@@ -503,6 +654,7 @@ class LlmClient:
         error_kind: str,
         usage: ChatUsage,
         elapsed_ms: float,
+        prompt_hash: str = "",
     ) -> None:
         """把单次 HTTP 尝试交给注入的 recorder（落库）；未注入则忽略。"""
         if self.recorder is None:
@@ -522,6 +674,7 @@ class LlmClient:
                     "total_tokens": int(usage.total_tokens),
                     "elapsed_ms": float(elapsed_ms),
                     "tag": tag,
+                    "prompt_hash": str(prompt_hash or ""),
                 }
             )
         except Exception:  # noqa: BLE001 - 记账失败不能影响主流程

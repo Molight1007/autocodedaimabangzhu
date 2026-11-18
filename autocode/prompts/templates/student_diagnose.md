@@ -1,3 +1,4 @@
+<!-- prompt: student_diagnose v2 2026-11-17 -->
 # 导入数据
 
 你会收到：

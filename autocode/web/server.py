@@ -255,10 +255,14 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(api.run_student_code(body))
         if path == "/api/diagnose":
             return self._json(api.diagnose_student_code(body))
+        if path == "/api/adversarial":
+            return self._result(api.generate_adversarial(body))
         if path == "/api/generate":
             return self._result(api.start_generate(body))
         if path == "/api/import":
             return self._result(api.import_problem(body))
+        if path == "/api/import/pdf":
+            return self._result(api.import_pdf(body))
         if path == "/api/import/batch":
             return self._result(api.import_batch(body))
         if path == "/api/settings":
@@ -271,6 +275,9 @@ class Handler(BaseHTTPRequestHandler):
         if path.startswith("/api/problems/") and path.endswith("/cases"):
             pid = int([item for item in path.split("/") if item][2])
             return self._result(api.merge_cases({**body, "problem_id": pid}))
+        if path.startswith("/api/problems/") and path.endswith("/delete"):
+            pid = int([item for item in path.split("/") if item][2])
+            return self._result(api.delete_problem(pid))
         return self._json({"error": "not found"}, 404)
 
     def _result(self, payload: dict) -> None:

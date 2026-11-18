@@ -22,6 +22,7 @@
 
 from __future__ import annotations
 
+import json
 import time
 import traceback
 import uuid
@@ -53,14 +54,12 @@ from .prep_models import (
     STATUS_FAILED,
     STATUS_PREPARED,
     STATUS_PREPARING,
-    THINKING_POLICY,
     Budget,
     BudgetExhausted,
     PrepReport,
     RefArtifact,
     StageFailure,
     StageRecord,
-    stage_key,
 )
 from .prep_rules import (
     agree,
@@ -73,6 +72,7 @@ from .prep_rules import (
     statement_excerpt,
     user_blocks,
 )
+from .prep_llm import LlmStageMixin
 from .prep_store import PrepStore
 from .solutions import build_all, explain, mark_primary, similar_local
 from .spec_fallback import parser_fallback
@@ -96,7 +96,7 @@ __all__ = [
 #: 分阶段思考策略与 tag→stage 解析见 `prep_models.THINKING_POLICY / stage_key`。
 
 
-class PrepService:
+class PrepService(LlmStageMixin):
     """流水线编排器。`client` 允许注入（测试用桩），默认按环境变量建真实客户端。"""
 
     def __init__(
@@ -136,6 +136,10 @@ class PrepService:
         self.allow_parser_fallback = True
         self.enable_llm_extras = True
 
+    def use_problem(self, problem_id: int) -> None:
+        """绑定题目并把 `client.recorder` 装好（实现见 `prep_llm.LlmStageMixin`）。"""
+        LlmStageMixin.use_problem(self, problem_id)
+
     def prepare(self, problem_id: int) -> PrepReport:
         started = time.perf_counter()
         report = PrepReport(problem_id=int(problem_id))
@@ -154,16 +158,12 @@ class PrepService:
             report.failed_stage = STAGE_SPEC
             self.store.mark_failed(int(problem_id), STAGE_SPEC, report.error)
             return report
-        if self.client is None:
-            from ..llm.client import LlmClient
-
-            self.client = LlmClient(verbose=self.verbose)
-        # 每次 HTTP 尝试都落库（含失败/重试），否则失败重试的 token 无法审计
-        self.client.recorder = self.store.record_llm_call
+        # 客户端 + 记账回调（含失败/重试），与 use_problem 同一实现
+        self.use_problem(int(problem_id))
 
         self.store.update_problem(int(problem_id), status=STATUS_PREPARING, failed_stage=None)
         try:
-            spec = self._run_stage(report, STAGE_SPEC, self._stage_spec, problem, samples)
+            spec = self._run_stage(report, STAGE_SPEC, self._stage_spec_reuse, problem, samples)
             report.spec = {key: value for key, value in spec.items() if key != "samples"}
             problem["spec_json"] = spec_block(spec, drop_samples=False)
 
@@ -258,6 +258,32 @@ class PrepService:
         return value
 
     # ── ① spec ──────────────────────────────────────────────────────────────
+    def _stage_spec_reuse(
+        self, problem: Dict[str, Any], samples: List[Dict[str, str]]
+    ) -> Tuple[Dict[str, Any], str]:
+        """已有有效 spec 时直接复用（0 次 LLM 调用），否则走 `_stage_spec` 生成。
+
+        两个来源：上次成功流水线落库的 spec；`spec-set` 命令人工注入的 spec。
+        复用前必须用当前样例重新回放——题面/样例可能被重新导入过。
+        """
+        raw = problem.get("spec_json")
+        if raw:
+            try:
+                stored = json.loads(raw)
+            except (TypeError, json.JSONDecodeError):
+                stored = None
+            if (
+                isinstance(stored, dict)
+                and (stored.get("input_grammar") or stored.get("input_parser_code"))
+                and stored.get("output_type")
+            ):
+                spec = {key: value for key, value in stored.items() if key != "samples"}
+                if not replay_samples(spec, samples):
+                    spec["samples"] = samples
+                    return spec, "复用已有 spec（样例回放通过，0 次 LLM 调用）"
+                self._note("已有 spec 未通过当前样例回放，重新生成 spec")
+        return self._stage_spec(problem, samples)
+
     def _stage_spec(
         self, problem: Dict[str, Any], samples: List[Dict[str, str]]
     ) -> Tuple[Dict[str, Any], str]:
@@ -269,6 +295,10 @@ class PrepService:
             result = self._chat(prompts.SPEC, base_user + feedback, tag=f"spec#{attempt}")
             spec, problems = normalize_spec(result.json_obj or {})
             last_spec = spec
+            # 构造题（any_solution）判题器没有自定义 checker：如实选它的题第一次就停，
+            # 不重试、不进 parser 兜底（重试只会烧调用，模型也无从改）。
+            if any(str(item).startswith("output_type=any_solution 暂不支持") for item in problems):
+                raise StageFailure(STAGE_SPEC, "；".join(problems), detail="；".join(problems))
             if problems:
                 last_error = "；".join(problems)
                 feedback = f"\n\n上一次输出不合格：{last_error}\n请严格按字段要求重出完整 JSON。"
@@ -644,62 +674,15 @@ class PrepService:
             + "\n\n## 已确认的 spec\n"
             + spec_block(spec)
         )
-        ref_code = refs.get("python/reference")
-        feedback = ""
-        last_error = ""
-        batch_id = f"{problem['id']}-{uuid.uuid4().hex[:8]}"
-        for attempt in range(1, MAX_HINTS_ATTEMPTS + 1):
-            result = self._chat(
-                prompts.HINTS, base_user + feedback, tag=f"hints#{attempt}", max_tokens=8192
-            )
-            payload = result.json_obj or {}
-            levels = {level: str(payload.get(level) or "").strip() for level in ("L1", "L2", "L3")}
-            missing = [level for level, value in levels.items() if not value]
-            if missing:
-                last_error = f"缺字段 {missing}"
-                feedback = f"\n\n上一次输出缺少 {missing}，请重出完整 JSON。"
-                continue
-            flagged = {
-                level: reason
-                for level in levels
-                for reason in [judge.hint_quality_issue(levels[level])]
-                if reason
-            }
-            rows: List[Dict[str, Any]] = [
-                {
-                    "level": index,
-                    "content": levels[level],
-                    "quality_flag": 1 if level in flagged else 0,
-                    "flagged_reason": flagged.get(level, ""),
-                }
-                for index, level in enumerate(("L1", "L2", "L3"), start=1)
-            ]
-            if flagged:
-                self._note(f"L1~L3 含代码特征，已打 quality_flag：{flagged}")
-            if ref_code is not None and ref_code.verified:
-                rows.append(
-                    {"level": 4, "content": ref_code.code, "quality_flag": 0, "flagged_reason": ""}
-                )
-            else:
-                self._note("L4 未生成：参考解 verified=0，不把未验证代码当答案")
-            self.store.save_hints(int(problem["id"]), rows, batch_id)
-            detail = " ".join(
-                f"L{row['level']}={len(row['content'])}字" + ("(flag)" if row["quality_flag"] else "")
-                for row in rows
-            )
-            summary = [
-                {
-                    "level": row["level"],
-                    "chars": len(row["content"]),
-                    "quality_flag": row["quality_flag"],
-                    "flagged_reason": row["flagged_reason"],
-                }
-                for row in rows
-            ]
-            return summary, detail
-        raise StageFailure(
-            STAGE_HINTS, f"hints 连续 {MAX_HINTS_ATTEMPTS} 次不合格", detail=last_error
-        )
+    def _stage_hints(
+        self,
+        problem: Dict[str, Any],
+        spec: Dict[str, Any],
+        refs: Dict[str, RefArtifact],
+    ) -> Tuple[List[Dict[str, Any]], str]:
+        from .hint_service import run_hints_stage
+
+        return run_hints_stage(self, problem, spec, refs)
 
     # ── 数据生成工具 ────────────────────────────────────────────────────────
     def _generate_cases(
@@ -745,56 +728,3 @@ class PrepService:
                 }
             )
         return cases, rejected
-
-    def _account(self, spent: int, before_tokens: int, usage: Any = None) -> None:
-        """记一次调用（含失败重试）：次数进预算，token 按客户端累计差值算。"""
-        used = max(0, int(getattr(self.client.usage, "total_tokens", 0)) - before_tokens)
-        calls = max(1, int(spent))
-        self.budget.record(usage, calls=calls)
-        self._calls_this_run += calls
-        self._tokens_this_run += used
-        if self._tokens_this_run > self.token_cap:
-            raise BudgetExhausted(
-                f"本题 token 超上限（{self._tokens_this_run}/{self.token_cap}）"
-            )
-
-    def _chat(self, template_name: str, user_content: str, *, tag: str,
-              max_tokens: int = 4096, json_mode: bool = True,
-              temperature: float = 0.2) -> Any:
-        """一次 LLM 调用（json_mode=False 用于要代码的阶段；重试同样计费，失败也记）。"""
-        if self.deadline_ts is not None and time.monotonic() > self.deadline_ts:
-            raise StageFailure("timeout", f"单题超过时限（deadline 已到，tag={tag}）")
-        if self._calls_this_run >= self.call_cap or self._tokens_this_run >= self.token_cap:
-            raise BudgetExhausted(
-                f"本题预算已到（calls {self._calls_this_run}/{self.call_cap}，"
-                f"tokens {self._tokens_this_run}/{self.token_cap}）"
-            )
-        self.budget.ensure()
-        messages = [{"role": "system", "content": prompts.load(template_name)},
-                    {"role": "user", "content": user_content}]
-        stage = stage_key(tag)
-        thinking, thinking_budget = THINKING_POLICY.get(stage, ("default", 0))
-        before_tokens = int(getattr(self.client.usage, "total_tokens", 0))
-        try:
-            result = self.client.chat(
-                messages,
-                json_mode=json_mode,
-                tag=tag,
-                max_tokens=max_tokens,
-                temperature=temperature,
-                stage=stage,
-                problem_id=self._problem_id,
-                thinking=thinking,
-                thinking_budget=thinking_budget,
-            )
-        except Exception as exc:  # 失败也要记账：重试同样花钱
-            self._account(int(getattr(exc, "attempts", 1) or 1), before_tokens)
-            raise
-        self._account(int(result.attempts), before_tokens, result.usage)
-        return result
-
-    def _note(self, message: str) -> None:
-        self._notes.append(message); self._log(f"[note] {message}")
-    def _log(self, message: str) -> None:
-        if self.verbose:
-            print(message)

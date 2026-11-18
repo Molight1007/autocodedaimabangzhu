@@ -26,7 +26,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-from .layout_repair import sanitize_sample
+from .layout_repair import drop_page_artifacts, sanitize_sample
 
 from ..store.db import Database, get_db
 
@@ -53,6 +53,10 @@ _CJK_RE = re.compile(r"[\u4e00-\u9fff]")
 PROSE_CJK_THRESHOLD = 3
 
 _EXTERNAL_SAMPLE_RE = re.compile(r"见题目目录下|见.*\.in\s*与|\.ans")
+
+# Markdown 代码围栏：从博客/网页复制的题面样例几乎必带 ``` 行，
+# 不剔除会原样混进样例数据（实测 CSP41 试用踩中：'```' 成了输入第一行）
+_FENCE_RE = re.compile(r"^\s*```[A-Za-z0-9_+-]*\s*$")
 
 # 提示词注入特征（只用于打标 + 提示词护栏，不做内容裁剪）
 _INJECTION_PATTERNS: Tuple[Tuple[str, str], ...] = (
@@ -308,7 +312,7 @@ def _collect_sample_blocks(
             if _SECTION_HEAD_RE.match(candidate) or _MD_HEAD_RE.match(candidate):
                 break
             body_end += 1
-        body = list(lines[body_start:body_end])
+        body = [line for line in lines[body_start:body_end] if not _FENCE_RE.match(line)]
         cursor = body_end
         if kind == "解释":
             continue
@@ -438,11 +442,26 @@ def _trim_prose(lines: Sequence[str]) -> Tuple[List[str], bool]:
 
     判定：某行含 ≥ `PROSE_CJK_THRESHOLD` 个连续区间的汉字 → 该行及其后全部视为说明文字。
     CCF 标准输入/输出不会出现中文，故该启发式在本题库是安全的（已实测 CSP32/33/36/37/40）。
+
+    例外：页眉页脚本身也带大量汉字（如「CCF CSP 计算机软件能力认证 第 33 次认证 词频统计」），
+    样例跨页时它们会夹在数据中间。必须跳过这些行继续往后找，否则会把页眉之后
+    真正的样例数据整段砍掉（导致样例输出为空）。
     """
     for index, line in enumerate(lines):
+        item = line.strip()
+        if _is_page_artifact(item):
+            continue
         if len(_CJK_RE.findall(line)) >= PROSE_CJK_THRESHOLD:
             return list(lines[:index]), True
     return list(lines), False
+
+
+def _is_page_artifact(line: str) -> bool:
+    """页眉/页脚/分页标记：这些行不属于样例数据，也不应触发"说明文字"判定。"""
+    if not line:
+        return False
+    # 复用统一的页眉/页脚判定（第 k 页 / 共 n 页 / CCF CSP / 第 k 次认证）
+    return not drop_page_artifacts([line])
 
 
 def _join_block(lines: Sequence[str]) -> str:
@@ -466,13 +485,30 @@ def _input_hash(input_text: str) -> str:
 
 def _upsert_problem(
     db: Database, section: ProblemSection, *, source: str
-) -> Tuple[int, bool]:
-    """按 (source, source_id) 去重插入；返回 (problem_id, created)。"""
+) -> Tuple[int, bool, bool]:
+    """按 (source, source_id) 去重插入；返回 (problem_id, created, statement_updated)。
+
+    已存在时**更新题面**：旧行为是直接跳过，导致"修正题面后重新导入"永远不生效
+    （学生改了题面描述，工具里还是旧的）。spec_json 等付费产物绝不动。
+    """
     existing = db.query_one(
-        "SELECT id FROM problems WHERE source = ? AND source_id = ?", (source, section.source_id)
+        "SELECT id, statement_md FROM problems WHERE source = ? AND source_id = ?",
+        (source, section.source_id),
     )
     if existing is not None:
-        return int(existing["id"]), False
+        statement = section.statement_md
+        updated = False
+        if str(existing["statement_md"] or "") != statement:
+            try:
+                with db.transaction() as conn:
+                    conn.execute(
+                        "UPDATE problems SET statement_md = ?, updated_at = ? WHERE id = ?",
+                        (statement, _now(), int(existing["id"])),
+                    )
+                updated = True
+            except sqlite3.IntegrityError:
+                pass  # statement_key 撞别的题：保留旧题面，不挡导入
+        return int(existing["id"]), False, updated
     now = _now()
     statement = section.statement_md
     try:
@@ -483,14 +519,14 @@ def _upsert_problem(
                 (section.title, source, section.source_id, statement, "draft", now, now),
             )
             problem_id = int(cursor.lastrowid)
-    except sqlite3.IntegrityError as exc:
+    except sqlite3.IntegrityError:
         hit = db.query_one(
             "SELECT id FROM problems WHERE substr(statement_md,1,500) = ?", (statement[:500],)
         )
         if hit is None:
             raise
-        return int(hit["id"]), False
-    return problem_id, True
+        return int(hit["id"]), False, False
+    return problem_id, True, False
 
 
 def _upsert_samples(db: Database, problem_id: int, samples: Sequence[Sample]) -> None:
@@ -515,6 +551,11 @@ def _upsert_samples(db: Database, problem_id: int, samples: Sequence[Sample]) ->
         conn.execute(
             "UPDATE problems SET spec_json = ?, updated_at = ? WHERE id = ?",
             (spec_payload, now, problem_id),
+        )
+        # 先清旧 sample 层再插：旧行为是 ON CONFLICT 更新，但样例内容变了（hash 变）时
+        # 旧行会残留——修正后的样例与被污染的旧样例并存，下游判题两份都跑
+        conn.execute(
+            "DELETE FROM test_cases WHERE problem_id = ? AND layer = 'sample'", (problem_id,)
         )
         for ordinal, sample in enumerate(samples, start=1):
             if not sample.complete:
@@ -552,13 +593,28 @@ def ingest_text(
     if not sections:
         report.warnings.append("未识别到任何题目（`## 题目（slug）` 形式的标题缺失）")
         return report
-    cleaned = clean_lines(text)
+    return ingest_sections(sections, db=database, source=source, path_label=path_label, report=report)
+
+
+def ingest_sections(
+    sections: Sequence[ProblemSection],
+    *,
+    db: Optional[Database] = None,
+    source: str = SOURCE_NAME,
+    path_label: str = "<memory>",
+    report: Optional[IngestReport] = None,
+) -> IngestReport:
+    """把已切好的题目段落入库（md 路径与 PDF 路径共用同一套逻辑）。"""
+    database = db or get_db()
+    report = report or IngestReport(source=source, path=path_label)
     for section in sections:
         samples, external, warnings = parse_samples(
             section.lines, section_title=section.title
         )
         report.warnings.extend(warnings)
-        problem_id, created = _upsert_problem(database, section, source=source)
+        problem_id, created, statement_updated = _upsert_problem(database, section, source=source)
+        if statement_updated:
+            report.warnings.append(f"{section.title}: 题面已更新（样例层已同步刷新，spec 等已有产物保留）")
         _upsert_samples(database, problem_id, samples)
         hits = detect_injection("\n".join(section.lines))
         tokens = extract_injected_identifiers("\n".join(section.lines))

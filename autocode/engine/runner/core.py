@@ -121,7 +121,10 @@ def _translate(proc: ProcResult, *, lang: str, compile_ms: float = 0.0,
         notes.append("output_truncated")
     return CaseResult(
         verdict=verdict,
-        stdout=proc.stdout,
+        # Windows 上 Python 子进程 stdout 文本模式会把 \n 落成 \r\n；
+        # 不归一则期望输出/生成数据全是 CRLF，导出到 Linux OJ 会踩坑
+        # （比较器本身 CRLF 不敏感，归一不改变任何判定结论）
+        stdout=proc.stdout.replace("\r\n", "\n"),
         stderr=proc.stderr,
         rc=proc.rc,
         elapsed_ms=proc.elapsed_ms,

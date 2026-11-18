@@ -19,8 +19,7 @@
 from __future__ import annotations
 
 import ast
-from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 KIND_SCALAR = "scalar"
 KIND_REPEAT = "repeat"
@@ -28,6 +27,9 @@ KIND_MATRIX = "matrix"
 KIND_EMPTY_ARRAY = "empty_array"
 #: 变长记录：只能作为 repeat 的 elem 出现（如"每行先给 k 再给 k 个数"）
 KIND_RECORD = "record"
+#: 变体记录：只能作为 repeat 的 elem 出现。每行第一个 token 是类型标记（tag），
+#: 标记不同 → 后续字段组合不同（如"操作 1 x a / 操作 3 a / 操作 5 x y"）。
+KIND_SWITCH = "switch"
 ALLOWED_KINDS: tuple[str, ...] = (KIND_SCALAR, KIND_REPEAT, KIND_MATRIX, KIND_EMPTY_ARRAY)
 
 TYPE_INT = "int"
@@ -254,6 +256,8 @@ def check_spec(grammar: Any) -> List[str]:
             elem = node.get("elem")
             if not isinstance(elem, Mapping):
                 problems.append(f"节点[{index}] {kind} 缺 elem")
+            elif str(elem.get("kind") or "").strip().lower() == KIND_SWITCH:
+                problems.extend(_check_switch_def(elem, index))
             else:
                 etype = str(elem.get("type") or TYPE_INT).strip().lower()
                 if etype not in ALLOWED_ELEM_TYPES:
@@ -261,6 +265,45 @@ def check_spec(grammar: Any) -> List[str]:
         elif kind == KIND_EMPTY_ARRAY:
             if not str(node.get("name") or "").strip():
                 problems.append(f"节点[{index}] empty_array 缺 name")
+    return problems
+
+
+def _check_switch_def(elem: Mapping[str, Any], index: int) -> List[str]:
+    """静态检查 switch 节点定义：tag 名称 + cases 各分支的 fields。"""
+    problems: List[str] = []
+    if not str(elem.get("tag") or "").strip():
+        problems.append(f"节点[{index}] switch 缺 tag（类型标记字段名）")
+    cases = elem.get("cases")
+    if not isinstance(cases, Mapping) or not cases:
+        problems.append(f"节点[{index}] switch 缺 cases（标记值 → 字段组合）")
+        return problems
+    for case_key, case in cases.items():
+        if not str(case_key).strip():
+            problems.append(f"节点[{index}] switch 存在空白分支名")
+            continue
+        fields = (case or {}).get("fields") if isinstance(case, Mapping) else None
+        if not isinstance(fields, list):
+            problems.append(f"节点[{index}] switch 分支 {case_key!r} 缺 fields")
+            continue
+        for field_index, field in enumerate(fields):
+            if not isinstance(field, Mapping):
+                problems.append(f"节点[{index}] switch 分支 {case_key!r} fields[{field_index}] 不是对象")
+                continue
+            fkind = str(field.get("kind") or KIND_SCALAR).strip().lower()
+            if fkind == KIND_SCALAR:
+                if not str(field.get("name") or "").strip():
+                    problems.append(f"节点[{index}] switch 分支 {case_key!r} fields[{field_index}] 缺 name")
+                ftype = str(field.get("type") or TYPE_INT).strip().lower()
+                if ftype not in ALLOWED_ELEM_TYPES:
+                    problems.append(f"节点[{index}] switch 分支 {case_key!r} 字段 type={ftype!r} 非法")
+            elif fkind == KIND_REPEAT:
+                etype = str((field.get("elem") or {}).get("type") or TYPE_INT).strip().lower()
+                if etype not in ALLOWED_ELEM_TYPES:
+                    problems.append(f"节点[{index}] switch 分支 {case_key!r} repeat 字段 elem.type={etype!r} 非法")
+            else:
+                problems.append(
+                    f"节点[{index}] switch 分支 {case_key!r} 字段只支持 scalar/repeat，实际 {fkind!r}"
+                )
     return problems
 
 
@@ -305,6 +348,40 @@ def _parse_record(
     return result
 
 
+def _parse_switch(
+    node: Mapping[str, Any], stream: _TokenStream, outer: Mapping[str, Any],
+    *, index: int, label: str,
+) -> Dict[str, Any]:
+    """解析一条变体记录：先读类型标记，再按标记对应的分支读字段。
+
+    未知标记直接报错（fail-closed）：静默跳过会把后续 token 全部错位。
+    """
+    tag_name = str(node.get("tag") or "").strip() or "t"
+    tag_type = str(node.get("tag_type") or TYPE_INT).strip().lower()
+    lineno, token = stream.take(f"{label} 的标记 {tag_name}")
+    tag_value = _convert(token, tag_type, what=f"{label}.{tag_name}", lineno=lineno)
+    cases = node.get("cases") or {}
+    case = cases.get(str(tag_value))
+    if case is None:
+        case = cases.get(str(token))  # tag_type=int 时 "01" 与 "1" 都算 1 分支
+    if case is None:
+        case = node.get("default")
+    if not isinstance(case, Mapping):
+        raise GrammarError(
+            f"{label} 的标记 {tag_name}={token!r} 没有对应的字段分支（cases={sorted(cases)}）",
+            lineno=lineno, node_index=index,
+        )
+    local: Dict[str, Any] = dict(outer)
+    local[tag_name] = tag_value
+    case_fields = case.get("fields") or []
+    if not case_fields:  # 分支可以没有后续字段（如"操作 0"单独成行）
+        return {tag_name: tag_value}
+    fields_result = _parse_record(
+        {"fields": case_fields}, stream, local, index=index, label=label
+    )
+    return {tag_name: tag_value, **fields_result}
+
+
 def _parse_repeat(
     node: Mapping[str, Any], stream: _TokenStream, parsed: Mapping[str, Any], index: int
 ) -> List[Any]:
@@ -323,9 +400,15 @@ def _parse_repeat(
     elem = node.get("elem") or {}
     etype = str(elem.get("type") or TYPE_INT).strip().lower()
     elem_name = str(elem.get("name") or "elem")
-    if str(elem.get("kind") or "").strip().lower() == KIND_RECORD:
+    elem_kind = str(elem.get("kind") or "").strip().lower()
+    if elem_kind == KIND_RECORD:
         return [
             _parse_record(elem, stream, parsed, index=index, label=f"{elem_name}[{offset}]")
+            for offset in range(count)
+        ]
+    if elem_kind == KIND_SWITCH:
+        return [
+            _parse_switch(elem, stream, parsed, index=index, label=f"{elem_name}[{offset}]")
             for offset in range(count)
         ]
     values: List[Any] = []
@@ -442,6 +525,20 @@ def _check_record(node: Mapping[str, Any], value: Any, *, what: str) -> List[str
     return violations
 
 
+def _check_switch(node: Mapping[str, Any], value: Any, *, what: str) -> List[str]:
+    """校验一条变体记录：tag 存在 → 按 tag 找到分支 → 校验该分支字段。"""
+    if not isinstance(value, Mapping):
+        return [f"{what} 不是 record(dict)：{type(value).__name__}"]
+    tag_name = str(node.get("tag") or "t").strip()
+    if tag_name not in value:
+        return [f"{what} 缺标记字段 {tag_name!r}"]
+    cases = node.get("cases") or {}
+    case = cases.get(str(value[tag_name]))
+    if case is None:
+        return [f"{what} 的标记 {tag_name}={value[tag_name]!r} 没有对应分支"]
+    return _check_record({"fields": (case or {}).get("fields") or []}, value, what=what)
+
+
 def validate(grammar: Any, value: Any) -> List[str]:
     """校验已解析结果是否符合 grammar 语义；返回违规描述列表（空表示通过）。"""
     violations: List[str] = []
@@ -471,10 +568,20 @@ def validate(grammar: Any, value: Any) -> List[str]:
             expected_count = _safe_count(node.get("count"), value)
             if expected_count is not None and expected_count != len(items):
                 violations.append(f"{name} 长度 {len(items)} ≠ 声明 count {expected_count}")
-            if str((node.get("elem") or {}).get("kind") or "").strip().lower() == KIND_RECORD:
+            elem_kind = str((node.get("elem") or {}).get("kind") or "").strip().lower()
+            if elem_kind == KIND_RECORD:
                 for offset, item in enumerate(items[:MAX_ELEMENTS]):
                     violations.extend(
                         _check_record(node.get("elem") or {}, item, what=f"{name}[{offset}]")
+                    )
+                    if len(violations) > 200:
+                        violations.append("...（违规过多，已截断）")
+                        return violations
+                continue
+            if elem_kind == KIND_SWITCH:
+                for offset, item in enumerate(items[:MAX_ELEMENTS]):
+                    violations.extend(
+                        _check_switch(node.get("elem") or {}, item, what=f"{name}[{offset}]")
                     )
                     if len(violations) > 200:
                         violations.append("...（违规过多，已截断）")
@@ -542,170 +649,21 @@ def describe(grammar: Any) -> str:
             parts.append(f"{node.get('name')}:{node.get('type', TYPE_INT)}")
         elif kind == KIND_REPEAT:
             elem = node.get("elem") or {}
-            parts.append(
-                f"{elem.get('name') or 'arr'}[{node.get('count')}]{'?' if node.get('allow_empty') else ''}"
-            )
+            if str(elem.get("kind") or "").strip().lower() == KIND_SWITCH:
+                parts.append(
+                    f"{elem.get('name') or 'ops'}[{node.get('count')}]<switch:{elem.get('tag') or 't'}>"
+                )
+            else:
+                parts.append(
+                    f"{elem.get('name') or 'arr'}[{node.get('count')}]{'?' if node.get('allow_empty') else ''}"
+                )
         elif kind == KIND_MATRIX:
             parts.append(f"{node.get('name') or 'mat'}[{node.get('rows')}×{node.get('cols')}]")
         else:
             parts.append(f"{node.get('name')}=[]")
     return ", ".join(parts)
 
-
-# ── constraints_exec（best-effort 数值约束）────────────────────────────────────
-
-
-@dataclass(frozen=True)
-class ConstraintCheck:
-    """单条 constraints_exec 的求值结果。
-
-    `evaluated=False` 表示"这条写法本模块不支持/变量未知"，属于**未判定**，
-    调用方不应据此判定数据非法（best-effort 约束，不能反过来卡死生成）。
-    """
-
-    expr: str
-    ok: bool
-    detail: str = ""
-    evaluated: bool = True
-
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "expr": self.expr,
-            "ok": bool(self.ok),
-            "detail": self.detail,
-            "evaluated": bool(self.evaluated),
-        }
-
-
-_ALLOWED_NODES: Tuple[type, ...] = (
-    ast.Expression,
-    ast.BoolOp,
-    ast.Compare,
-    ast.Name,
-    ast.Constant,
-    ast.UnaryOp,
-    ast.USub,
-    ast.UAdd,
-    ast.BinOp,
-    ast.Add,
-    ast.Sub,
-    ast.Mult,
-    ast.Div,
-    ast.FloorDiv,
-    ast.Mod,
-    ast.Pow,
-    ast.And,
-    ast.Or,
-    ast.Load,
-    ast.Eq,
-    ast.NotEq,
-    ast.Lt,
-    ast.LtE,
-    ast.Gt,
-    ast.GtE,
-)
-
-
-def _node_values(values: Mapping[str, Any]) -> Dict[str, Any]:
-    """把 scalar 值与数组长度映射成变量：`n`、`len(a)` 之类用裸名代替。"""
-    scope: Dict[str, Any] = {}
-    for key, item in values.items():
-        if isinstance(item, bool):
-            continue
-        if isinstance(item, (int, float)):
-            scope[key] = item
-        elif isinstance(item, list):
-            scope[key] = len(item)
-            scope[f"len_{key}"] = len(item)
-    return scope
-
-
-def evaluate_constraints(
-    exprs: Iterable[str], values: Mapping[str, Any]
-) -> List[ConstraintCheck]:
-    """逐条求值 `constraints_exec`；不支持的写法记 detail 并视为"未判定通过"。
-
-    只支持数值比较与四则运算（AST 白名单），足以覆盖 "1 <= n <= 1e5" 这类声明。
-    """
-    scope = _node_values(values)
-    results: List[ConstraintCheck] = []
-    for raw in exprs or []:
-        expr = str(raw or "").strip()
-        if not expr:
-            continue
-        try:
-            tree = ast.parse(expr, mode="eval")
-        except SyntaxError as exc:
-            results.append(ConstraintCheck(expr, False, f"无法解析：{exc.msg}", evaluated=False))
-            continue
-        bad = [type(node).__name__ for node in ast.walk(tree) if not isinstance(node, _ALLOWED_NODES)]
-        if bad:
-            results.append(
-                ConstraintCheck(expr, False, f"含不支持的语法 {sorted(set(bad))}", evaluated=False)
-            )
-            continue
-        try:
-            ok = bool(_eval_node(tree.body, scope))
-        except (KeyError, ZeroDivisionError, TypeError, ValueError) as exc:
-            results.append(ConstraintCheck(expr, False, f"求值失败：{exc}", evaluated=False))
-            continue
-        results.append(ConstraintCheck(expr, ok, "" if ok else "约束不满足"))
-    return results
-
-
-def _eval_node(node: ast.AST, scope: Mapping[str, Any]) -> Any:
-    if isinstance(node, ast.Constant):
-        return node.value
-    if isinstance(node, ast.Name):
-        if node.id in scope:
-            return scope[node.id]
-        raise KeyError(f"未知变量 {node.id}")
-    if isinstance(node, ast.UnaryOp):
-        value = _eval_node(node.operand, scope)
-        if isinstance(node.op, ast.USub):
-            return -value
-        return +value
-    if isinstance(node, ast.BinOp):
-        left = _eval_node(node.left, scope)
-        right = _eval_node(node.right, scope)
-        if isinstance(node.op, ast.Add):
-            return left + right
-        if isinstance(node.op, ast.Sub):
-            return left - right
-        if isinstance(node.op, ast.Mult):
-            return left * right
-        if isinstance(node.op, ast.Div):
-            return left / right
-        if isinstance(node.op, ast.FloorDiv):
-            return left // right
-        if isinstance(node.op, ast.Mod):
-            return left % right
-        return left ** right
-    if isinstance(node, ast.BoolOp):
-        values = [_eval_node(item, scope) for item in node.values]
-        if isinstance(node.op, ast.And):
-            return all(values)
-        return any(values)
-    if isinstance(node, ast.Compare):
-        left = _eval_node(node.left, scope)
-        for op, comparator in zip(node.ops, node.comparators):
-            right = _eval_node(comparator, scope)
-            if not _apply_cmp(op, left, right):
-                return False
-            left = right
-        return True
-    raise ValueError(f"不支持的节点 {type(node).__name__}")
-
-
-def _apply_cmp(op: ast.AST, left: Any, right: Any) -> bool:
-    if isinstance(op, ast.Eq):
-        return bool(left == right)
-    if isinstance(op, ast.NotEq):
-        return bool(left != right)
-    if isinstance(op, ast.Lt):
-        return bool(left < right)
-    if isinstance(op, ast.LtE):
-        return bool(left <= right)
-    if isinstance(op, ast.Gt):
-        return bool(left > right)
-    return bool(left >= right)
+# 约束求值已拆到 constraints.py；此处再导出，保持 `grammar.evaluate_constraints` 兼容路径
+# __all__ 同时让 pyflakes 识别这两个名字是公开 API，而非无用 import
+from .constraints import ConstraintCheck, _eval_node, evaluate_constraints  # noqa: E402
+__all__ = ["ConstraintCheck", "evaluate_constraints"]

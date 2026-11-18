@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
 from ..app import jobs
+from ..app.prep_store import PrepStore
 from ..app.quality import score_problem
 from ..llm.client import LlmConfigError, load_config
 from ..llm.settings import effective as saved_settings
@@ -51,14 +52,17 @@ __all__ = [
     "test_connection",
     "update_fields",
     "import_problem",
+    "import_pdf",
     "import_batch",
     "start_generate",
     "job_status",
     "run_student_code",
     "diagnose_student_code",
+    "generate_adversarial",
     "merge_cases",
     "export_problem",
     "list_exports",
+    "delete_problem",
     "MODELS",
     "LAYER_ORDER",
 ]
@@ -196,17 +200,31 @@ def problem_detail(pid: int) -> Dict[str, Any]:
         (pid,),
     )
     hints = _rows(
-        "SELECT level, content, quality_flag FROM hints WHERE problem_id=? AND is_active=1"
-        " ORDER BY level",
+        "SELECT level, content, quality_flag, approach, gen_batch_id FROM hints"
+        " WHERE problem_id=? AND is_active=1 ORDER BY id",
         (pid,),
     )
+    hints = _filter_latest_hint_batch(hints)
     similar = _rows("SELECT url, title, platform, note FROM similar_problems WHERE problem_id=?", (pid,))
     algorithm_tags = _jsonable(problem["algorithm_tags"])
+    advice = ""
+    if problem["status"] == "failed":
+        from ..app.prep_rules import failure_advice
+
+        last_run = _one(
+            "SELECT error_text FROM problem_stage_runs WHERE problem_id=? ORDER BY id DESC LIMIT 1",
+            (pid,),
+        )
+        advice = failure_advice(
+            str(problem["failed_stage"] or ""),
+            str(last_run["error_text"]) if last_run else "",
+        )
     return {
         "id": problem["id"],
         "title": problem["title"],
         "status": problem["status"],
         "failed_stage": problem["failed_stage"],
+        "failure_advice": advice,
         "tier": problem["tier"],
         "statement": problem["statement_md"] or "",
         "spec": {
@@ -235,7 +253,13 @@ def problem_detail(pid: int) -> Dict[str, Any]:
             for s in solutions
         ],
         "hints": [
-            {"level": h["level"], "content": h["content"], "flag": h["quality_flag"]} for h in hints
+            {
+                "level": h["level"],
+                "content": h["content"],
+                "flag": h["quality_flag"],
+                "approach": h["approach"] or "",
+            }
+            for h in hints
         ],
         "analysis": _jsonable(problem["analysis_json"]) or {},
         "quality": problem_quality(pid),
@@ -333,6 +357,18 @@ def test_connection() -> Dict[str, Any]:
 
 
 # ── 导入 ────────────────────────────────────────────────────────────────────
+def _filter_latest_hint_batch(rows: List[Any]) -> List[Any]:
+    """老数据（没有 approach）只保留最后写入的一批。
+
+    历史 bug：重生成提示时旧批次没置 inactive，同一题会返回 6 套重复卡片。
+    新数据带 approach，按解法分组返回，不能按批号裁剪。
+    """
+    if rows and all(not (row["approach"] or "") for row in rows):
+        latest = rows[-1]["gen_batch_id"]
+        return [row for row in rows if row["gen_batch_id"] == latest]
+    return rows
+
+
 def import_problem(payload: Dict[str, Any]) -> Dict[str, Any]:
     from ..app.ingest_csp import parse_samples
 
@@ -361,6 +397,27 @@ def import_problem(payload: Dict[str, Any]) -> Dict[str, Any]:
         # 题面去重键（statement_key，前 500 字）或 (source, source_id) 撞车
         return {"error": "题面或标题重复"}
     return {"id": pid, "samples": len(samples)}
+
+
+def import_pdf(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """整卷 PDF → LLM 标边界 → 原文切片入库（样例仍由代码从原文抽取）。"""
+    from ..app.ingest_pdf import ingest_pdf_file
+    from ..llm.client import LlmClient
+
+    raw = str(payload.get("path") or "").strip().strip('"')
+    if not raw:
+        return {"error": "请填写 PDF 的绝对路径"}
+    file_path = Path(raw).expanduser()
+    if not file_path.is_file():
+        return {"error": f"文件不存在：{file_path}"}
+    if file_path.suffix.lower() != ".pdf":
+        return {"error": "只支持 .pdf 文件"}
+
+    client = LlmClient(verbose=False)
+    # 切题也是一次付费调用，必须落 llm_calls（problem_id 为空，属于“入库前成本”）
+    client.recorder = PrepStore(get_db()).record_llm_call
+    result = ingest_pdf_file(file_path, db=get_db(), client=client)
+    return result.to_dict()
 
 
 def split_batch_text(text: str) -> List[Dict[str, Any]]:
@@ -447,7 +504,25 @@ def start_generate(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def job_status(pid: int) -> Dict[str, Any]:
-    return jobs.job_status(get_db(), pid)
+    data = jobs.job_status(get_db(), pid)
+    if data.get("status") == "failed":
+        from ..app.prep_rules import failure_advice
+
+        problem = _one("SELECT failed_stage FROM problems WHERE id=?", (pid,))
+        advice = failure_advice(
+            str((problem["failed_stage"] if problem else "") or data.get("error") or ""),
+            str(data.get("error") or ""),
+        )
+        if advice:
+            data["advice"] = advice
+    return data
+
+
+def delete_problem(pid: int) -> Dict[str, Any]:
+    """删除整题（级联清单见 `app/problems_admin.py`）。"""
+    from ..app import problems_admin
+
+    return problems_admin.delete_problem(int(pid), db=get_db())
 
 
 def _debug_log_dir() -> Path:
@@ -492,12 +567,19 @@ def run_student_code(payload: Dict[str, Any]) -> Dict[str, Any]:
         return {"error": "题目不存在"}
     spec = _jsonable(problem["spec_json"]) or {}
     scope = str(payload.get("scope") or "samples")
-    limit = max(1, min(int(payload.get("limit") or 20), 30))
+    limit = max(1, min(int(payload.get("limit") or 20), 200))
     custom = payload.get("custom_input")
+    total_available = 0
     if custom is not None:
         cases = [{"id": "custom", "layer": "自定义", "input": str(custom)[:8000], "expected": ""}]
     else:
         cases = _student_cases(pid, spec, scope, limit)
+        if scope != "samples":
+            total_available = int(_one(
+                "SELECT COUNT(*) AS n FROM test_cases WHERE problem_id=?", (pid,)
+            )["n"])
+        else:
+            total_available = len(cases)
     if not cases:
         return {"error": "没有可运行的用例"}
     batch = judge.run_solution(
@@ -529,6 +611,8 @@ def run_student_code(payload: Dict[str, Any]) -> Dict[str, Any]:
         "ok": not batch.compile_error,
         "compile_error": batch.compile_error[:4000],
         "total": len(runs),
+        "total_available": total_available,
+        "truncated": bool(total_available and len(runs) < total_available),
         "passed": sum(1 for r in runs if r["verdict"] == "ac"),
         "runs": runs,
         "first_failure": first,
@@ -538,6 +622,7 @@ def run_student_code(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def diagnose_student_code(payload: Dict[str, Any]) -> Dict[str, Any]:
+    import hashlib
     from dataclasses import replace
 
     from ..app.prep_rules import spec_block, statement_excerpt
@@ -582,15 +667,24 @@ def diagnose_student_code(payload: Dict[str, Any]) -> Dict[str, Any]:
         model = str(payload.get("model") or "").strip()
         if model and model != client.config.model:
             client = LlmClient(config=replace(client.config, model=model), verbose=False)
+        # 记账：诊断与生成同口径（失败/重试也落库），否则成本审计缺一段。
+        # 历史 bug：这里从未装配 recorder，stage/problem_id/prompt_hash 全成了死参数。
+        client.recorder = PrepStore(get_db()).record_llm_call
+        system_text = prompts.load(prompts.STUDENT_DIAGNOSE)
+        # prompt 版本可追溯：与 PrepService._chat 同一口径（sha256 前 16 位）
+        prompt_hash = hashlib.sha256(system_text.encode("utf-8")).hexdigest()[:16]
         result = client.chat(
             [
-                {"role": "system", "content": prompts.load(prompts.STUDENT_DIAGNOSE)},
+                {"role": "system", "content": system_text},
                 {"role": "user", "content": body},
             ],
             json_mode=True,
             max_tokens=4096,
             temperature=0.2,
             tag="student_diagnose",
+            stage="diagnose",
+            problem_id=pid,
+            prompt_hash=prompt_hash,
         )
         data = result.json_obj or {}
         data["model"] = client.config.model
@@ -605,6 +699,13 @@ def merge_cases(payload: Dict[str, Any]) -> Dict[str, Any]:
     from ..app.cases_merge import merge_cases as _merge
 
     return _merge(payload, db=get_db())
+
+
+def generate_adversarial(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """薄封装：定向构造候选 + 本地三重验证门 + 入库全在 `app/adversarial.py`。"""
+    from ..app.adversarial import generate_adversarial as _gen
+
+    return _gen(payload, db=get_db())
 
 
 # ── 导出 + 版本历史（契约 §4.3）─────────────────────────────────────────────

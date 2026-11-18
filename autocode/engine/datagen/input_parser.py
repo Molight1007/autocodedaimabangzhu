@@ -118,11 +118,47 @@ def validate_input(spec: Mapping[str, Any], parsed: Mapping[str, Any]) -> List[s
     return violations
 
 
+def _nested_field_names(grammar_nodes: Any) -> Set[str]:
+    """record/switch 分支内的局部字段名（每条记录内部的名字，如操作行的 x/y/a）。
+
+    它们不是顶层输入变量：parser 输出的顶层 JSON 不可能也不应该带这些 key。
+    """
+    names: Set[str] = set()
+    try:
+        nodes = grammar.normalize_grammar(grammar_nodes)
+    except grammar.GrammarError:
+        return names
+    for node in nodes:
+        if str(node.get("kind") or "").strip().lower() != "repeat":
+            continue
+        elem = node.get("elem") or {}
+        elem_kind = str(elem.get("kind") or "").strip().lower()
+        if elem_kind == "record":
+            for field in elem.get("fields") or []:
+                fname = str(field.get("name") or (field.get("elem") or {}).get("name") or "").strip()
+                if fname:
+                    names.add(fname)
+        elif elem_kind == "switch":
+            tag = str(elem.get("tag") or "").strip()
+            if tag:
+                names.add(tag)
+            for case in (elem.get("cases") or {}).values():
+                for field in (case or {}).get("fields") or []:
+                    fname = str(field.get("name") or (field.get("elem") or {}).get("name") or "").strip()
+                    if fname:
+                        names.add(fname)
+    return names
+
+
 def required_keys(spec: Mapping[str, Any]) -> Set[str]:
     """parser 输出必须覆盖的变量名：以 constraints 实际引用的名字为准。
 
     为什么不再用 grammar：parser 兜底时 grammar 本身就是失败产物（名字可能编错），
     拿它当标准会把正确的 parser 误杀。constraints 是题面语义，必须能算出来。
+
+    但 record/switch 的**分支内字段**（如操作行的 x/y/a）是记录局部名字，
+    顶层 JSON 永远不会有它们——不扣除的话，变体操作行的题会被这道门误杀
+    （实测 CSP41 棋盘题：constraints 引用 x/y/a，parser 输出只有 n/m/q/ops）。
     """
     names: Set[str] = set()
     for expr in spec.get("constraints_exec") or []:
@@ -131,7 +167,7 @@ def required_keys(spec: Mapping[str, Any]) -> Set[str]:
         except SyntaxError:
             continue
         names.update(node.id for node in ast.walk(tree) if isinstance(node, ast.Name))
-    return names
+    return names - _nested_field_names(spec.get("input_grammar"))
 
 
 def _unused_grammar_keys(spec: Mapping[str, Any]) -> Set[str]:

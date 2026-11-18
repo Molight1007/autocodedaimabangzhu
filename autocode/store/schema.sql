@@ -93,6 +93,7 @@ CREATE TABLE IF NOT EXISTS hints (
   quality_flag INTEGER DEFAULT 0,
   flagged_reason TEXT,
   gen_batch_id TEXT,
+  approach TEXT NOT NULL DEFAULT '',                       -- 该提示对应的解法（空=旧数据/未标注）
   is_active INTEGER DEFAULT 1,
   regenerated_at TEXT,
   UNIQUE(problem_id, level, gen_batch_id),
@@ -177,6 +178,7 @@ CREATE TABLE IF NOT EXISTS llm_calls (
   total_tokens INTEGER NOT NULL DEFAULT 0,
   elapsed_ms REAL NOT NULL DEFAULT 0,
   tag TEXT,
+  prompt_hash TEXT NOT NULL DEFAULT '',                    -- 模板指纹（sha256 前 16 位），老库走 ensure_columns 补列
   created_at TEXT,
   FOREIGN KEY(problem_id) REFERENCES problems(id) ON DELETE CASCADE
 );

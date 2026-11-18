@@ -204,6 +204,16 @@ def _build_zip(
                 f"{EXT_MAP.get(solution['lang'], 'txt')}"
             )
             archive.writestr(name, solution["code"])
+        # OJ 通用的 1.in/1.ans 文件对（统一 LF：库里历史数据可能带 Windows CRLF）
+        for case_no, row in enumerate(cases, 1):
+            input_text = str(row["input_data"] or "").replace("\r\n", "\n")
+            output_text = str(row["expected_output"] or "").replace("\r\n", "\n")
+            if not input_text.endswith("\n"):
+                input_text += "\n"
+            if not output_text.endswith("\n"):
+                output_text += "\n"
+            archive.writestr(f"cases/{case_no}.in", input_text)
+            archive.writestr(f"cases/{case_no}.ans", output_text)
         archive.writestr("solutions.json", json.dumps(_solutions_payload(solutions), ensure_ascii=False, indent=2))
     return buffer.getvalue()
 

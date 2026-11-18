@@ -243,5 +243,54 @@ class TestRealCsp32(unittest.TestCase):
             db.close()
 
 
+class TestSampleAcrossPageBreak(unittest.TestCase):
+    """CCF 真题样例跨页时，页眉夹在样例数据中间（CSP33 词频统计的真实版面）。
+
+    两个回归点：
+    1. 页眉「CCF CSP 计算机软件能力认证 …」不能被当成"说明文字"把后面的样例数据砍掉；
+    2. 输出块被砍空时 sanitize_sample 不能越界崩溃。
+    """
+
+    TEXT = """## 示例题（demo）
+
+### 【样例输入】
+
+1 3
+2 5 1
+3 1 1
+
+### 【样例输出】
+
+第 2 页 共 16 页
+
+<!-- Page 3 -->
+
+CCF CSP 计算机软件能力认证 第 99 次认证 示例题（demo）
+
+1 2 3
+2 3 6
+3 2 2
+
+### 【样例解释】
+
+这里是说明文字。
+"""
+
+    def test_page_header_does_not_eat_sample_output(self) -> None:
+        samples, _, _ = parse_samples(self.TEXT.splitlines())
+        self.assertEqual(len(samples), 1)
+        self.assertEqual(samples[0].input_text, "3\n5 1\n1 1\n")
+        # 行号 1..3 被剥掉，保留每行两个数据
+        self.assertEqual(samples[0].output_text, "2 3\n3 6\n2 2\n")
+
+    def test_empty_output_does_not_crash(self) -> None:
+        samples, _, warnings = parse_samples([
+            "### 【样例输入】", "3", "1 2 3",
+            "### 【样例输出】", "第 2 页 共 16 页", "### 【样例解释】", "说明",
+        ])
+        self.assertEqual(len(samples), 0)
+        self.assertTrue(any("缺输入或输出" in w for w in warnings))
+
+
 if __name__ == "__main__":
     unittest.main()

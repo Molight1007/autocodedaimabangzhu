@@ -125,6 +125,11 @@ class TestExtractJson(unittest.TestCase):
         text = '说明 {"a": {"b": 1}} 后面还有 } 这种噪声'
         self.assertEqual(extract_json_object(text), {"a": {"b": 1}})
 
+    def test_literal_newline_inside_string_is_tolerated(self) -> None:
+        """提示词要求 L3 分步骤，模型常直接吐真实换行；严格模式会误判为“不是 JSON”。"""
+        raw = '{"L3": "1. 读入\n2. 循环\n3. 输出"}'
+        self.assertEqual(extract_json_object(raw), {"L3": "1. 读入\n2. 循环\n3. 输出"})
+
     def test_string_containing_braces(self) -> None:
         text = 'prefix {"a": "} not end", "b": 2} suffix'
         self.assertEqual(extract_json_object(text), {"a": "} not end", "b": 2})

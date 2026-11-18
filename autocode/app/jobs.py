@@ -189,6 +189,24 @@ def job_status(db: Any, problem_id: int) -> Dict[str, Any]:
     }
 
 
+def running_job_error(db: Any, problem_id: int) -> Optional[str]:
+    """CLI 入口的并发护栏：该题若已有存活的生成任务，返回报错文案，否则 None。
+
+    UI 路径由 `start_generate` 自带对账；CLI（generate/prepare）原先没有任何护栏，
+    两端同时跑同一题会双份烧 token、互相覆盖中间产物。
+    """
+    for existing in db.query_all(
+        "SELECT * FROM generation_jobs WHERE problem_id=? AND status='running'", (problem_id,)
+    ):
+        row = reconcile_running_job(db, problem_id, existing)
+        if row["status"] == "running":
+            return (
+                f"该题已有生成任务在运行（job #{row['id']}，pid={row['os_pid']}），"
+                "等它结束或先终止后再试"
+            )
+    return None
+
+
 def start_generate(
     db: Any, payload: Dict[str, Any], *, root: Path, log_dir: Path
 ) -> Dict[str, Any]:

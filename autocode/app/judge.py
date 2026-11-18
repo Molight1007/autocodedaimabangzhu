@@ -25,7 +25,6 @@ from ..engine.runner import (
     RunnerEnvError,
     prepare_program,
     release_program,
-    run_case,
     run_prepared,
 )
 from ..engine.verify.comparator import CompareResult, compare
@@ -39,25 +38,34 @@ LANG_ALIASES = {
     "cc": LANG_CPP,
     "c": "c",
 }
-CODE_FENCE_RE = re.compile(r"```[ \t]*(?P<lang>[A-Za-z+#]*)[ \t]*\n(?P<body>.*?)```", re.DOTALL)
+# CRLF 兼容：模型/中间件常把围栏结束符写成 \r\n，旧的 `\n` 会让 lang 变成
+# "python\r" 从而匹配不到目标语言，退化成取任意围栏甚至把整段回复当代码。
+CODE_FENCE_RE = re.compile(r"```[ \t]*(?P<lang>[A-Za-z+#]*)[ \t]*\r?\n(?P<body>.*?)```", re.DOTALL)
 PYTHON_SCALE_FACTOR = 4
 
 # L1~L3 里出现的可执行代码特征（命中即打标，不阻断入库）
+#: L1~L3 禁代码检测口径：**(正则, 原因标签)**。
+#: 用正则而不是 `token in text`：`"def "` 匹配不到 `def` 后跟换行/标点，
+#: 而 `"for ("` 又会漏 `for(` —— 两处都会让"提示里写了代码"静默漏检。
+#: 口径必须与 `prompts/templates/hints.md` 写的一致（那边是给人看的同一张表）。
 _CODE_SIGNATURES: Tuple[Tuple[str, str], ...] = (
-    ("```", "fenced_code_block"),
-    ("#include", "cpp_include"),
-    ("def ", "python_def"),
-    ("return ", "return_stmt"),
-    ("std::", "cpp_std"),
-    ("print(", "print_call"),
-    ("for (", "c_style_for"),
-    ("for(", "c_style_for"),
-    ("while (", "c_style_while"),
-    ("scanf(", "scanf_call"),
-    ("printf(", "printf_call"),
-    ("vector<", "cpp_vector"),
-    ("->", "member_arrow"),
-    ("== null", "code_compare"),
+    (r"```", "fenced_code_block"),
+    (r"#include", "cpp_include"),
+    # 用 ASCII 边界而不是 `\b`：Python 的 `\w` 含中文，「写def定义」会漏检
+    (r"(?<![A-Za-z0-9_])def(?![A-Za-z0-9_])", "python_def"),
+    (r"(?<![A-Za-z0-9_])return(?![A-Za-z0-9_])", "return_stmt"),
+    (r"std::", "cpp_std"),
+    (r"(?<![A-Za-z0-9_])print\s*\(", "print_call"),
+    (r"(?<![A-Za-z0-9_])for\s*\(", "c_style_for"),
+    (r"(?<![A-Za-z0-9_])while\s*\(", "c_style_while"),
+    (r"(?<![A-Za-z0-9_])scanf\s*\(", "scanf_call"),
+    (r"(?<![A-Za-z0-9_])printf\s*\(", "printf_call"),
+    (r"vector\s*<", "cpp_vector"),
+    # 箭头要求左侧是标识符，避免把复杂度 `O(n)->O(1)` 误判成成员访问
+    (r"[A-Za-z_]\w*\s*->\s*[A-Za-z_\d]", "member_arrow"),
+    (r"==\s*null", "code_compare"),
+    # 方括号赋值（a[i]=1 / dp[j] += 1）：伪代码里出现它就是可执行写法
+    (r"[A-Za-z_]\w*\s*\[[^\]\n]{1,40}\]\s*[+\-*/%&|^]?=", "index_assign"),
 )
 
 
@@ -153,9 +161,13 @@ def extract_code(text: str, lang: str = LANG_PYTHON) -> str:
 
 
 def hint_quality_issue(content: str) -> Optional[str]:
-    """L1~L3 代码块检测；返回命中原因（None 表示干净）。"""
+    """L1~L3 代码块检测；返回命中原因（None 表示干净）。
+
+    同步 `prompts/templates/hints.md` 的检测口径：围栏 / def / return / #include /
+    std:: / print( / for( / 方括号赋值。用正则匹配，便于覆盖 `def` 后换行这类写法。
+    """
     text = str(content or "")
-    hits = [label for token, label in _CODE_SIGNATURES if token in text]
+    hits = [label for pattern, label in _CODE_SIGNATURES if re.search(pattern, text)]
     return ",".join(dict.fromkeys(hits)) if hits else None
 
 

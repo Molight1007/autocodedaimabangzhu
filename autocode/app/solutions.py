@@ -11,6 +11,7 @@ LLM 只产出代码，是否采信由样例 + 对拍门决定；plan 只是“�
 
 from __future__ import annotations
 
+import json
 from typing import Any, Dict, List, Optional
 
 from ..engine.runner import compiler_report
@@ -149,10 +150,57 @@ ALLOWED_TAGS = {
     "单调栈", "单调队列", "分治", "扫描线", "构造",
 }
 
+#: 题解质检产出的固定问题串。explain 每次重跑都要先清掉上一次的同类标记再合并，
+#: 否则干净题解也会永久挂着旧警示（与 enrich 的「方法缺失」同口径）。
+ANALYSIS_FLAG_CODES = (
+    "题解包含代码块",
+    "缺少 plain_question",
+    "缺少 thinking_path",
+    "题解泄露样例答案",
+)
+
+
+def _norm_ws(text: str) -> str:
+    """统一换行与行尾空白。
+
+    历史 bug：样例是 CRLF、题解是 LF，或任一方行尾带空格时，
+    `answer in text` 直接不命中 → 真实泄漏被判成干净（probe4 四种变体全漏）。
+    """
+    normalized = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
+    return "\n".join(line.strip() for line in normalized.split("\n")).strip()
+
+
+def _answer_is_checkable(answer: str) -> bool:
+    """短答案（如样例输出只有 `9`）做子串匹配必然误报，必须跳过。
+
+    口径：去空白后 ≥2 行 或 长度 ≥6 才算"可判定的泄漏"。
+    """
+    text = _norm_ws(answer)
+    lines = [line for line in text.split("\n") if line.strip()]
+    compact = "".join(text.split())
+    if not compact:
+        return False
+    return len(lines) >= 2 or len(compact) >= 6
+
+
+def _flatten_text(value: Any) -> str:
+    """把分析 JSON 摊平成可子串搜索的纯文本（保留字段内真实换行）。
+
+    注意不能用 `json.dumps` 的结果直接搜索：换行会被转义成 `\\n`，
+    多行样例答案（如 `7\\n13`）永远匹配不到。
+    """
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        return "\n".join(_flatten_text(item) for item in value.values())
+    if isinstance(value, (list, tuple)):
+        return "\n".join(_flatten_text(item) for item in value)
+    return str(value)
+
 
 def _analysis_issues(analysis: Dict[str, Any], samples: List[Dict[str, str]]) -> List[str]:
     issues: List[str] = []
-    text = json.dumps(analysis, ensure_ascii=False)
+    text = _norm_ws(_flatten_text(analysis))
     if "```" in text:
         issues.append("题解包含代码块")
     if not str(analysis.get("plain_question") or "").strip():
@@ -160,8 +208,12 @@ def _analysis_issues(analysis: Dict[str, Any], samples: List[Dict[str, str]]) ->
     if not analysis.get("thinking_path"):
         issues.append("缺少 thinking_path")
     for sample in samples:
-        answer = str(sample.get("output") or "").strip()
-        if answer and answer in text:
+        # 两侧都做换行/行尾空白归一化，否则 CRLF 或行尾空格会让真泄漏漏报
+        answer = _norm_ws(str(sample.get("output") or ""))
+        # 历史 bug：只按 `answer in text` 判断，样例输出是 "9" 时任何含 9 的题解都被判泄漏
+        if not _answer_is_checkable(answer):
+            continue
+        if answer in text:
             issues.append("题解泄露样例答案")
             break
     return issues
@@ -180,7 +232,28 @@ def explain(service: Any, problem: Dict[str, Any], spec: Dict[str, Any]) -> Opti
     issues = _analysis_issues(analysis, samples)
     if issues:
         service._note("题解质检：" + "；".join(issues))
-        analysis["quality_flags"] = issues
+    # 与 enrich 同口径：读旧 → 合并去重，不能整体覆盖（否则会抹掉“方法解析缺失”等已有标记）
+    row = service.store.db.query_one(
+        "SELECT analysis_json FROM problems WHERE id=?", (int(problem["id"]),)
+    )
+    previous: Dict[str, Any] = {}
+    if row is not None and row["analysis_json"]:
+        try:
+            previous = json.loads(row["analysis_json"])
+        except json.JSONDecodeError:
+            previous = {}
+    raw_flags = previous.get("quality_flags")
+    merged = [str(x) for x in raw_flags] if isinstance(raw_flags, list) else []
+    # 先清掉上一次题解质检写的同类标记（本次是干净题解时不能继续挂警示），
+    # 其它来源（如 enrich 的「方法缺失」）原样保留。
+    merged = [item for item in merged if item not in ANALYSIS_FLAG_CODES]
+    for issue in issues:
+        if issue not in merged:
+            merged.append(issue)
+    if merged:
+        analysis["quality_flags"] = merged
+    else:
+        analysis.pop("quality_flags", None)
     tags = [tag for tag in (analysis.get("tags") or []) if tag in ALLOWED_TAGS][:5]
     analysis["tags"] = tags
     service.store.save_analysis(int(problem["id"]), analysis, tags)

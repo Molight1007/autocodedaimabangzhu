@@ -94,6 +94,22 @@
   .sec h4{margin:0 0 8px;font-size:13px;color:var(--muted);font-weight:600;letter-spacing:.3px;text-transform:uppercase}
   .card{border:1px solid var(--border);border-radius:12px;padding:14px 16px;background:var(--surface-2)}
   .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;font-size:12.5px;white-space:pre-wrap;word-break:break-word}
+  /* 题面：中文阅读排版（原来用 .mono 等宽 12.5px，`###` 会裸奔、行距松散） */
+  .statement{font-family:system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+    font-size:16px;line-height:1.85;color:var(--text);white-space:normal;max-width:76ch}
+  .statement h4{margin:22px 0 10px;font-size:17px;line-height:1.5;font-weight:700;color:var(--text);
+    padding-left:10px;border-left:3px solid var(--accent)}
+  .statement h4:first-child{margin-top:2px}
+  .statement p{margin:0 0 9px}
+  .statement strong{font-weight:700;color:#0f172a}
+  .statement ul,.statement ol{margin:6px 0 10px;padding-left:24px}
+  .statement li{margin:4px 0}
+  .statement pre.data{margin:8px 0 12px;padding:10px 14px;background:var(--surface-2);
+    border:1px solid var(--border);border-radius:10px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+    font-size:13.5px;line-height:1.65;white-space:pre-wrap;overflow:auto}
+  .statement code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:13px;
+    background:var(--accent-soft);color:#3730a3;padding:1px 5px;border-radius:6px}
+  .statement pre code{background:none;padding:0;color:inherit}
   pre.code{margin:10px 0 0;background:#0f172a;color:#e2e8f0;border-radius:12px;padding:14px 16px;overflow:auto;max-height:520px;font-size:12.5px;line-height:1.55}
   .method{border:1px solid var(--border);border-radius:12px;margin-bottom:12px;overflow:hidden;background:var(--surface)}
   .method-head{display:flex;align-items:center;gap:8px;padding:12px 14px;background:var(--surface-2);border-bottom:1px solid var(--border);flex-wrap:wrap}
@@ -105,11 +121,41 @@
   .langtab:disabled{opacity:.4;cursor:not-allowed}
   .copy{font-size:12px;color:var(--muted);border:1px solid var(--border);padding:5px 10px;border-radius:8px;background:var(--surface)}
   .copy:hover{color:var(--text);border-color:var(--border-strong)}
-  .hint-lock{border:1px dashed var(--border-strong);background:var(--surface-2);border-radius:12px;padding:18px;text-align:center;color:var(--muted);margin-bottom:10px;cursor:pointer}
+  /* 提示树：根（通用提示）→ 分支（解法）→ 该解法的 L2/L3/L4 */
+  .htree{position:relative;padding-left:24px}
+  .htree:before{content:'';position:absolute;left:8px;top:16px;bottom:16px;width:2px;background:var(--border)}
+  .hroot{position:relative;margin-bottom:12px}
+  .hroot:before{content:'';position:absolute;left:-21px;top:17px;width:10px;height:10px;border-radius:50%;
+    background:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
+  .hcard{border:1px solid var(--border);background:var(--surface-2);border-radius:10px;padding:13px 16px}
+  .hcard p{margin:7px 0 0;font-size:15px;line-height:1.85;white-space:pre-wrap;overflow-wrap:anywhere}
+  .hbranches{display:flex;flex-direction:column;gap:6px}
+  .hbranch{position:relative;display:flex;align-items:center;gap:9px;width:100%;text-align:left;
+    padding:10px 12px;border-radius:9px;border:1px solid transparent;color:var(--muted);font-size:13.5px;font-weight:600}
+  .hbranch:before{content:'';position:absolute;left:-16px;top:50%;width:12px;height:2px;background:var(--border)}
+  .hbranch:hover{background:var(--surface-2);border-color:var(--border);color:var(--text)}
+  .hbranch.active{background:var(--accent-soft);border-color:#c7d2fe;color:var(--accent)}
+  .hdot.small{width:8px;height:8px;border-radius:50%;background:currentColor;opacity:.65;flex:none}
+  .hbranch .hintline{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .hbranch-caret{margin-left:auto;font-size:12px;font-weight:500;opacity:.75;flex:none}
+  .hchildren{margin:6px 0 8px 10px;padding-left:16px;border-left:1px dashed var(--border-strong);
+    display:flex;flex-direction:column;gap:8px}
+  .hint-lock{display:flex;align-items:center;justify-content:space-between;gap:12px;border:1px dashed var(--border-strong);
+    background:var(--surface-2);border-radius:10px;padding:11px 14px;color:var(--muted);cursor:pointer;font-size:13px;margin:0}
   .hint-lock:hover{border-color:var(--accent);color:var(--accent)}
-  .hint-open{border-left:3px solid #c7d2fe;background:var(--surface-2);padding:12px 14px;border-radius:0 10px 10px 0;margin-bottom:10px}
+  .hint-open{border:1px solid var(--border);border-left:3px solid #c7d2fe;background:var(--surface-2);
+    padding:13px 16px;border-radius:0 10px 10px 0;margin:0}
   .hint-open b{color:var(--accent);font-size:12px}
-  .hint-open p{margin:6px 0 0;white-space:pre-wrap}
+  .hint-open p{margin:8px 0 0;white-space:pre-wrap;overflow-wrap:anywhere;font-size:15px;line-height:1.85}
+  .hint-open .hint-code{margin:9px 0 0;padding:11px 13px;background:var(--surface);border:1px solid var(--border);
+    border-radius:8px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:13px;line-height:1.6;
+    overflow:auto;white-space:pre-wrap}
+  .hint-level{font-size:12px;font-weight:700;letter-spacing:.02em;color:var(--accent);
+    background:var(--accent-soft);border-radius:999px;padding:3px 9px;white-space:nowrap}
+  .hint-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+  .hint-flag{padding:2px 8px;font-size:11px;gap:4px}
+  .hint-lock .hint-flag{margin-left:8px;vertical-align:middle}
+  .issue .msg ul{margin:6px 0 0;padding-left:18px} .issue .msg li{margin:3px 0;word-break:break-word}
   .layer{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px}
   .p-toolbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px}
   .editor{width:100%;min-height:280px;background:#0f172a;color:#e2e8f0;border:1px solid #1e293b;border-radius:12px;padding:14px 16px;font:12.5px/1.6 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;resize:vertical;outline:none;tab-size:4}
@@ -275,6 +321,14 @@
         <label class="check"><input type="checkbox" id="i-batch" /> 批量导入多题</label>
         <span class="hintline" id="i-batch-hint" hidden>按<code>单独一行 ---</code> 分块：每块第一行是标题，其余为题面。检测到 <b id="i-batch-count">0</b> 块。</span>
       </div>
+      <div class="field">
+        <label>整卷 PDF（LLM 切题）</label>
+        <div class="row-inline">
+          <input id="i-pdf-path" placeholder="C:\Users\35174\Downloads\…\CSP40-statement.pdf" style="flex:1" />
+          <button class="btn" id="i-pdf-btn"><svg class="i i-sm"><use href="#i-file"/></svg>读取并切题</button>
+        </div>
+        <span class="hintline">模型只标每道题的行号；题面与样例从 PDF 原文切片，模型不写正文。每次约 1 次 LLM 调用。</span>
+      </div>
       <div class="field" id="i-title-field"><label>题目标题</label><input id="i-title" placeholder="例如：仓库规划" /></div>
       <div class="field"><label>题面</label><textarea id="i-statement" placeholder="粘贴题面（Markdown / 纯文本）。支持 .md/.txt 文件读取。"></textarea></div>
       <div class="row-inline" style="justify-content:space-between">
@@ -338,12 +392,12 @@ const $$ = (s,r=document)=>[...r.querySelectorAll(s)];
 const esc = s => String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const fmt = n => Number(n||0).toLocaleString('zh-CN');
 const ROUTE = new URLSearchParams(location.search);
-const STATE = { problems:[], filter:'all', tier:'', tag:'', q:'', problem:null, tab:'statement', lang:'', revealed:0, studentCode:{}, runResult:null, diagnosis:null, customInput:'', scope:'samples', model:'deepseek-v4-pro', answerUnlocked:false,
+const STATE = { problems:[], filter:'all', tier:'', tag:'', q:'', problem:null, tab:'statement', lang:'', revealed:0, studentCode:{}, runResult:null, diagnosis:null, adversarial:null, customInput:'', scope:'samples', model:'deepseek-v4-pro', answerUnlocked:false, hintApproach:'', hintPid:null, hintCode:false,
   job:null, jobDone:{}, qualityCache:{}, exportsCache:{}, merge:{name:'',cases:[],error:'',result:null,busy:false,force:false},
   batch:false, batchResult:null, singlePlaceholder:'' };
 const SOURCE_LABEL = {settings:'界面设置', env:'环境变量', file:'项目 key 文件', missing:'未配置'};
 const LANG_LABEL = {cpp:'C++', c:'C', python:'Python'};
-const LAYER_CN = {sample:'样例', boundary:'边界', tiny:'极小规模', small:'小规模', mid:'中等规模', exhaustive:'穷举', stress:'压力测试', custom:'自定义', user:'我的数据'};
+const LAYER_CN = {sample:'样例', boundary:'边界', tiny:'极小规模', small:'小规模', mid:'中等规模', exhaustive:'穷举', stress:'压力测试', adversarial:'对抗数据', custom:'自定义', user:'我的数据'};
 const TRUST_CN = {oracle:'标准答案', cross_verified:'交叉验证', generated:'生成数据', sample:'样例', reference_only:'未校验', conflict:'解冲突'};
 /* reference_only = force 入库、没跑过参考解；conflict = 多个参考解互相矛盾 —— 两者都不能当标准答案，用琥珀色与已校验数据区分 */
 const TRUST_UNVERIFIED = {reference_only:1, conflict:1};
@@ -352,10 +406,16 @@ const trustName = x => TRUST_CN[x] || x;
 const isUnverified = x => !!TRUST_UNVERIFIED[String(x||'')];
 function trustPill(t){const raw=String(t||'');if(!raw)return '';const amber=isUnverified(raw);return `<span class="pill ${amber?'amber':''}" title="trust_level=${esc(raw)}">${esc(trustName(raw))}</span>`;}
 const SIZE_CN = {sample:'样例', max:'最大规模', small:'小规模', medium:'中等', large:'大规模', tiny:'极小规模', edge:'边界', user:'我的用例'};
-const DESKTOP = new URLSearchParams(location.search).get('desktop') === '1' || location.protocol === 'file:';
+const DESKTOP_FLAG = new URLSearchParams(location.search).get('desktop') === '1';
+/* 桌面判定必须在“调用时”做：pywebview 可能把本地页交给内建 HTTP 服务器托管，
+   `?desktop=1` 会丢、protocol 也变成 http；只认启动参数会导致前端去 fetch 静态服务器，
+   POST /api/* 直接吃 405 HTML（2026-11-17 题库空白 + PDF 导入报 405 的真因）。 */
+function desktopMode(){
+  return DESKTOP_FLAG || location.protocol === 'file:' || !!(window.pywebview && window.pywebview.api);
+}
 
 function ensureBridge(){
-  if(!DESKTOP || (window.pywebview && window.pywebview.api)) return Promise.resolve();
+  if(!desktopMode() || (window.pywebview && window.pywebview.api)) return Promise.resolve();
   return new Promise((resolve,reject)=>{
     const timer=setTimeout(()=>reject(new Error('桌面桥加载超时')),15000);
     window.addEventListener('pywebviewready',()=>{clearTimeout(timer);resolve();},{once:true});
@@ -364,7 +424,7 @@ function ensureBridge(){
 
 function toast(msg){ const t=$('#toast'); t.textContent=msg; t.classList.add('show'); clearTimeout(t._t); t._t=setTimeout(()=>t.classList.remove('show'),1600); }
 async function api(path,opts={}){
-  if(DESKTOP){
+  if(desktopMode()){
     if(!window.pywebview || !window.pywebview.api) throw new Error('桌面桥未就绪');
     const payload=opts.body?JSON.parse(opts.body):{};
     const data=await window.pywebview.api.request(path,payload,opts.method||'GET');
@@ -539,6 +599,41 @@ async function saveBatch(){
     box.innerHTML=`<div class="batch-list"><div class="batch-item bad"><svg class="i i-sm" style="color:var(--red);margin-top:3px"><use href="#i-alert"/></svg><div>${esc(humanErr(e.message))}，文本已保留在输入框里，可稍后重试。</div></div></div>`;
   }finally{ btn.disabled=false; updateBatchCount(); }
 }
+function pdfResultHtml(r){
+  const imported=r.imported||[], skipped=r.skipped||[], warns=r.warnings||[];
+  const rows=[];
+  imported.forEach(x=>{
+    rows.push(`<div class="batch-item"><svg class="i i-sm" style="color:var(--green);margin-top:3px"><use href="#i-check-circle"/></svg>
+      <div>入库 · <a class="row-link" href="?problem=${Number(x.id)}">#${Number(x.id)} ${esc(x.title||'')}</a>
+      <span class="hintline" style="margin-left:8px">样例 ${Number(x.samples)||0} 组 · ${x.created?'新建':'已存在'}</span></div></div>`);
+  });
+  skipped.forEach(x=>{
+    rows.push(`<div class="batch-item bad"><svg class="i i-sm" style="color:var(--red);margin-top:3px"><use href="#i-alert"/></svg>
+      <div style="min-width:0"><b>跳过「${esc(String(x.title||''))}」：</b>${esc(x.reason||'')}</div></div>`);
+  });
+  warns.slice(0,8).forEach(w=>{
+    rows.push(`<div class="batch-item"><svg class="i i-sm" style="color:var(--amber);margin-top:3px"><use href="#i-alert"/></svg><div class="hintline">${esc(w)}</div></div>`);
+  });
+  return `<div class="batch-list">${rows.join('')||'<div class="batch-item bad">没有识别到题目</div>'}</div>`;
+}
+async function importPdf(){
+  const status=$('#i-status'), box=$('#i-batch-result'), btn=$('#i-pdf-btn');
+  const path=$('#i-pdf-path').value.trim();
+  if(!path){ status.textContent='先填 PDF 的绝对路径'; status.className='statusline bad'; return; }
+  btn.disabled=true; box.innerHTML=''; status.textContent='LLM 正在切题（约 1 次调用）…'; status.className='statusline';
+  try{
+    const r=await postJSON('/api/import/pdf',{path});
+    box.innerHTML=pdfResultHtml(r);
+    const ok=(r.imported||[]).length, skip=(r.skipped||[]).length;
+    status.textContent=`入库 ${ok} 题${skip?`，跳过 ${skip} 题`:''}`;
+    status.className='statusline '+(ok?'ok':'bad');
+    $$('#i-batch-result .row-link').forEach(a=>a.addEventListener('click',e=>{e.preventDefault();location.href=a.getAttribute('href');}));
+  }catch(e){
+    status.textContent='PDF 导入失败：'+humanErr(e.message); status.className='statusline bad';
+    box.innerHTML=`<div class="batch-list"><div class="batch-item bad"><svg class="i i-sm" style="color:var(--red);margin-top:3px"><use href="#i-alert"/></svg><div>${esc(humanErr(e.message))}</div></div></div>`;
+  }finally{ btn.disabled=false; }
+}
+$('#i-pdf-btn').onclick=importPdf;
 function batchResultHtml(r){
   const imported=r.imported||[], failed=r.failed||[];
   if(!imported.length&&!failed.length) return '<div class="batch-list"><div class="batch-item bad">接口未返回清单（POST /api/import/batch 可能尚未接入）</div></div>';
@@ -595,6 +690,7 @@ function runResultHtml(r){
   const failCard=f?`<div class="sec"><h4>第一处失败</h4><div class="card">
     <div class="row-inline" style="margin-bottom:8px"><span class="verdict ${verdictClass(f.verdict)}">${VERDICT_LABEL[f.verdict]||f.verdict}</span><span class="pill">${esc(f.id)}</span><span class="pill">${esc(f.layer||'')}</span>
       <button class="copy i-btn" id="p-copy-input"><svg class="i i-sm"><use href="#i-copy"/></svg>复制输入</button>
+      <button class="btn i-btn" id="p-adversarial" title="生成专门卡住这份错解的对抗数据"><svg class="i i-sm"><use href="#i-sparkles"/></svg>生成对抗数据</button>
       <button class="btn primary i-btn" id="p-diagnose" style="margin-left:auto" title="用当前选择的模型分析这次失败"><svg class="i i-sm"><use href="#i-sparkles"/></svg>分析不一致原因</button></div>
     <div class="diff"><div><div class="hintline">输入</div><pre class="mono">${esc(f.input)}</pre></div>
       <div><div class="hintline">期望输出</div><pre class="mono">${esc(f.expected)}</pre>
@@ -602,8 +698,8 @@ function runResultHtml(r){
     ${f.stderr?`<div class="hintline" style="margin-top:8px">stderr：${esc(f.stderr).slice(0,400)}</div>`:''}
   </div></div>`:'';
   return `<div class="sec"><div class="row-inline"><span class="pill ${r.passed===r.total?'green':'red'}">通过 ${r.passed}/${r.total}</span>
-    <span class="pill">诊断模型：${esc(STATE.model)}</span><span class="hintline">运行范围：${STATE.scope==='samples'?'样例':'前 20 条生成数据'}</span></div></div>
-    <div class="sec"><h4>用例结果</h4><div class="case-table"><div class="case-row head"><div>用例</div><div>层级</div><div>判定</div><div style="text-align:right">耗时</div></div>${rows}</div></div>${failCard}${diagnosisHtml()}`;
+    <span class="pill">诊断模型：${esc(STATE.model)}</span><span class="hintline">运行范围：${STATE.scope==='samples'?'样例':(r.truncated?`前 ${r.total} 条 / 共 ${r.total_available} 条`:'全部生成数据')}</span></div></div>
+    <div class="sec"><h4>用例结果</h4><div class="case-table"><div class="case-row head"><div>用例</div><div>层级</div><div>判定</div><div style="text-align:right">耗时</div></div>${rows}</div></div>${failCard}${diagnosisHtml()}${adversarialHtml()}`;
 }
 function diagnosisHtml(){
   const d=STATE.diagnosis;
@@ -626,7 +722,7 @@ function practiceView(p){
   const code=currentCode(p,STATE.lang);
   return `<div class="sec"><h4>校验：用解跑一遍这批数据</h4><div class="hintline" style="margin:-2px 0 10px">生成的数据是否可靠？用参考解或你自己的解跑一遍；不一致时可直接分析原因。</div>
     <div class="p-toolbar">${langTabs}
-      <select id="p-scope"><option value="samples" ${STATE.scope==='samples'?'selected':''}>只跑样例</option><option value="all" ${STATE.scope==='all'?'selected':''}>跑生成数据（前20条）</option><option value="custom" ${STATE.scope==='custom'?'selected':''}>自定义输入</option></select>
+      <select id="p-scope"><option value="samples" ${STATE.scope==='samples'?'selected':''}>只跑样例</option><option value="all" ${STATE.scope==='all'?'selected':''}>跑生成数据（最多200条）</option><option value="custom" ${STATE.scope==='custom'?'selected':''}>自定义输入</option></select>
       <select id="p-model"><option value="deepseek-v4-pro" ${STATE.model==='deepseek-v4-pro'?'selected':''}>deepseek-v4-pro</option><option value="deepseek-v4-flash" ${STATE.model==='deepseek-v4-flash'?'selected':''}>deepseek-v4-flash</option></select>
       <button class="btn primary i-btn" id="p-run" title="Ctrl+Enter 运行"><svg class="i i-sm"><use href="#i-play"/></svg>运行</button>
       <span class="hintline" id="p-status">${STATE.runResult?(STATE.runResult.custom?'运行完成':`通过 ${STATE.runResult.passed||0}/${STATE.runResult.total||0}`):'代码只保存在本机浏览器'}</span>
@@ -646,19 +742,20 @@ function bindPractice(p){
   }
   $$('#detail-body [data-plang]').forEach(b=>b.addEventListener('click',()=>{
     if(editor) STATE.studentCode[STATE.lang]=editor.value;
-    STATE.lang=b.dataset.plang; STATE.runResult=null; STATE.diagnosis=null; renderDetail(p);
+    STATE.lang=b.dataset.plang; STATE.runResult=null; STATE.diagnosis=null; STATE.adversarial=null; renderDetail(p);
   }));
   const scope=$('#p-scope'); if(scope) scope.onchange=e=>{STATE.scope=e.target.value;renderDetail(p);};
   const custom=$('#custom-input'); if(custom) custom.addEventListener('input',()=>{STATE.customInput=custom.value;});
   $$('#detail-body [data-restore]').forEach(b=>b.addEventListener('click',()=>{
     const entry=loadRuns(p)[Number(b.dataset.restore)]; if(!entry) return;
     STATE.lang=entry.lang; STATE.studentCode[entry.lang]=entry.code; localStorage.setItem(codeKey(p,entry.lang),entry.code);
-    STATE.runResult=null; STATE.diagnosis=null; renderDetail(p);
+    STATE.runResult=null; STATE.diagnosis=null; STATE.adversarial=null; renderDetail(p);
   }));
   const model=$('#p-model'); if(model) model.onchange=e=>{STATE.model=e.target.value;};
   const run=$('#p-run'); if(run) run.onclick=()=>runCode(p);
   const copy=$('#p-copy-input'); if(copy) copy.onclick=async()=>{try{await navigator.clipboard.writeText(STATE.runResult.first_failure.input);toast('输入已复制');}catch(e){toast('复制失败');}};
   const diag=$('#p-diagnose'); if(diag) diag.onclick=()=>diagnose(p);
+  const adv=$('#p-adversarial'); if(adv) adv.onclick=()=>genAdversarial(p);
   const show=$('#p-show-answer'); if(show) show.onclick=()=>{STATE.answerUnlocked=true;STATE.tab='answer';renderDetail(p);};
   const unlock=$('#unlock-answer'); if(unlock) unlock.onclick=()=>{STATE.answerUnlocked=true;renderDetail(p);};
 }
@@ -671,11 +768,42 @@ async function runCode(p){
     const payload={problem_id:p.id,lang:STATE.lang,code,scope:STATE.scope,limit:20};
     if(STATE.scope==='custom') payload.custom_input=STATE.customInput;
     const r=await api('/api/run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
-    STATE.runResult=r; STATE.diagnosis=null;
+    STATE.runResult=r; STATE.diagnosis=null; STATE.adversarial=null;
     if(!r.error && !r.compile_error) saveRun(p,{ts:Date.now(),lang:STATE.lang,scope:STATE.scope,passed:r.passed||0,total:r.total||0,code});
     renderDetail(p);
     if(r.error) toast(r.error);
   }catch(e){toast('运行失败：'+e.message);}
+}
+function adversarialHtml(){
+  const a=STATE.adversarial; if(!a) return '';
+  if(a.loading) return `<div class="sec"><div class="hintline">正在针对这份错解定向构造对抗数据…</div></div>`;
+  if(a.error) return `<div class="card" style="border-color:#fecaca;background:var(--red-soft)">${esc(a.error)}</div>`;
+  const list=(a.cases||[]).map((c,i)=>`<div class="card" style="margin-top:8px">
+    <div class="row-inline"><span class="pill">#${i+1}</span><span class="hintline">${esc(c.reason||'')}</span></div>
+    <div class="diff" style="margin-top:8px"><div><div class="hintline">输入</div><pre class="mono">${esc(c.input)}</pre></div>
+    <div><div class="hintline">正确输出</div><pre class="mono">${esc(c.expected)}</pre>
+    <div class="hintline" style="margin-top:8px">这份错解输出</div><pre class="mono">${esc(c.buggy_actual||'（空/异常）')}</pre></div></div></div>`).join('');
+  const llmErr=(a.llm&&a.llm.error)?`<div class="hintline" style="color:#b91c1c">模型调用失败：${esc(a.llm.error)}${a.llm.advice?` ｜ 建议：${esc(a.llm.advice)}`:''}</div>`:'';
+  const trig=(a.trigger_used?`<span class="hintline">已解析 ${a.trigger_used} 条触发条件</span>`:'');
+  return `<div class="sec"><h4>针对这份错解的对抗数据</h4>
+    <div class="row-inline"><span class="pill ${a.added?'green':'red'}">入库 ${a.added||0} 条 / 命中 ${a.generated||0} 条</span>
+      <span class="pill">方式：${esc(a.mode||'')}</span><span class="hintline">候选 ${a.candidates||0} 条，经格式/双解/WA 三重筛选</span>${trig}</div>
+    ${llmErr}
+    ${(a.notes||[]).slice(0,4).map(n=>`<div class="hintline">${esc(n)}</div>`).join('')}
+    ${list||'<div class="hintline">没有找到能卡住这份代码的输入（可能代码已经正确）</div>'}
+    <div class="hintline" style="margin-top:8px">已加入题库 adversarial 层，导出题目包时会自动带上。</div></div>`;
+}
+async function genAdversarial(p){
+  const editor=$('#code-editor');
+  const code=editor?editor.value:'';
+  if(!code.trim()){toast('先写一份代码再生成');return;}
+  STATE.studentCode[STATE.lang]=code;
+  STATE.adversarial={loading:true}; renderDetail(p);
+  try{
+    const r=await api('/api/adversarial',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({problem_id:p.id,lang:STATE.lang,code:code,count:8})});
+    STATE.adversarial=r; renderDetail(p);
+    if(r.added) toast(`已生成 ${r.added} 条对抗数据（adversarial 层）`);
+  }catch(e){STATE.adversarial={error:e.message};renderDetail(p);}
 }
 async function diagnose(p){
   const f=STATE.runResult&&STATE.runResult.first_failure;
@@ -715,11 +843,13 @@ function renderDetail(p){
     <div class="detail-head">
       <div style="min-width:0;flex:1"><h1 class="detail-title">#${p.id} ${esc(p.title)}</h1>
         <div class="detail-sub">${statusPill(p)} <span id="job-badge"></span> ${p.tier?`<span class="tag">难度 ${esc(p.tier)}</span>`:''}${p.tags.map(t=>`<span class="tag">${esc(t)}</span>`).join('')}</div>
+        ${p.status==='failed'&&p.failure_advice?`<div class="hintline" style="color:var(--red);margin-top:6px;max-width:720px">${esc(p.failure_advice)}</div>`:''}
       </div>
       <div class="row-inline">
         ${p.status!=='prepared'?`<button class="btn primary i-btn" id="gen-btn"><svg class="i i-sm"><use href="#i-sparkles"/></svg>开始生成</button>`:''}
         <button class="btn i-btn" id="export-btn"><svg class="i i-sm"><use href="#i-download"/></svg>导出题目包</button>
         <button class="copy i-btn" id="copy-stmt"><svg class="i i-sm"><use href="#i-copy"/></svg>复制题面</button>
+        <button class="btn i-btn" id="del-btn" style="color:var(--red)" title="删除整题（参考解/数据/提示/练习记录一并删除，不可恢复）"><svg class="i i-sm"><use href="#i-x"/></svg>删除</button>
       </div>
     </div>
     <div class="tabs">${tabs.map(([k,l])=>`<button class="tab ${STATE.tab===k?'active':''}" data-tab="${k}"><svg class="i i-sm"><use href="#i-${TAB_ICON[k]}"/></svg>${l}</button>`).join('')}</div>
@@ -730,7 +860,7 @@ function renderDetail(p){
     exportBtn.disabled=true;
     const prevTop=topVersion(p.id);
     try{
-      if(DESKTOP){
+      if(desktopMode()){
         /* 桌面：走 bridge 导出到 exports/，再让资源管理器定位文件 */
         const r=await api('/api/export',{method:'POST',body:JSON.stringify({id:p.id})});
         if(r&&r.error) throw new Error(r.error);
@@ -757,16 +887,95 @@ function renderDetail(p){
     }catch(e){ genBtn.disabled=false; genBtn.textContent='开始生成'; toast('启动失败：'+cleanErr(e.message)); }
   };
   $('#copy-stmt').onclick=async()=>{try{await navigator.clipboard.writeText(p.statement||'');toast('题面已复制');}catch(e){toast('复制失败');}};
+  const delBtn=$('#del-btn');
+  if(delBtn) delBtn.onclick=async()=>{
+    if(!confirm(`确认删除 #${p.id} ${p.title}？\n参考解、测试数据、提示、练习记录会一并删除，不可恢复。`)) return;
+    delBtn.disabled=true;
+    try{
+      const r=await postJSON(`/api/problems/${p.id}/delete`,{});
+      if(r&&r.error) throw new Error(r.error);
+      toast(`已删除 #${p.id} ${p.title}`);
+      STATE.problem=null;
+      location.href='?view=library';
+    }catch(e){ delBtn.disabled=false; toast('删除失败：'+cleanErr(e.message)); }
+  };
   $('#detail-body').innerHTML=detailBody(p,groups,langs);
   bindDetail(p);
   if(STATE.tab==='practice') bindPractice(p);
   if(STATE.tab==='data') loadDataTab(p);
   watchJob(p);
 }
+/* ── 题面渲染：轻量 Markdown（标题/段落/列表/代码/加粗），入参必须已 esc ── */
+function joinProse(a,b){
+  if(!a) return b;
+  /* 中文换行直接拼；英文单词之间补空格 */
+  return (/[A-Za-z0-9]$/.test(a) && /^[A-Za-z0-9]/.test(b)) ? a+' '+b : a+b;
+}
+function inlineMd(s){
+  return s.replace(/`([^`]+)`/g,'<code>$1</code>')
+          .replace(/\*\*([^*]+)\*\*/g,'<strong>$1</strong>');
+}
+function renderStatement(raw){
+  const lines=String(raw||'').replace(/\r\n?/g,'\n').split('\n');
+  const out=[]; let buf='', list='', fence=false, code=[], dataBuf=[];
+  const flushP=()=>{ if(buf){ out.push(`<p>${inlineMd(buf)}</p>`); buf=''; } };
+  const flushData=()=>{
+    if(!dataBuf.length) return;
+    let block=dataBuf;
+    /* PDF 样例框的左侧行号列：奇数位恰好是 1..k 时剥掉，避免 1/2/3 与数据交替 */
+    if(block.length>=4 && block.length%2===0){
+      const odds=block.filter((_,i)=>i%2===0);
+      if(odds.every((x,i)=>x.trim()===String(i+1))) block=block.filter((_,i)=>i%2===1);
+    }
+    /* 形态 B：每行 "行号 内容"，行号恰好 1..k 时剥掉 */
+    if(block.length>=3 && block.every(x=>/^\d+\s+/.test(x.trim()))){
+      const nums=block.map(x=>Number(x.trim().match(/^(\d+)\s+/)[1]));
+      if(nums.every((n,i)=>n===i+1)) block=block.map(x=>x.replace(/^\s*\d+\s+/,''));
+    }
+    /* 显示层把 Unicode 连字符统一成 ASCII（仅影响观感，不改库里的原文） */
+    block=block.map(x=>x.replace(/[\u2010-\u2015\u2212]/g,'-'));
+    out.push(`<pre class="data">${block.join('\n')}</pre>`); dataBuf=[];
+  };
+  const flushList=()=>{ if(list){ out.push(`</${list}>`); list=''; } };
+  const isData=t=>!/[A-Za-z\u4e00-\u9fff]/.test(t)
+    && /^[\d\s.,:;+\-*/%()=<>[\]{}|\u2010-\u2015\u2212]+$/.test(t) && t.length<=120;
+  for(const rawLine of lines){
+    const line=rawLine.replace(/\s+$/,''); const t=line.trim();
+    if(/^```/.test(t)){
+      if(fence){ out.push(`<pre class="data"><code>${code.join('\n')}</code></pre>`); code=[]; fence=false; }
+      else { flushP(); flushData(); flushList(); fence=true; }
+      continue;
+    }
+    if(fence){ code.push(line); continue; }
+    if(!t){
+      /* 空行不打断数据块：md 文件常在每行之间插空行，flush 会把样例拆成多个块 */
+      /* 只有上一句已经收尾（。！？；：）才认为空行是真正的段落边界；
+         否则视为 PDF/Word 的硬换行，继续拼成一段，避免“一行一段”的大空隙。 */
+      if(/[。！？；：.!?;:]$/.test(buf)) flushP();
+      continue;
+    }
+    const h=t.match(/^(#{1,4})\s*(.+)$/);
+    if(h){ flushP(); flushData(); flushList(); out.push(`<h4>${inlineMd(h[2])}</h4>`); continue; }
+    if(/^【[^】]{1,14}】$/.test(t)){ flushP(); flushData(); flushList(); out.push(`<h4>${inlineMd(t)}</h4>`); continue; }
+    if(/^.{1,30}（[a-z0-9_-]+）$/.test(t)){ flushP(); flushData(); flushList(); out.push(`<h4>${inlineMd(t)}</h4>`); continue; }
+    const li=t.match(/^[-*•]\s+(.+)$/);
+    if(li){ flushP(); flushData(); if(list!=='ul'){flushList(); out.push('<ul>'); list='ul';} out.push(`<li>${inlineMd(li[1])}</li>`); continue; }
+    const ol=t.match(/^\d+[.、)]\s+(.+)$/);
+    if(ol){ flushP(); flushData(); if(list!=='ol'){flushList(); out.push('<ol>'); list='ol';} out.push(`<li>${inlineMd(ol[1])}</li>`); continue; }
+    flushList();
+    if(isData(t)){ flushP(); dataBuf.push(t); continue; }
+    flushData();
+    buf=joinProse(buf,t);
+  }
+  if(fence && code.length) out.push(`<pre class="data"><code>${code.join('\n')}</code></pre>`);
+  flushP(); flushData(); flushList();
+  return out.join('\n') || '—';
+}
+
 function detailBody(p,groups,langs){
   if(STATE.tab==='practice'){ return practiceView(p); }
   if(STATE.tab==='statement'){
-    return `<div class="sec"><h4>题面</h4><div class="card mono" style="max-height:520px;overflow:auto">${esc(p.statement||'—')}</div></div>
+    return `<div class="sec"><h4>题面</h4><div class="card statement">${renderStatement(esc(p.statement||''))}</div></div>
       <div class="sec"><h4>样例</h4>${(p.samples||[]).map((s,i)=>`
         <div class="card" style="margin-bottom:10px"><div class="hintline">样例 ${i+1}</div>
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:8px">
@@ -791,18 +1000,71 @@ function detailBody(p,groups,langs){
   }
   if(STATE.tab==='analysis'){
     const a=p.analysis||{};
-    return `<div class="sec"><h4>题目在问什么</h4><div class="card">${esc(a.plain_question||'—')}</div></div>
+    return `${qualityFlagsHtml(a)}
+      <div class="sec"><h4>题目在问什么</h4><div class="card">${esc(a.plain_question||'—')}</div></div>
       <div class="sec"><h4>难在哪</h4><div class="card">${esc(a.difficulty||'—')}</div></div>
       ${groups.map((g,gi)=>`<div class="method"><div class="method-head"><span class="method-name">方法：${esc(g.name)}</span><span class="pill">${esc(g.complexity||'—')}</span></div>
         <div class="method-body">${analysisFor(p,g,gi)}</div></div>`).join('')}`;
   }
   if(STATE.tab==='hints'){
-    const hints=(p.hints||[]).slice().sort((a,b)=>a.level-b.level);
-    if(!hints.length) return '<div class="empty">还没有提示</div>';
-    return `<div class="sec"><h4>提示（点击逐条查看）</h4>${hints.map((h,i)=>{
-      if(i>=STATE.revealed) return `<div class="hint-lock" data-reveal="${i}">点击查看提示 ${i+1}</div>`;
-      return `<div class="hint-open"><b>提示 ${i+1}</b><p>${esc(h.content)}</p></div>`;
-    }).join('')}</div>`;
+    const all=p.hints||[];
+    if(!all.length) return '<div class="empty">还没有提示</div>';
+    const LEVEL={2:'L2 · 算法',3:'L3 · 步骤',4:'L4 · 参考代码'};
+    /* 根节点：新数据是 level 0；旧数据没有 0，用 L1 顶替并从分支里移除 */
+    let rootHint=all.find(h=>h.level===0);
+    let rest=all.filter(h=>h.level>0);
+    let legacyRoot='';
+    if(!rootHint){
+      const first=rest.find(h=>h.level===1);
+      if(first){ legacyRoot=first.content; rest=rest.filter(h=>h!==first); }
+    }
+    const groups={};
+    rest.forEach(h=>{const k=h.approach||'';(groups[k]=groups[k]||[]).push(h);});
+    const names=Object.keys(groups).sort((a,b)=>{
+      const rank=n=>/暴力/.test(n)?9:(n?1:0);
+      return rank(a)-rank(b)||a.localeCompare(b,'zh');
+    });
+    if(STATE.hintPid!==p.id){STATE.hintPid=p.id;STATE.hintApproach='';STATE.hintCode=false;}
+    const current=groups[STATE.hintApproach]?STATE.hintApproach:(names.find(n=>!/暴力/.test(n))||names[0]||'');
+    STATE.hintApproach=current;
+    const fallback=((p.analysis&&p.analysis.approaches)||[]).map(x=>x&&x.name).filter(Boolean);
+    const approachName=n=>{
+      const name=(n&&n!=='未标注方法')?n:'';
+      return name||(fallback.length===1?fallback[0]:'基础解法');
+    };
+    const complexity={};
+    ((p.analysis&&p.analysis.approaches)||[]).forEach(x=>{
+      if(!x||!x.name) return;
+      const cx=String(x.complexity||'');
+      /* “未声明（按…分析）”是旧数据的占位，不该占分支行 */
+      if(cx && !/^未声明/.test(cx)) complexity[x.name]=cx;
+    });
+    const rootText=rootHint?rootHint.content:legacyRoot;
+    const rootBadge=rootHint?flagBadge(rootHint):'';
+    const rootCard=rootText?`<div class="hroot"><div class="hcard">
+        <div class="hint-head"><span class="hint-level">通用提示</span>${rootBadge}</div>
+        <p>${esc(rootText)}</p></div></div>`:'';
+    const branches=names.map(n=>{
+      const levels=groups[n].slice().sort((a,b)=>a.level-b.level);
+      const open=n===current;
+      const kids=levels.map(h=>{
+        const label=LEVEL[h.level]||`L${h.level}`;
+        const badge=flagBadge(h);
+        if(h.level===4 && !STATE.hintCode)
+          return `<div class="hint-lock" data-code="1"><span class="hint-level">${label}</span><span>点击查看参考代码</span></div>`;
+        const body=h.level===4?`<pre class="hint-code">${esc(h.content)}</pre>`:`<p>${esc(h.content)}</p>`;
+        return `<div class="hint-open"><div class="hint-head"><span class="hint-level">${label}</span>${badge}</div>${body}</div>`;
+      }).join('');
+      return `<div class="hbranch-block">
+        <button class="hbranch ${open?'active':''}" data-hint="${esc(n)}">
+          <span class="hdot small"></span><span>${esc(approachName(n))}</span>
+          ${complexity[n]?`<span class="hintline" style="font-weight:400">${esc(complexity[n])}</span>`:''}
+          <span class="hbranch-caret">${open?'收起':'展开'}</span>
+        </button>
+        ${open?`<div class="hchildren">${kids||'<div class="hintline">该解法还没有提示</div>'}</div>`:''}
+      </div>`;
+    }).join('');
+    return `<div class="sec"><h4>提示</h4><div class="htree">${rootCard}<div class="hbranches">${branches}</div></div></div>`;
   }
   if(STATE.tab==='code'){
     const langTabs=['cpp','c','python'].map(l=>`<button class="langtab ${STATE.lang===l?'active':''}" data-lang="${l}" ${langs.includes(l)?'':'disabled'}>${LANG_LABEL[l]}</button>`).join('');
@@ -998,6 +1260,20 @@ function exportsHtml(list,p){
 function exportsErrHtml(err){
   return `<div class="note" title="GET /api/problems/{id}/exports · ${esc(cleanErr(err))}">导出历史暂不可用：${esc(humanErr(err))}。导出功能本身不受影响。</div>`;
 }
+/* 提示质量标记：后端 hints[].flag=1 表示该条被代码侧检测出代码特征（提示词禁止，模型偶发违反）。
+   只做标注，不隐藏内容、不影响解锁逻辑。 */
+function flagBadge(h){
+  if(!h || Number(h.flag)!==1) return '';
+  return `<span class="pill amber hint-flag" title="该提示被检测出代码特征，仅供参考"><svg class="i i-sm"><use href="#i-code"/></svg>含代码</span>`;
+}
+/* 题解质检标记：analysis.quality_flags 为字符串数组（缺字段/含代码块/疑似泄露答案时写入） */
+function qualityFlagsHtml(a){
+  const raw=(a&&a.quality_flags);
+  const list=Array.isArray(raw)?raw.filter(x=>x!=null&&String(x).trim()!==''):[];
+  if(!list.length) return '';
+  return `<div class="issue warn" role="status"><svg class="i i-sm"><use href="#i-alert"/></svg>
+    <div class="msg"><b>质检提示</b><ul>${list.map(x=>`<li>${esc(String(x))}</li>`).join('')}</ul></div></div>`;
+}
 function analysisFor(p,g,index){
   const a=p.analysis||{};
   const approaches=a.approaches||[];
@@ -1010,6 +1286,8 @@ function bindDetail(p){
   $$('#detail-body [data-lang]').forEach(b=>b.addEventListener('click',()=>{STATE.lang=b.dataset.lang;renderDetail(p);}));
   $$('#detail-body [data-copy]').forEach(b=>b.addEventListener('click',async()=>{try{await navigator.clipboard.writeText(b.dataset.copy);toast('代码已复制');}catch(e){toast('复制失败');}}));
   $$('#detail-body [data-reveal]').forEach(b=>b.addEventListener('click',()=>{STATE.revealed=Number(b.dataset.reveal)+1;renderDetail(p);}));
+  $$('#detail-body [data-hint]').forEach(b=>b.addEventListener('click',()=>{STATE.hintApproach=b.dataset.hint;STATE.hintCode=false;renderDetail(p);}));
+  $$('#detail-body [data-code]').forEach(b=>b.addEventListener('click',()=>{STATE.hintCode=true;renderDetail(p);}));
   const unlock=$('#unlock-answer');
   if(unlock) unlock.addEventListener('click',()=>{STATE.answerUnlocked=true;renderDetail(p);});
   if(STATE.tab==='data') bindDataTab(p);
@@ -1179,7 +1457,7 @@ function jobBadgeHtml(job,p){
   const st=String(job.status).toLowerCase();
   if(st==='none'||st==='idle'||st==='') return '';        /* 没有任务记录 */
   if(st==='running') return `<span class="pill amber job-pill"><span class="dot"></span>生成中…${job.started_at?`<span class="hintline" style="color:inherit">${esc(fmtAgo(job.started_at))}开始</span>`:''}</span>`;
-  if(st==='failed') return `<span class="pill red">生成失败</span>${job.error?`<span class="job-err">${esc(String(job.error).slice(0,160))}</span>`:''}`;
+  if(st==='failed') return `<span class="pill red">生成失败</span>${job.error?`<span class="job-err">${esc(String(job.error).slice(0,160))}</span>`:''}${job.advice?`<span class="job-err" style="color:var(--amber)">${esc(job.advice)}</span>`:''}`;
   if(st==='done'){
     /* 只有在本次会话里看着它跑完、或刚结束不久才提示，避免和“已就绪”长期重复 */
     const watched=p&&STATE.jobDone[p.id];

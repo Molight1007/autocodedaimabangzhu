@@ -43,6 +43,9 @@ def drop_page_artifacts(lines: Sequence[str]) -> List[str]:
             continue
         if _PAGE_HEAD.match(item) or _PAGE_FOOT.match(item) or _CCF.match(item) or _ROUND.match(item):
             continue
+        # 抽取时插入的分页注释（<!-- Page 5 -->）也不属于样例数据
+        if item.startswith("<!--") and item.endswith("-->"):
+            continue
         kept.append(item)
     return kept
 
@@ -63,8 +66,21 @@ def strip_number_column(lines: Sequence[str]) -> Tuple[List[str], bool]:
 
 
 def restore_merged_lines(text: str) -> Tuple[str, bool]:
-    """还原"行号与数据压成一行"的三种常见形态（只删 1/2/3 号行号，删后必须更短）。"""
+    """还原"行号与数据压成一行"的三种常见形态（只删 1/2/3 号行号，删后必须更短）。
+
+    只在**确实被压平**时启用：文本已是一行一个 token 的正常换行结构时，
+    强行按 token 重排会把 `1\\n5 2\\n2\\n10 50...` 误判成 "n m + 两段数组"，
+    把后面的数据整段截掉（CSP32 树上搜索的真实事故）。
+    """
+    lines = [line for line in str(text or "").splitlines() if line.strip()]
+    # 真正的“压平”只会出现在**同一行**里；两行以上说明换行结构还在。
+    # 且必须以行号 1 开头（样例框左侧带行号列），否则 `5 2\n10 50 10 10 20`
+    # 会被误判成 “n=5 + 行号2 + 5 个数”，把 m=2 当行号删掉（实测会改坏数据）。
+    if len(lines) != 1:
+        return text, False
     tokens = text.split()
+    if not tokens or tokens[0] != "1":
+        return text, False
     if not tokens:
         return text, False
     # 首行行号 1 与 n、m 压在一起时，先去掉这个 1
@@ -104,7 +120,7 @@ def sanitize_sample(input_text: str, output_text: str) -> Tuple[str, str, List[s
     # 输出块通常很短（1~2 行），单看它无法区分"行号 1"和"数据 1"；
     # 用输入块已确认带行号作为联动证据，再剥输出的首行行号。
     # 输出只有 1 行内容时，行号 1 无法靠交替模式识别；按"首行 1 + 恰两行"处理
-    if not stripped_out and out_lines == ["1", out_lines[-1]] and len(out_lines) == 2:
+    if not stripped_out and len(out_lines) == 2 and out_lines[0] == "1":
         out_lines = out_lines[1:]
         stripped_out = True
     if (stripped_in or hit) and out_lines and out_lines[0] == "1" and len(out_lines) >= 2:

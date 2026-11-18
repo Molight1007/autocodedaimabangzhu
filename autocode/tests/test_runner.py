@@ -139,21 +139,40 @@ class TestPrepareOnce(unittest.TestCase):
 
     @unittest.skipUnless(HAS_CPP, "环境无 g++，跳过")
     def test_cpp_compiled_once_for_many_cases(self) -> None:
+        """S7 回归：5 条用例整批只编译 1 次。
+
+        断言口径：**数编译次数**，不量墙钟。旧实现每用例重编译（cpp 20 条约 12.3s），
+        用"绝对耗时 <2s"来判会让这条测试随机器负载抖动（实测 1.0~2.9s），
+        而它的真实意图只是"别逐用例重编译"——数调用次数既精确又稳定。
+        """
         import time
+        from unittest.mock import patch
 
         from autocode.app import judge
+        from autocode.engine.runner import core as runner_core
 
         code = (
             '#include <cstdio>\nint main(){int n;if(scanf("%d",&n)!=1)return 0;'
             'printf("%d\\n",n*2);return 0;}\n'
         )
         cases = [{"id": f"c{i}", "input": f"{i}\n", "expected": f"{i * 2}\n"} for i in range(5)]
+        compile_calls: list = []
+        real_compile_cpp = runner_core.compile_cpp
+
+        def counting_compile(*args, **kwargs):
+            compile_calls.append(args[0] if args else kwargs.get("src_path"))
+            return real_compile_cpp(*args, **kwargs)
+
         started = time.perf_counter()
-        batch = judge.run_solution("cpp", code, cases, time_limit_ms=2000)
+        with patch.object(runner_core, "compile_cpp", counting_compile):
+            batch = judge.run_solution("cpp", code, cases, time_limit_ms=2000)
         elapsed = time.perf_counter() - started
+
         self.assertTrue(batch.all_accepted, batch.verdict_counts())
-        # 修复前实测 3.87s（每用例重编译），修复后 ~1.0s
-        self.assertLess(elapsed, 2.0, f"5 条用例耗时 {elapsed:.2f}s，疑似仍在逐用例重编译")
+        self.assertEqual(
+            len(compile_calls), 1,
+            f"5 条用例应只编译 1 次，实际 {len(compile_calls)} 次（逐用例重编译）；耗时 {elapsed:.2f}s",
+        )
 
     @unittest.skipUnless(HAS_CPP, "环境无 g++，跳过")
     def test_compile_error_reported_once(self) -> None:

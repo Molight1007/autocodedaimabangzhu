@@ -16,7 +16,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 from ..engine.datagen import grammar as grammar_engine
 from ..engine.datagen import input_parser
 from ..engine.verify.comparator import ALLOWED_CHECKERS, compare
-from .prep_models import ALLOWED_OUTPUT_TYPES, OUTPUT_FLOAT, OUTPUT_SINGLE
+from .prep_models import ALLOWED_OUTPUT_TYPES, OUTPUT_ANY, OUTPUT_FLOAT, OUTPUT_SINGLE
 
 DEFAULT_TIME_LIMITS = {"c": 1000, "cpp": 1000, "python": 4000}
 DEFAULT_MEMORY_MB = 512
@@ -112,6 +112,13 @@ def normalize_spec(raw: Dict[str, Any]) -> Tuple[Dict[str, Any], List[str]]:
         checker = "exact"
     if output_type == OUTPUT_FLOAT and checker != "float_eps":
         problems.append("output_type=float_eps 时 checker_type 必须是 float_eps")
+    # 判题器只有 exact / line_trim / float_eps，没有自定义 checker：
+    # 构造题（多解都算对）无法判定，硬生成只会把某一份解当唯一答案 → 静默误判。
+    # 口径「宁可快速失败」：如实选 any_solution 的题在这里被拒，转人工处理。
+    if output_type == OUTPUT_ANY:
+        problems.append(
+            "output_type=any_solution 暂不支持：判题器没有自定义 checker，构造题需人工处理"
+        )
 
     limits: Dict[str, int] = {}
     raw_limits = raw.get("time_limit_ms") or {}
@@ -199,3 +206,53 @@ def spec_block(spec: Dict[str, Any], *, drop_samples: bool = True) -> str:
 
     payload = {key: value for key, value in spec.items() if not (drop_samples and key == "samples")}
     return "```json\n" + json.dumps(payload, ensure_ascii=False, indent=1) + "\n```"
+
+
+# ── 失败原因的人话翻译（CLI / UI 共用）──────────────────────────────────────
+#: failed_stage → (学生能懂的说明, 下一步建议)。技术原文保留在 error 里，这里只给方向。
+FAILURE_ADVICE = {
+    "spec": (
+        "题目的输入/输出格式没能结构化成功（样例回放始终对不上）。",
+        "检查题面里【输入格式】是否描述完整、样例是否和描述一致；若输入是"
+        "“每行第一个数决定后面几个数”的变体格式或格式实在特殊，可以用"
+        " `python -m autocode.cli spec-set --problem-id <id> --file spec.json` 人工指定格式后再生成。",
+    ),
+    "generator": (
+        "数据生成器连续多次没有通过校验。",
+        "多为格式过难或约束互相矛盾；可先 spec-set 确认格式，再重试生成。",
+    ),
+    "references": (
+        "参考解连续多次没跑过样例，或几份参考解互相对不上。",
+        "题目可能偏难或样例本身有误；先核对样例输入/输出，再重试。",
+    ),
+    "datasets": (
+        "分层测试数据没有产出（生成数据全部被约束拒绝）。",
+        "多为约束条件过严或互相矛盾；检查题面数据范围后重试。",
+    ),
+    "hints": (
+        "提示生成失败。",
+        "直接重试即可；提示失败不影响数据与答案，也可稍后用 hints 命令单独补。",
+    ),
+    "budget": (
+        "本次生成的 LLM 调用预算用完了。",
+        "调大 --budget 重试；已成功的阶段会自动复用，不会重复扣费。",
+    ),
+    "timeout": (
+        "单题生成超过时限。",
+        "直接重试；若反复超时，说明题目过难，建议人工处理。",
+    ),
+}
+
+
+def failure_advice(stage: str, error: str = "") -> str:
+    """把 failed_stage + 技术错误翻成学生能执行的下一步；返回空串表示无话可说。"""
+    text = str(error or "")
+    if "any_solution" in text:
+        return (
+            "这是一道构造/多解题（任意可行解都算对），判题器暂时无法自动判定。"
+            "这类题需要人工出数据，本工具暂不生成。"
+        )
+    pair = FAILURE_ADVICE.get(str(stage or "").strip())
+    if not pair:
+        return ""
+    return f"{pair[0]}{pair[1]}"

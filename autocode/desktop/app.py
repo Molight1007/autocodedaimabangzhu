@@ -55,6 +55,8 @@ def dispatch(path: str, payload: Dict[str, Any], method: str = "GET") -> Any:
         return api.test_connection()
     if path == "/api/import":
         return api.import_problem(payload)
+    if path == "/api/import/pdf":
+        return api.import_pdf(payload)
     if path == "/api/import/batch":
         return api.import_batch(payload)
     if path == "/api/generate":
@@ -65,6 +67,8 @@ def dispatch(path: str, payload: Dict[str, Any], method: str = "GET") -> Any:
         return api.run_student_code(payload)
     if path == "/api/diagnose":
         return api.diagnose_student_code(payload)
+    if path == "/api/adversarial":
+        return api.generate_adversarial(payload)
     if path.startswith("/api/problems/"):
         return _dispatch_problem(path, payload, verb)
     return {"error": f"未知接口：{path}"}
@@ -80,6 +84,8 @@ def _dispatch_problem(path: str, payload: Dict[str, Any], verb: str) -> Any:
     sub = parts[3]
     if verb == "POST" and sub == "cases":
         return api.merge_cases({**payload, "problem_id": problem_id})
+    if verb == "POST" and sub == "delete":
+        return api.delete_problem(problem_id)
     if sub == "quality":
         return api.problem_quality(problem_id)
     if sub == "exports":
@@ -97,7 +103,11 @@ def main() -> int:
         return 1
     webview.create_window(
         "autoCode · 出题工作台",
-        url=str(STATIC) + "?desktop=1",
+        # 用 file:// URI 而不是裸路径：裸路径会被 pywebview 的内建 HTTP 服务器接管，
+        # query 丢失后前端会误判成浏览器模式，POST /api/* 打到静态服务器 → 405。
+        # 注意：file:// 上不能再拼 `?desktop=1`，WebView2 会把它当文件名 → ERR_FILE_NOT_FOUND；
+        # 桌面判定已由 `location.protocol === 'file:'` 与 `window.pywebview` 覆盖。
+        url=STATIC.as_uri(),
         js_api=Bridge(),
         width=1440,
         height=920,

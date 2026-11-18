@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from ..engine.datagen import input_parser
 from ..prompts import loader as prompts
 from . import judge
+from .prep_models import OUTPUT_ANY
 from .prep_rules import replay_samples, statement_excerpt, user_blocks
 
 MAX_PARSER_ATTEMPTS = 2
@@ -30,6 +31,14 @@ def parser_fallback(
         return None, f"{prior_error}；parser 兜底已关闭"
     if not base_spec or not base_spec.get("input_grammar"):
         return None, f"{prior_error}；parser 兜底跳过：没有可复用的 spec 基础字段"
+    # 兜底会 `dict(base_spec)` 整份复用 output_type：构造题一旦走到这里，
+    # 就会绕过 normalize_spec 的 any_solution 拒绝，继续生成"单份答案当标准答案"。
+    # 口径一致：不支持就快速失败，绝不靠兜底把非法 spec 洗白。
+    if str(base_spec.get("output_type") or "").strip().lower() == OUTPUT_ANY:
+        return None, (
+            f"{prior_error}；parser 兜底跳过：output_type=any_solution 暂不支持"
+            "（判题器无自定义 checker，构造题需人工处理）"
+        )
     feedback = ""
     last_error = ""
     required = sorted(input_parser.required_keys(base_spec))

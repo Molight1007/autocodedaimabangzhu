@@ -20,7 +20,9 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence
 
-SCHEMA_VERSION = 1
+#: 结构版本：v2=test_cases.source，v3=llm_calls.prompt_hash（见 `_COLUMN_MIGRATIONS` 注释）。
+#: 迁移全部幂等；版本号只用于记录升级历史，不参与业务判断。
+SCHEMA_VERSION = 4
 PRAGMA_BUSY_TIMEOUT_MS = 5000
 
 _SCHEMA_FILE = Path(__file__).resolve().parent / "schema.sql"
@@ -110,6 +112,14 @@ class Database:
         # v2：数据来源标记（用户合并进来的数据 source='user'）
         "test_cases": (
             ("source", "TEXT NOT NULL DEFAULT 'generated'"),
+        ),
+        # v3：prompt 版本可追溯（老库补列，不重建表；历史行留空串表示"未记录"）
+        "llm_calls": (
+            ("prompt_hash", "TEXT NOT NULL DEFAULT ''"),
+        ),
+        # v4：提示按解法分组（空串=旧数据，UI 归到“基础解法”）
+        "hints": (
+            ("approach", "TEXT NOT NULL DEFAULT ''"),
         ),
     }
 

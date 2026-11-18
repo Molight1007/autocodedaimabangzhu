@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -96,6 +97,18 @@ for x in a:
 print(s)
 ```'''
 
+def _method_names(user_text: str) -> List[str]:
+    """从“已有解法”段里取出方法名，供桩客户端按解法各复制一组提示。"""
+    match = re.search(r"## 已有解法.*?\n(\[.*?\])\n", user_text, re.S)
+    if not match:
+        return []
+    try:
+        items = json.loads(match.group(1))
+    except json.JSONDecodeError:
+        return []
+    return [str(item.get("name") or "") for item in items if isinstance(item, dict) and item.get("name")]
+
+
 HINTS = {
     "L1": "前缀和 / 直接累加。",
     "L2": "一遍扫描累加即可，复杂度 O(n)。",
@@ -114,6 +127,7 @@ class StubClient:
 
     def chat(self, messages: List[Dict[str, str]], *, json_mode: bool = True, tag: str = "", **_kw: Any) -> ChatResult:
         self.calls += 1
+        self.last_messages = messages
         if tag.startswith("spec"):
             payload: Any = self.spec
         elif tag.startswith("generator"):
@@ -124,6 +138,12 @@ class StubClient:
             payload = REF_CPP if "lang = cpp" in messages[1]["content"] else REF_PY
         elif tag.startswith("hints"):
             payload = self.hints
+            if "approaches" not in payload:
+                names = _method_names(messages[1]["content"])
+                if names:
+                    payload = {"root": {"L1": self.hints["L1"]},
+                           "approaches": [{"name": name, "L2": self.hints["L2"], "L3": self.hints["L3"]}
+                                          for name in names]}
         else:
             raise AssertionError(f"未知 tag {tag}")
         content = payload if isinstance(payload, str) else json.dumps(payload, ensure_ascii=False)
@@ -259,6 +279,64 @@ class TestStageFailure(PipelineTestCase):
         self.assertIn("样例", report.error)
 
 
+class TestHintsInputs(PipelineTestCase):
+    """S2：hints.md 承诺“会收到已验证的解法清单”，代码必须真的传进去。"""
+
+    def test_hints_receives_verified_approaches(self) -> None:
+        from autocode.app.prep_models import RefArtifact
+
+        service = self.build(StubClient())
+        spec = {
+            "checker_type": "exact",
+            "samples": [{"input": "3\n1 2 3\n", "output": "6\n"}],
+            "constraints_exec": ["1 <= n <= 10"],
+        }
+        refs = {
+            "python/reference": RefArtifact(
+                lang="python", role="reference", code="print(6)", verified=1,
+                approach="前缀和", complexity="O(n)",
+            ),
+            "python/brute": RefArtifact(
+                lang="python", role="brute", code="print(6)", verified=1,
+                approach="暴力枚举", complexity="O(n^2)",
+            ),
+        }
+        service._stage_hints({"id": self.problem_id, "statement_md": PROBLEM_MD}, spec, refs)
+        content = service.client.last_messages[1]["content"]
+        self.assertIn("已有解法", content, "L2 必须知道真实用的是哪种算法")
+        self.assertIn("前缀和", content, content[:400])
+        self.assertIn("参考解已通过全部题面样例", content)
+        # 每种解法各出一组；暴力解也要列出来（学生可以主动选它），但不能混进主解那组
+        self.assertIn("暴力枚举", content, "按解法分组时暴力解也应作为独立一组")
+        self.assertIn("逐条各出一组提示", content)
+        rows = service.store.db.query_all(
+            "SELECT DISTINCT approach FROM hints WHERE problem_id=? AND is_active=1"
+            " AND approach<>'' ORDER BY approach",
+            (self.problem_id,),
+        )
+        self.assertEqual([r["approach"] for r in rows], ["前缀和", "暴力枚举"])
+        levels = [int(r["level"]) for r in service.store.db.query_all(
+            "SELECT level FROM hints WHERE problem_id=? AND is_active=1", (self.problem_id,)
+        )]
+        self.assertIn(0, levels, "v4 必须落一条根节点 L1")
+        self.assertNotIn(1, levels, "v4 不再按解法重复 L1")
+
+
+class TestAnySolutionFastFail(PipelineTestCase):
+    """G5：构造题必须第一次就停，不能烧 3 次调用才失败。"""
+
+    def test_construction_problem_stops_after_one_call(self) -> None:
+        bad_spec = dict(SPEC)
+        bad_spec["output_type"] = "any_solution"
+        client = StubClient(spec=bad_spec)
+        report = self.build(client).prepare(self.problem_id)
+
+        self.assertFalse(report.ok)
+        self.assertEqual(report.failed_stage, "spec")
+        self.assertIn("暂不支持", report.error)
+        self.assertEqual(client.calls, 1, f"构造题不应重试，实际调用 {client.calls} 次")
+
+
 class TestSpecNormalize(PipelineTestCase):
     def test_unknown_checker_defaulted(self) -> None:
         service = self.build(StubClient())
@@ -276,6 +354,50 @@ class TestSpecNormalize(PipelineTestCase):
         service = self.build(StubClient())
         spec, _ = service._normalize_spec({"input_grammar": SPEC["input_grammar"]})
         self.assertEqual(spec["time_limit_ms"]["python"], 4000)
+
+    def test_any_solution_rejected_fast(self) -> None:
+        """判题器没有自定义 checker：构造题必须快速失败转人工，不能静默当 list 判。"""
+        service = self.build(StubClient())
+        spec, problems = service._normalize_spec({
+            "input_grammar": SPEC["input_grammar"],
+            "output_type": "any_solution",
+        })
+        self.assertEqual(spec["output_type"], "any_solution", "如实选的要保留，不被偷偷改写")
+        self.assertTrue(problems, "any_solution 必须被拒")
+        self.assertTrue(
+            any("暂不支持" in item and "人工处理" in item for item in problems),
+            f"拒绝理由要明确指向'暂不支持 + 人工处理'，实际 {problems}",
+        )
+
+    def test_any_solution_skips_parser_fallback(self) -> None:
+        """兜底会整份复用 output_type：必须在这里也堵住，否则构造题被"洗白"继续生成。"""
+        from autocode.app.spec_fallback import parser_fallback
+
+        service = self.build(StubClient())
+        service.allow_parser_fallback = True  # 必须真进入兜底分支，否则测的是“已关闭”
+        base = {"input_grammar": SPEC["input_grammar"], "output_type": "any_solution"}
+        spec, detail = parser_fallback(
+            service, {"id": self.problem_id, "statement_md": PROBLEM_MD}, base,
+            [{"input": "3\n1 2 3\n", "output": "6\n"}], "prior",
+        )
+        self.assertIsNone(spec, "不得返回兜底 spec")
+        self.assertIn("暂不支持", detail)
+        self.assertEqual(service.client.calls, 0, "不该真的去调 parser LLM（白花钱）")
+
+    def test_any_solution_fallback_is_case_insensitive(self) -> None:
+        """A1：`Any_Solution` 这类大小写变体不能绕过兜底拦截。"""
+        from autocode.app.spec_fallback import parser_fallback
+
+        service = self.build(StubClient())
+        service.allow_parser_fallback = True
+        base = {"input_grammar": SPEC["input_grammar"], "output_type": "Any_Solution"}
+        spec, detail = parser_fallback(
+            service, {"id": self.problem_id, "statement_md": PROBLEM_MD}, base,
+            [{"input": "3\n1 2 3\n", "output": "6\n"}], "prior",
+        )
+        self.assertIsNone(spec)
+        self.assertIn("暂不支持", detail)
+        self.assertEqual(service.client.calls, 0)
 
 
 class TestVoting(PipelineTestCase):
@@ -312,6 +434,23 @@ class TestHintQuality(unittest.TestCase):
         reason = judge.hint_quality_issue("#include <vector>\nstd::vector<int> v;")
         self.assertIsNotNone(reason)
         self.assertIn("cpp_include", reason or "")
+
+    def test_bracket_assignment_flagged(self) -> None:
+        """G4：模板承诺检测“方括号赋值”，代码必须真能命中。"""
+        self.assertIn("index_assign", judge.hint_quality_issue("把 a[i]=1 记下来") or "")
+        self.assertIn("index_assign", judge.hint_quality_issue("dp[j] += 1") or "")
+
+    def test_def_followed_by_newline_flagged(self) -> None:
+        """`def` 后换行（没有尾随空格）也必须命中，旧实现只匹配 "def "。"""
+        self.assertIn("python_def", judge.hint_quality_issue("先写\ndef\n再调用") or "")
+
+    def test_def_with_chinese_neighbor_flagged(self) -> None:
+        """`\\b` 在 Unicode 下把中文当 word，`写def定义函数` 会漏检；ASCII 边界必须命中。"""
+        self.assertIn("python_def", judge.hint_quality_issue("写def定义函数") or "")
+
+    def test_complexity_arrow_not_flagged(self) -> None:
+        """`O(n)->O(1)` 是复杂度写法，不是成员访问，不能误报。"""
+        self.assertIsNone(judge.hint_quality_issue("优化后复杂度 O(n)->O(1)"))
 
 
 class TestExtractCode(unittest.TestCase):

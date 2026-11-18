@@ -210,22 +210,32 @@ class PrepStore:
         return counts
 
     def save_hints(self, problem_id: int, rows: List[Dict[str, Any]], batch_id: str) -> None:
+        """写入一批提示：旧批次先置 inactive，保证每道题只展示最新一套。
+
+        同一批里可能有多个解法（approach），而唯一键是 (problem_id, level, gen_batch_id)，
+        所以每个解法用独立 batch_id（`批次:解法`），否则同级的第二个解法会撞键。
+        """
         with self.db.transaction() as conn:
+            conn.execute("UPDATE hints SET is_active=0 WHERE problem_id=?", (problem_id,))
             for row in rows:
+                approach = str(row.get("approach") or "")
+                scoped_batch = f"{batch_id}:{approach}" if approach else batch_id
                 conn.execute(
                     "INSERT INTO hints(problem_id, level, content, quality_flag, flagged_reason,"
-                    " gen_batch_id, is_active, regenerated_at) VALUES(?, ?, ?, ?, ?, ?, 1, ?)"
+                    " gen_batch_id, approach, is_active, regenerated_at)"
+                    " VALUES(?, ?, ?, ?, ?, ?, ?, 1, ?)"
                     " ON CONFLICT(problem_id, level, gen_batch_id) DO UPDATE SET"
                     "  content = excluded.content, quality_flag = excluded.quality_flag,"
-                    "  flagged_reason = excluded.flagged_reason, is_active = 1,"
-                    "  regenerated_at = excluded.regenerated_at",
+                    "  flagged_reason = excluded.flagged_reason, approach = excluded.approach,"
+                    "  is_active = 1, regenerated_at = excluded.regenerated_at",
                     (
                         problem_id,
                         int(row["level"]),
                         str(row["content"]),
                         int(row.get("quality_flag") or 0),
                         str(row.get("flagged_reason") or ""),
-                        batch_id,
+                        scoped_batch,
+                        approach,
                         utc_now(),
                     ),
                 )
@@ -242,7 +252,8 @@ class PrepStore:
         self.db.execute(
             "INSERT INTO llm_calls(problem_id, stage, attempt, ok, error_kind, "
             "prompt_tokens, completion_tokens, reasoning_tokens, cache_hit_tokens, "
-            "total_tokens, elapsed_ms, tag, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "total_tokens, elapsed_ms, tag, prompt_hash, created_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 info.get("problem_id"),
                 str(info.get("stage") or ""),
@@ -256,6 +267,7 @@ class PrepStore:
                 int(info.get("total_tokens") or 0),
                 float(info.get("elapsed_ms") or 0.0),
                 str(info.get("tag") or ""),
+                str(info.get("prompt_hash") or ""),
                 utc_now(),
             ),
         )
