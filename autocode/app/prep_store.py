@@ -23,6 +23,7 @@ PROBLEM_UPDATABLE = {
     "lang_available",
     "tags_json",
     "analysis_json",
+    "data_plan_json",
     "algorithm_tags",
     "updated_at",
 }
@@ -208,6 +209,44 @@ class PrepStore:
                     )
                 counts[layer] = len(digests.get(layer, set()))
         return counts
+
+    def clear_generated_layers(self, problem_id: int) -> None:
+        """重跑前清掉「本阶段会重新生成」的四层，避免新计划没覆盖某层时留下旧数据。
+
+        `adversarial`（针对学生错解）与 `user`/`custom`（人工合并）不在清理范围，
+        它们不由 prepare 产出，清了就是误删。
+        """
+        with self.db.transaction() as conn:
+            conn.execute(
+                "DELETE FROM test_cases WHERE problem_id=? AND layer IN"
+                " ('sample','boundary','exhaustive','stress')",
+                (problem_id,),
+            )
+
+    def save_data_plan(self, problem_id: int, plan: Dict[str, Any]) -> None:
+        """落库数据计划与实际产出：UI 要能展示「计划几组/实际几条」，不能只活在日志里。"""
+        with self.db.transaction() as conn:
+            conn.execute(
+                "UPDATE problems SET data_plan_json=? WHERE id=?",
+                (json.dumps(plan, ensure_ascii=False), problem_id),
+            )
+
+    def has_line_notes(self, problem_id: int, lang: str, role: str) -> bool:
+        """重跑时避免为同一份解重复花钱（写过的逐行解析直接复用）。"""
+        row = self.db.query_one(
+            "SELECT line_notes_json FROM reference_solutions"
+            " WHERE problem_id=? AND lang=? AND role=?",
+            (problem_id, lang, role),
+        )
+        return bool(row and row["line_notes_json"])
+
+    def save_line_notes(self, problem_id: int, lang: str, role: str, text: str) -> None:
+        with self.db.transaction() as conn:
+            conn.execute(
+                "UPDATE reference_solutions SET line_notes_json=? "
+                "WHERE problem_id=? AND lang=? AND role=?",
+                (json.dumps(text, ensure_ascii=False), problem_id, lang, role),
+            )
 
     def save_hints(self, problem_id: int, rows: List[Dict[str, Any]], batch_id: str) -> None:
         """写入一批提示：旧批次先置 inactive，保证每道题只展示最新一套。

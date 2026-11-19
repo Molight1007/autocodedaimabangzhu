@@ -237,6 +237,7 @@ def problem_detail(pid: int) -> Dict[str, Any]:
         },
         "samples": samples,
         "layers": [{"layer": r["layer"], "count": r["n"]} for r in layers],
+        "data_plan": _jsonable(problem["data_plan_json"]) if "data_plan_json" in problem.keys() else {},
         "previews": previews,
         "solutions": [
             {

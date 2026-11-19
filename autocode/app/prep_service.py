@@ -25,12 +25,11 @@ from __future__ import annotations
 import json
 import time
 import traceback
-import uuid
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from ..engine.datagen import grammar as grammar_engine
 from ..engine.datagen import input_parser
-from ..engine.runner import VERDICT_AC, compiler_report, run_case
+from ..engine.runner import VERDICT_AC, run_case
 from ..engine.verify import cross_check as cross_check_engine
 from ..prompts import loader as prompts
 from ..store.db import Database, get_db
@@ -39,10 +38,7 @@ from .prep_models import (
     DEFAULT_MAX_CALLS,
     DEFAULT_TOKEN_CAP,
     GENERATOR_TIMEOUT_MS,
-    MAX_BRUTE_ATTEMPTS,
     MAX_GENERATOR_ATTEMPTS,
-    MAX_HINTS_ATTEMPTS,
-    MAX_REF_ATTEMPTS,
     MAX_SPEC_ATTEMPTS,
     ORACLE_TIMEOUT_MS,
     SAMPLE_TIMEOUT_MS,
@@ -51,7 +47,6 @@ from .prep_models import (
     STAGE_HINTS,
     STAGE_REFERENCES,
     STAGE_SPEC,
-    STATUS_FAILED,
     STATUS_PREPARED,
     STATUS_PREPARING,
     Budget,
@@ -187,15 +182,36 @@ class PrepService(LlmStageMixin):
                 self._note(f"生成代码命中题面注入标识符（injection_followed）：{sorted(hits)}")
             report.injection_followed = bool(hits)
             report.injection_hits_in_code = sorted(hits or [])
+            # 参考解可信度审计：排在 datasets / hints / line_notes / explain 之前，
+            # 被剔除的解不参与期望输出计算，也不会再写进提示和题解。
+            # 纯 AST 判据，不跑代码、不调 LLM、无计时噪声。
+            if self.enable_llm_extras:
+                try:
+                    from . import ref_audit
+
+                    dropped = ref_audit.audit_claims(self, refs)
+                    if dropped:
+                        # save_references 会删掉不在 keep 里的 (lang, role)，同步清库
+                        self.store.save_references(int(problem_id), refs)
+                        report.refs = list(refs.values())
+                except Exception as exc:  # noqa: BLE001 - 审计失败不阻断整题
+                    self._note(f"参考解复杂度声明审计跳过：{str(exc)[:160]}")
             report.layers = self._run_stage(
-                report, STAGE_DATASETS, self._stage_datasets, int(problem_id), spec,
+                report, STAGE_DATASETS, self._stage_datasets, problem, int(problem_id), spec,
                 generator_code, refs,
             )
             report.hints = self._run_stage(
                 report, STAGE_HINTS, self._stage_hints, problem, spec, refs
             )
+            if self.enable_llm_extras:
+                try:
+                    from . import line_notes
+
+                    line_notes.generate(self, problem, spec, refs)
+                except StageFailure as exc:
+                    self._note(f"逐行代码解析跳过：{exc.message[:100]}")
             try:
-                analysis = explain(self, problem, spec) if self.enable_llm_extras else None
+                analysis = explain(self, problem, spec, refs) if self.enable_llm_extras else None
                 if analysis:
                     similar_local(self, int(problem_id), analysis.get("tags") or [])
             except StageFailure as exc:
@@ -559,49 +575,99 @@ class PrepService(LlmStageMixin):
     # ── ④⑤ 分层数据 + 期望输出 ───────────────────────────────────────────────
     def _stage_datasets(
         self,
+        problem: Dict[str, Any],
         problem_id: int,
         spec: Dict[str, Any],
         generator_code: str,
         refs: Dict[str, RefArtifact],
     ) -> Tuple[Dict[str, int], str]:
-        layers: Dict[str, List[Dict[str, Any]]] = {}
-        layers["sample"] = [
-            {
-                "id": f"sample{i}",
-                "input": sample.get("input", ""),
-                "expected": sample.get("output", ""),
-                "seed": None,
-                "size_class": "sample",
-            }
-            for i, sample in enumerate(spec.get("samples") or [], start=1)
-            if str(sample.get("input") or "").strip()
-        ]
-        layers["boundary"], rejected_edge = self._generate_cases(
-            spec, generator_code, profile="edge", count=self.boundary_cases, seed_base=500
+        """按「数据计划」生成：模型定分组/档位/条数，本地照单造并逐条过格式门。"""
+        from . import data_plan
+
+        layers: Dict[str, List[Dict[str, Any]]] = {
+            "sample": [
+                {
+                    "id": f"sample{i}",
+                    "input": sample.get("input", ""),
+                    "expected": sample.get("output", ""),
+                    "seed": None,
+                    "size_class": "sample",
+                }
+                for i, sample in enumerate(spec.get("samples") or [], start=1)
+                if str(sample.get("input") or "").strip()
+            ],
+            "boundary": [],
+            "exhaustive": [],
+            "stress": [],
+        }
+        fallback = data_plan.default_plan(
+            self.boundary_cases, self.exhaustive_cases, self.stress_cases
         )
-        layers["exhaustive"], rejected_tiny = self._generate_cases(
-            spec, generator_code, profile="tiny", count=self.exhaustive_cases, seed_base=2000
-        )
-        layers["stress"], rejected_max = self._generate_cases(
-            spec, generator_code, profile="max", count=self.stress_cases, seed_base=9000
-        )
+        payload = data_plan.request_plan(self, problem, spec) if self.enable_llm_extras else None
+        plan = data_plan.normalize_plan(payload, fallback)
+
+        raw_hand = list(plan.get("hand_cases") or [])
+        hand = [item for item in raw_hand if data_plan.hand_case_ok(spec, item["input"])]
+        if hand:
+            layers["boundary"].extend(
+                {
+                    "id": f"hand{i}",
+                    "input": item["input"],
+                    "seed": None,
+                    "size_class": "llm_edge",
+                }
+                for i, item in enumerate(hand, start=1)
+            )
+        if len(hand) < len(raw_hand):
+            self._note(f"模型手写用例 {len(raw_hand) - len(hand)} 条未通过格式门，已丢弃")
+
+        seen: set[str] = set()
+        picked_detail: List[str] = []
+        for index, group in enumerate(plan["groups"]):
+            cases, rejected = self._generate_cases(
+                spec,
+                generator_code,
+                profile=group["profile"],
+                count=data_plan.attempt_budget(group["profile"], group["count"]),
+                seed_base=data_plan.group_seed(index),
+            )
+            picked = data_plan.diverse_select(cases, group["count"], seen)
+            layers[group["layer"]].extend(picked)
+            picked_detail.append(f"{group['name']}({group['profile']})={len(picked)}/{group['count']}")
+            if rejected:
+                self._note(f"数据组「{group['name']}」被格式门拒绝 {rejected} 条")
+
+        generated = sum(len(layers[layer]) for layer in data_plan.LAYERS)
+        if plan.get("source") == "llm" and generated < data_plan.MIN_TOTAL:
+            want = data_plan.MIN_TOTAL - generated
+            extra, _rejected = self._generate_cases(
+                spec, generator_code, profile="tiny", count=want + 2, seed_base=8000
+            )
+            layers["exhaustive"].extend(data_plan.diverse_select(extra, want, seen))
+            self._note(f"有效数据不足 {data_plan.MIN_TOTAL} 条，已补生成 {want} 条")
+
         self._note(
             "adversarial 层需学生错解，由独立入口 generate_adversarial 按需生成，"
             "prepare 不产出"
         )
-        if rejected_edge or rejected_tiny or rejected_max:
-            self._note(
-                f"生成被 grammar/constraints 拒绝：edge={rejected_edge} "
-                f"tiny={rejected_tiny} max={rejected_max}"
-            )
-
         rows: List[Dict[str, Any]] = []
         for layer, cases in layers.items():
             if not cases:
-                self._note(f"{layer} 层没有合法数据（生成全被拒），跳过")
+                if layer != "sample":
+                    self._note(f"{layer} 层没有合法数据（生成全被拒），跳过")
                 continue
             rows.extend(self._build_layer_rows(spec, refs, layer=layer, cases=cases))
+        self.store.clear_generated_layers(problem_id)
         counts = self.store.save_cases(problem_id, rows)
+        self.store.save_data_plan(problem_id, data_plan.summary(plan, counts))
+
+        actual = sum(count for layer, count in counts.items() if layer != "sample")
+        self._note(
+            f"数据计划（{plan.get('source')}）：计划 {plan.get('total')} 条 / 实际 {actual} 条 | "
+            + " ".join(picked_detail)
+        )
+        if plan.get("must_cover"):
+            self._note("建议覆盖：" + "；".join(plan["must_cover"]))
         return counts, " ".join(f"{layer}={count}" for layer, count in sorted(counts.items()))
 
     def _build_layer_rows(
@@ -666,17 +732,6 @@ class PrepService(LlmStageMixin):
         return agree(values, checker, eps)
 
     # ── ⑥ 提示 ──────────────────────────────────────────────────────────────
-    def _stage_hints(
-        self,
-        problem: Dict[str, Any],
-        spec: Dict[str, Any],
-        refs: Dict[str, RefArtifact],
-    ) -> Tuple[List[Dict[str, Any]], str]:
-        base_user = (
-            user_blocks(statement_excerpt(problem), spec.get("samples") or [])
-            + "\n\n## 已确认的 spec\n"
-            + spec_block(spec)
-        )
     def _stage_hints(
         self,
         problem: Dict[str, Any],

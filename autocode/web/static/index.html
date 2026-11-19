@@ -155,6 +155,28 @@
   .hint-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
   .hint-flag{padding:2px 8px;font-size:11px;gap:4px}
   .hint-lock .hint-flag{margin-left:8px;vertical-align:middle}
+  /* 解法选择器 + 解析正文（学生要能按方法切换，不能所有解法堆成一坨） */
+  .mchips{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 16px}
+  .mchip{padding:7px 13px;border-radius:999px;border:1px solid var(--border);background:var(--surface);
+    color:var(--muted);font-size:13px;display:inline-flex;align-items:center;gap:7px}
+  .mchip:hover{border-color:var(--border-strong);color:var(--text)}
+  .mchip.active{background:var(--accent-soft);border-color:#c7d2fe;color:var(--accent);font-weight:600}
+  .mchip .cx{font-size:12px;color:var(--faint);font-weight:400}
+  .mchip.active .cx{color:var(--accent);opacity:.8}
+  .prose{font-size:15px;line-height:1.9;color:var(--text);overflow-wrap:anywhere}
+  .prose p{margin:0 0 10px} .prose p:last-child{margin-bottom:0}
+  .prose ul,.prose ol{margin:0 0 10px;padding-left:22px}
+  .prose li{margin:4px 0}
+  .prose .p-sub{font-weight:700;font-size:13px;color:var(--muted);margin:14px 0 6px;letter-spacing:.02em}
+  .prose .p-sub:first-child{margin-top:0}
+  .prose code{background:#f3f4f6;border-radius:5px;padding:1px 5px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.92em}
+  .plan-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px}
+  .plan-card{border:1px solid var(--border);background:var(--surface-2);border-radius:10px;padding:11px 13px}
+  .plan-card b{font-size:13px}
+  .plan-card .hintline{margin-top:5px}
+  .hint-progress{display:flex;align-items:center;gap:10px;margin:0 0 12px;color:var(--muted);font-size:12.5px}
+  .hint-progress .bar{flex:1;height:6px;border-radius:999px;background:var(--border);overflow:hidden;max-width:220px}
+  .hint-progress .bar i{display:block;height:100%;background:var(--accent);border-radius:999px;transition:width .2s}
   .issue .msg ul{margin:6px 0 0;padding-left:18px} .issue .msg li{margin:3px 0;word-break:break-word}
   .layer{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px}
   .p-toolbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px}
@@ -393,6 +415,7 @@ const esc = s => String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>
 const fmt = n => Number(n||0).toLocaleString('zh-CN');
 const ROUTE = new URLSearchParams(location.search);
 const STATE = { problems:[], filter:'all', tier:'', tag:'', q:'', problem:null, tab:'statement', lang:'', revealed:0, studentCode:{}, runResult:null, diagnosis:null, adversarial:null, customInput:'', scope:'samples', model:'deepseek-v4-pro', answerUnlocked:false, hintApproach:'', hintPid:null, hintCode:false,
+  answerMethod:'', analysisMethod:'', codeMethod:'', hintUnlocked:{},
   job:null, jobDone:{}, qualityCache:{}, exportsCache:{}, merge:{name:'',cases:[],error:'',result:null,busy:false,force:false},
   batch:false, batchResult:null, singlePlaceholder:'' };
 const SOURCE_LABEL = {settings:'界面设置', env:'环境变量', file:'项目 key 文件', missing:'未配置'};
@@ -656,6 +679,41 @@ function methodGroups(p){
     (groups[key]=groups[key]||{name:key, complexity:s.complexity||'', solutions:[]}).solutions.push(s);
   }
   return Object.values(groups);
+}
+/* 解法选择器：同一份数据在「答案/解析/代码解析」三页都要能按方法切换 */
+function methodChips(groups,current,target){
+  if(!groups.length) return '';
+  return `<div class="mchips">${groups.map(g=>`<button class="mchip ${g.name===current?'active':''}"
+    data-method="${esc(g.name)}" data-target="${target}">
+    <span>${esc(g.name||'未标注方法')}</span>${g.complexity?`<span class="cx">${esc(g.complexity)}</span>`:''}</button>`).join('')}</div>
+    <div class="hintline" style="margin:-6px 0 12px">方法名与复杂度为模型自述；本地只验证代码能否通过全部测试数据，并剔除「只是换壳」或「声称更优却没变快」的解法。</div>`;
+}
+function pickMethod(groups,name){
+  return groups.find(g=>g.name===name)||groups[0]||null;
+}
+/* 轻量排版：段落 / 无序 / 有序 / 小标题 / 加粗 / 行内代码；入参未转义，内部先 esc */
+function renderProse(raw){
+  const text=esc(String(raw||'')).replace(/\r\n?/g,'\n').trim();
+  if(!text) return '';
+  return text.split(/\n{2,}/).map(block=>{
+    const lines=block.split('\n').map(x=>x.trim()).filter(Boolean);
+    if(!lines.length) return '';
+    if(lines.every(l=>/^[-*·]\s+/.test(l)))
+      return `<ul>${lines.map(l=>`<li>${inlineMd(l.replace(/^[-*·]\s+/,''))}</li>`).join('')}</ul>`;
+    if(lines.every(l=>/^\d+[.、)]\s*/.test(l)))
+      return `<ol>${lines.map(l=>`<li>${inlineMd(l.replace(/^\d+[.、)]\s*/,''))}</li>`).join('')}</ol>`;
+    if(lines.length===1 && /^\*\*[^*]+\*\*[：:]?$/.test(lines[0]))
+      return `<div class="p-sub">${inlineMd(lines[0])}</div>`;
+    return `<p>${lines.map(inlineMd).join('<br>')}</p>`;
+  }).join('');
+}
+/* 提示解锁进度按题存在本机：刷新不丢，但不会同步到别的机器 */
+function hintKey(pid){ return `ac:hint-lock:${pid}`; }
+function loadHintUnlock(pid){
+  try{ return JSON.parse(localStorage.getItem(hintKey(pid))||'{}')||{}; }catch(e){ return {}; }
+}
+function saveHintUnlock(pid,map){
+  try{ localStorage.setItem(hintKey(pid),JSON.stringify(map||{})); }catch(e){}
 }
 
 const VERDICT_LABEL={ac:'通过',wa:'答案错',tle:'超时',mle:'内存超限',re:'运行错误',ce:'编译错误'};
@@ -985,26 +1043,56 @@ function detailBody(p,groups,langs){
       <div class="sec"><h4>约束</h4><div class="card mono">${(p.spec.constraints||[]).map(esc).join('<br>')||'—'}</div></div>`;
   }
   if(STATE.tab==='answer'){
-    const langTabs=['cpp','c','python'].map(l=>`<button class="langtab ${STATE.lang===l?'active':''}" data-lang="${l}" ${langs.includes(l)?'':'disabled'}>${LANG_LABEL[l]}</button>`).join('');
-    const cards=groups.map(g=>{
-      const sol=g.solutions.find(s=>s.lang===STATE.lang);
-      if(!sol) return '';
-      return `<div class="method"><div class="method-head"><span class="method-name">${esc(g.name)}</span>
+    if(!groups.length) return '<div class="empty">还没有参考答案</div>';
+    if(!groups.some(g=>g.name===STATE.answerMethod)) STATE.answerMethod=groups[0].name;
+    const g=pickMethod(groups,STATE.answerMethod);
+    const curLang=g.solutions.some(s=>s.lang===STATE.lang)?STATE.lang:g.solutions[0].lang;
+    const langTabs=['cpp','c','python'].map(l=>`<button class="langtab ${curLang===l?'active':''}" data-lang="${l}" ${g.solutions.some(s=>s.lang===l)?'':'disabled'}>${LANG_LABEL[l]}</button>`).join('');
+    const sol=g.solutions.find(s=>s.lang===curLang)||g.solutions[0];
+    const single=groups.length===1
+      ? '<div class="hintline" style="margin:-6px 0 12px">本题目前只有一种通过验证的解法。若模型给出的第二种与主解结构相同（只改变量名），会被自动剔除——不拿换壳的代码冒充第二种解法。</div>'
+      : '';
+    return `<div class="sec"><h4>答案（选择一种解法）</h4>
+      ${methodChips(groups,g.name,'answer')}${single}
+      <div class="langtabs">${langTabs}</div>
+      <div class="method"><div class="method-head"><span class="method-name">${esc(g.name)}</span>
         <span class="pill">${esc(g.complexity||'复杂度未声明')}</span>
         <span class="pill ${sol.verified?'green':'red'}">${sol.verified?'已验证':'未通过'}</span>
         <span class="pill">${esc(LANG_LABEL[sol.lang]||sol.lang)}</span>
         <button class="copy i-btn" style="margin-left:auto" data-copy="${esc(sol.code)}"><svg class="i i-sm"><use href="#i-copy"/></svg>复制代码</button></div>
-        <div class="method-body"><pre class="code">${esc(sol.code)}</pre></div></div>`;
-    }).filter(Boolean);
-    return `<div class="sec"><h4>答案（按方法与语言独立）</h4><div class="langtabs">${langTabs}</div>${cards.length?cards.join(''):'<div class="empty">该语言暂无答案</div>'}</div>`;
+        <div class="method-body"><pre class="code">${esc(sol.code)}</pre></div></div>
+      <div class="hintline" style="margin-top:10px">同一份数据、同一份测试集，换解法不影响判题；只有复杂度与写法不同。</div></div>`;
   }
   if(STATE.tab==='analysis'){
     const a=p.analysis||{};
+    if(!groups.length){
+      return `${qualityFlagsHtml(a)}
+        <div class="sec"><h4>题目在问什么</h4><div class="card prose">${renderProse(a.plain_question||'—')}</div></div>
+        <div class="sec"><h4>难在哪</h4><div class="card prose">${renderProse(a.difficulty||'—')}</div></div>`;
+    }
+    if(!groups.some(g=>g.name===STATE.analysisMethod)) STATE.analysisMethod=groups[0].name;
+    const g=pickMethod(groups,STATE.analysisMethod);
+    const hit=(a.approaches||[]).find(x=>x&&x.name===g.name);
+    let body='';
+    if(hit){
+      body=`<div class="prose">
+        ${hit.idea?`<div class="p-sub">核心思路</div>${renderProse(hit.idea)}`:''}
+        ${hit.correctness?`<div class="p-sub">为什么这样是对的</div>${renderProse(hit.correctness)}`:''}
+        ${(hit.pitfalls||[]).length?`<div class="p-sub">这种写法的坑</div><ul>${hit.pitfalls.map(x=>`<li>${esc(x)}</li>`).join('')}</ul>`:''}
+      </div>`;
+    }else if(g.name===groups[0].name && (a.thinking_path||[]).length){
+      body=`<div class="prose"><div class="p-sub">从读题到解法</div><ol>${a.thinking_path.map(s=>`<li>${esc(s)}</li>`).join('')}</ol></div>`;
+    }else{
+      body='<div class="hintline">该方法暂未生成独立解析（可在命令行跑 enrich 补齐）。</div>';
+    }
     return `${qualityFlagsHtml(a)}
-      <div class="sec"><h4>题目在问什么</h4><div class="card">${esc(a.plain_question||'—')}</div></div>
-      <div class="sec"><h4>难在哪</h4><div class="card">${esc(a.difficulty||'—')}</div></div>
-      ${groups.map((g,gi)=>`<div class="method"><div class="method-head"><span class="method-name">方法：${esc(g.name)}</span><span class="pill">${esc(g.complexity||'—')}</span></div>
-        <div class="method-body">${analysisFor(p,g,gi)}</div></div>`).join('')}`;
+      <div class="sec"><h4>题目在问什么</h4><div class="card prose">${renderProse(a.plain_question||'—')}</div></div>
+      <div class="sec"><h4>难在哪</h4><div class="card prose">${renderProse(a.difficulty||'—')}</div></div>
+      <div class="sec"><h4>按解法看（选择一种）</h4>
+        ${methodChips(groups,g.name,'analysis')}
+        <div class="method"><div class="method-head"><span class="method-name">${esc(g.name)}</span>
+          <span class="pill">${esc(hit&&hit.complexity?hit.complexity:(g.complexity||'复杂度未声明'))}</span></div>
+          <div class="method-body">${body}</div></div></div>`;
   }
   if(STATE.tab==='hints'){
     const all=p.hints||[];
@@ -1024,7 +1112,9 @@ function detailBody(p,groups,langs){
       const rank=n=>/暴力/.test(n)?9:(n?1:0);
       return rank(a)-rank(b)||a.localeCompare(b,'zh');
     });
-    if(STATE.hintPid!==p.id){STATE.hintPid=p.id;STATE.hintApproach='';STATE.hintCode=false;}
+    if(STATE.hintPid!==p.id){
+      STATE.hintPid=p.id; STATE.hintApproach=''; STATE.hintUnlocked=loadHintUnlock(p.id);
+    }
     const current=groups[STATE.hintApproach]?STATE.hintApproach:(names.find(n=>!/暴力/.test(n))||names[0]||'');
     STATE.hintApproach=current;
     const fallback=((p.analysis&&p.analysis.approaches)||[]).map(x=>x&&x.name).filter(Boolean);
@@ -1036,45 +1126,87 @@ function detailBody(p,groups,langs){
     ((p.analysis&&p.analysis.approaches)||[]).forEach(x=>{
       if(!x||!x.name) return;
       const cx=String(x.complexity||'');
-      /* “未声明（按…分析）”是旧数据的占位，不该占分支行 */
       if(cx && !/^未声明/.test(cx)) complexity[x.name]=cx;
     });
-    const rootText=rootHint?rootHint.content:legacyRoot;
-    const rootBadge=rootHint?flagBadge(rootHint):'';
-    const rootCard=rootText?`<div class="hroot"><div class="hcard">
-        <div class="hint-head"><span class="hint-level">通用提示</span>${rootBadge}</div>
-        <p>${esc(rootText)}</p></div></div>`:'';
     const branches=names.map(n=>{
       const levels=groups[n].slice().sort((a,b)=>a.level-b.level);
       const open=n===current;
-      const kids=levels.map(h=>{
-        const label=LEVEL[h.level]||`L${h.level}`;
-        const badge=flagBadge(h);
-        if(h.level===4 && !STATE.hintCode)
-          return `<div class="hint-lock" data-code="1"><span class="hint-level">${label}</span><span>点击查看参考代码</span></div>`;
-        const body=h.level===4?`<pre class="hint-code">${esc(h.content)}</pre>`:`<p>${esc(h.content)}</p>`;
-        return `<div class="hint-open"><div class="hint-head"><span class="hint-level">${label}</span>${badge}</div>${body}</div>`;
+      const byLevel={};
+      levels.forEach(h=>{byLevel[h.level]=h;});
+      /* 四级：L1 方向（通用或旧版自带的 L1）→ L2 算法 → L3 步骤 → L4 代码 */
+      const text={1:(byLevel[1]&&byLevel[1].content)||rootHint&&rootHint.content||legacyRoot||'',
+                  2:(byLevel[2]||{}).content||'',3:(byLevel[3]||{}).content||'',4:(byLevel[4]||{}).content||''};
+      const badge={1:(byLevel[1]&&flagBadge(byLevel[1]))||(rootHint?flagBadge(rootHint):''),
+                   2:byLevel[2]?flagBadge(byLevel[2]):'',3:byLevel[3]?flagBadge(byLevel[3]):'',4:byLevel[4]?flagBadge(byLevel[4]):''};
+      const avail=[1,2,3,4].filter(lv=>String(text[lv]||'').trim());
+      const unlocked=Number((STATE.hintUnlocked||{})[n]||0);
+      const shown=avail.filter(lv=>lv<=unlocked).length;
+      const next=avail.find(lv=>lv>unlocked);
+      const kids=avail.map(lv=>{
+        const label=lv===1?'L1 · 方向':(LEVEL[lv]||`L${lv}`);
+        if(lv<=unlocked){
+          const body=lv===4?`<pre class="hint-code">${esc(text[lv])}</pre>`:`<p>${esc(text[lv])}</p>`;
+          return `<div class="hint-open"><div class="hint-head"><span class="hint-level">${label}</span>${badge[lv]||''}</div>${body}</div>`;
+        }
+        if(lv===next)
+          return `<button class="hint-lock" data-unlock="${lv}"><span class="hint-level">${label}</span>
+            <span>点击解锁${lv===4?'（参考代码会直接给出答案，尽量先自己写）':''}</span></button>`;
+        return `<div class="hint-lock" style="opacity:.5;cursor:default"><span class="hint-level">${label}</span><span>先解锁上一级</span></div>`;
       }).join('');
+      const progress=avail.length
+        ? `<div class="hint-progress"><span>已解锁 ${shown}/${avail.length}</span>
+            <span class="bar"><i style="width:${Math.round(shown*100/Math.max(1,avail.length))}%"></i></span>
+            ${shown?`<button class="hintline" data-relock="${esc(n)}" style="text-decoration:underline">重新锁上</button>`:''}</div>`
+        : '';
       return `<div class="hbranch-block">
         <button class="hbranch ${open?'active':''}" data-hint="${esc(n)}">
           <span class="hdot small"></span><span>${esc(approachName(n))}</span>
           ${complexity[n]?`<span class="hintline" style="font-weight:400">${esc(complexity[n])}</span>`:''}
           <span class="hbranch-caret">${open?'收起':'展开'}</span>
         </button>
-        ${open?`<div class="hchildren">${kids||'<div class="hintline">该解法还没有提示</div>'}</div>`:''}
+        ${open?`<div class="hchildren">${progress}${kids||'<div class="hintline">该解法还没有提示</div>'}</div>`:''}
       </div>`;
     }).join('');
-    return `<div class="sec"><h4>提示</h4><div class="htree">${rootCard}<div class="hbranches">${branches}</div></div></div>`;
+    return `<div class="sec"><h4>提示（逐级解锁）</h4>
+      <div class="hintline" style="margin:-4px 0 12px">先自己想，再点开下一级。L1 只指方向，L4 会给出参考代码。</div>
+      <div class="htree"><div class="hbranches">${branches}</div></div></div>`;
   }
   if(STATE.tab==='code'){
-    const langTabs=['cpp','c','python'].map(l=>`<button class="langtab ${STATE.lang===l?'active':''}" data-lang="${l}" ${langs.includes(l)?'':'disabled'}>${LANG_LABEL[l]}</button>`).join('');
-    return `<div class="sec"><h4>代码解析（按方法独立）</h4><div class="langtabs">${langTabs}</div>
-      ${groups.map(g=>{const sol=g.solutions.find(s=>s.lang===STATE.lang); return sol?`<div class="method"><div class="method-head"><span class="method-name">${esc(g.name)}</span></div>
-        <div class="method-body">${sol.line_notes?`<div class="mono">${esc(sol.line_notes)}</div>`:'<div class="hintline" style="padding:2px 0">该题未生成逐行代码解析</div>'}</div></div>`:'';}).join('')}</div>`;
+    if(!groups.length) return '<div class="empty">还没有代码解析</div>';
+    if(!groups.some(g=>g.name===STATE.codeMethod)) STATE.codeMethod=groups[0].name;
+    const g=pickMethod(groups,STATE.codeMethod);
+    const sol=g.solutions.find(s=>s.line_notes)||g.solutions.find(s=>s.lang==='python')||g.solutions[0];
+    return `<div class="sec"><h4>代码解析（选择一种解法）</h4>
+      ${methodChips(groups,g.name,'code')}
+      <div class="method"><div class="method-head"><span class="method-name">${esc(g.name)}</span>
+        <span class="pill">${esc(LANG_LABEL[sol.lang]||sol.lang)}</span>
+        ${sol.verified?'<span class="pill green">已验证</span>':'<span class="pill red">未通过</span>'}</div>
+        <div class="method-body prose">${sol.line_notes?renderProse(sol.line_notes):'<span class="hintline">该解法还没生成逐行解析（命令行跑 enrich 可补齐）</span>'}</div></div>
+      <div class="hintline" style="margin-top:10px">讲解的是「这段代码为什么这么写」，不逐行翻译语法。</div></div>`;
   }
   return dataView(p);
 }
 /* ───────────── 数据页 ───────────── */
+function planView(p){
+  const plan=p.data_plan||{};
+  const groups=plan.groups||[];
+  if(!groups.length) return `<div class="sec"><h4>数据计划</h4><div class="panel"><div class="hintline">该题没有记录数据计划（旧版本生成的数据）。重新生成后会先分析题目，再按档位分组造数据。</div></div></div>`;
+  const PROFILE_CN={tiny:'极小规模',small:'小规模',mid:'中规模',max:'最大规模',edge:'边界'};
+  const cards=groups.map(g=>`<div class="plan-card">
+      <div class="row-inline"><b>${esc(g.name)}</b><span class="pill">${esc(PROFILE_CN[g.profile]||g.profile)}</span></div>
+      <div class="hintline">计划 ${Number(g.count)||0} 条 · ${esc(LAYER_CN[g.layer]||g.layer)}层</div>
+      ${(g.focus||[]).length?`<div class="hintline">${g.focus.map(esc).join(' · ')}</div>`:''}</div>`).join('');
+  const cover=(plan.must_cover||[]).length
+    ? `<div class="hintline" style="margin-top:10px">建议覆盖：${plan.must_cover.map(esc).join('；')}</div>` : '';
+  const src=plan.source==='llm'?'模型按题分析':'默认档位';
+  const actual=Number(plan.total_actual)||0;
+  return `<div class="sec"><h4>数据计划</h4><div class="panel">
+    <div class="row-inline" style="margin-bottom:10px"><span class="pill">${src}</span>
+      <span class="pill">计划 ${Number(plan.total_planned)||0} 条</span>
+      <span class="pill ${actual>=10?'green':'amber'}">实际 ${actual} 条</span>
+      <span class="hintline">${esc(plan.reason||'')}</span></div>
+    <div class="plan-grid">${cards}</div>${cover}</div></div>`;
+}
 function dataView(p){
   return `
     <div class="sec"><h4>数据评分</h4><div class="panel" style="margin-bottom:0">
@@ -1098,6 +1230,7 @@ function dataView(p){
     <div class="sec"><h4>导出历史</h4><div class="panel" style="margin-bottom:0">
       <div id="exports-list" class="hintline">加载中…</div>
     </div></div>
+    ${planView(p)}
     <div class="sec"><h4>分层</h4><div id="layers-box"></div></div>
     <div id="previews-box"></div>`;
 }
@@ -1274,20 +1407,27 @@ function qualityFlagsHtml(a){
   return `<div class="issue warn" role="status"><svg class="i i-sm"><use href="#i-alert"/></svg>
     <div class="msg"><b>质检提示</b><ul>${list.map(x=>`<li>${esc(String(x))}</li>`).join('')}</ul></div></div>`;
 }
-function analysisFor(p,g,index){
-  const a=p.analysis||{};
-  const approaches=a.approaches||[];
-  const hit=approaches.find(x=>x.name===g.name);
-  if(hit) return `<div class="mono">${esc(hit.idea||'')}（${esc(hit.complexity||'')}）</div>`;
-  if(index===0 && a.thinking_path) return `<div>${a.thinking_path.map((s,i)=>`<div style="margin-bottom:6px"><b style="color:var(--accent)">${i+1}.</b> ${esc(s)}</div>`).join('')}</div>`;
-  return '<div class="hintline" style="padding:2px 0">该方法暂未生成独立解析</div>';
-}
 function bindDetail(p){
   $$('#detail-body [data-lang]').forEach(b=>b.addEventListener('click',()=>{STATE.lang=b.dataset.lang;renderDetail(p);}));
   $$('#detail-body [data-copy]').forEach(b=>b.addEventListener('click',async()=>{try{await navigator.clipboard.writeText(b.dataset.copy);toast('代码已复制');}catch(e){toast('复制失败');}}));
   $$('#detail-body [data-reveal]').forEach(b=>b.addEventListener('click',()=>{STATE.revealed=Number(b.dataset.reveal)+1;renderDetail(p);}));
   $$('#detail-body [data-hint]').forEach(b=>b.addEventListener('click',()=>{STATE.hintApproach=b.dataset.hint;STATE.hintCode=false;renderDetail(p);}));
   $$('#detail-body [data-code]').forEach(b=>b.addEventListener('click',()=>{STATE.hintCode=true;renderDetail(p);}));
+  $$('#detail-body [data-method]').forEach(b=>b.addEventListener('click',()=>{
+    const key=b.dataset.target==='analysis'?'analysisMethod':(b.dataset.target==='code'?'codeMethod':'answerMethod');
+    STATE[key]=b.dataset.method; renderDetail(p);
+  }));
+  $$('#detail-body [data-unlock]').forEach(b=>b.addEventListener('click',()=>{
+    const lv=Number(b.dataset.unlock)||0;
+    STATE.hintUnlocked=Object.assign({},STATE.hintUnlocked,{[STATE.hintApproach]:lv});
+    saveHintUnlock(p.id,STATE.hintUnlocked);
+    renderDetail(p);
+  }));
+  $$('#detail-body [data-relock]').forEach(b=>b.addEventListener('click',()=>{
+    STATE.hintUnlocked=Object.assign({},STATE.hintUnlocked,{[b.dataset.relock]:0});
+    saveHintUnlock(p.id,STATE.hintUnlocked);
+    renderDetail(p);
+  }));
   const unlock=$('#unlock-answer');
   if(unlock) unlock.addEventListener('click',()=>{STATE.answerUnlocked=true;renderDetail(p);});
   if(STATE.tab==='data') bindDataTab(p);

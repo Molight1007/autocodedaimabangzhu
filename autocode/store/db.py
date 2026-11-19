@@ -107,6 +107,7 @@ class Database:
         ),
         "problems": (
             ("analysis_json", "TEXT"),
+            ("data_plan_json", "TEXT"),
             ("algorithm_tags", "TEXT"),
         ),
         # v2：数据来源标记（用户合并进来的数据 source='user'）

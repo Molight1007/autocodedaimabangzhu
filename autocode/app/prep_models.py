@@ -142,6 +142,7 @@ class RefArtifact:
     approach: str = ""
     complexity: str = ""
     is_primary: int = 0
+    line_notes: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -214,6 +215,7 @@ THINKING_POLICY: Dict[str, Tuple[str, int]] = {
     "reference": ("disabled", 0),
     "parser": ("disabled", 0),
     "plan": ("disabled", 0),
+    "data_plan": ("disabled", 0),
     "explanation": ("disabled", 0),
 }
 
@@ -235,6 +237,7 @@ TEMPERATURE_POLICY: Dict[str, float] = {
     "method_analysis": 0.2,
     "code_notes": 0.2,
     "plan": 0.3,
+    "data_plan": 0.2,
     "diagnose": 0.2,
 }
 
@@ -248,6 +251,7 @@ _STAGE_PREFIXES: tuple[str, ...] = (
     "method_analysis",
     "code_notes",
     "student_diagnose",
+    "data_plan",
     "diagnose",
     "explanation",
     "reference",

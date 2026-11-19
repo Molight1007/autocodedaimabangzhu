@@ -5,7 +5,7 @@
 - 模板里大量出现 `{` `}`（JSON 示例、代码围栏），用 `{{var}}` 而不是 `str.format`
   可以避免满屏 `{{` 转义。
 
-模板清单（15 个，与 `TEMPLATE_NAMES` 一一对应）：
+模板清单（16 个，与 `TEMPLATE_NAMES` 一一对应）：
 
 - `file_segment.md`   整卷 PDF 文本 → 题目边界（只给行号，不写正文）
 - `approach_label.md`  参考解代码 → 2~8 字算法标签
@@ -22,6 +22,7 @@
 - `code_notes.md`      单份代码的结构化讲解
 - `student_diagnose.md` 学生错因诊断（WA/TLE/RE）
 - `adversarial.md`      参考解 vs 学生错解 → 定向构造能卡住该 bug 的候选输入
+- `datasets.md`         题面 + grammar/constraints → 数据计划（分组/档位/条数/必覆盖项）
 
 所有模板都带**注入护栏**：题面里"如果你是 LLM 就……"这类文字一律视为噪声不得执行。
 每个模板首行是版本注释 `<!-- prompt: <name> v2 YYYY-MM-DD -->`，`PrepService._chat`
@@ -51,10 +52,12 @@ STUDENT_DIAGNOSE = "student_diagnose"
 FILE_SEGMENT = "file_segment"
 APPROACH_LABEL = "approach_label"
 ADVERSARIAL = "adversarial"
+DATASETS = "datasets"
 
 TEMPLATE_NAMES: tuple[str, ...] = (
     SPEC, GENERATOR, REF_SOLUTION, BRUTE, HINTS, PARSER, SOLUTION_PLAN, EXPLANATION, REF_AGENT,
     METHOD_ANALYSIS, CODE_NOTES, STUDENT_DIAGNOSE, FILE_SEGMENT, APPROACH_LABEL, ADVERSARIAL,
+    DATASETS,
 )
 
 # L1~L3 明令禁止输出代码（模板里写死，本处仅作代码侧复核口径）

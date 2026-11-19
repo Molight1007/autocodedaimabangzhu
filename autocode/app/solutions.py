@@ -11,18 +11,29 @@ LLM 只产出代码，是否采信由样例 + 对拍门决定；plan 只是“�
 
 from __future__ import annotations
 
+import ast
+import difflib
 import json
-from typing import Any, Dict, List, Optional
+import re
+from typing import Any, Dict, List, Optional, Tuple
 
 from ..engine.runner import compiler_report
 from ..prompts import loader as prompts
 from . import code_agent
 from .prep_models import MAX_BRUTE_ATTEMPTS, MAX_REF_ATTEMPTS, StageFailure
 from .prep_rules import statement_excerpt, user_blocks
-import json
 
 MAX_SOLUTIONS = 5
 MAX_ALTERNATIVES = 2
+#: 复数解法的追问提示：只在前一次少于 2 条时用一次，避免无脑多花调用
+SECOND_THOUGHT = (
+    "\n\n## 补充要求\n"
+    "上一次你只给了不到两种解法。请先问自己：\"如果数据范围放大 100 倍，这种做法会死吗？\""
+    "——如果会，那就有第二种。\n"
+    "请重新输出完整 JSON（不要只给新增的那条）：approaches 必须 2~4 条，"
+    "每条都是真正不同的思路，禁止把同一种算法换个名字。"
+    "如果确实只有一种可行解，仍只给 1 条，并在 single_reason 写清为什么。"
+)
 
 
 def _hint(approach: Optional[Dict[str, str]]) -> str:
@@ -34,27 +45,15 @@ def _hint(approach: Optional[Dict[str, str]]) -> str:
     )
 
 
-def plan(service: Any, problem: Dict[str, Any], spec: Dict[str, Any]) -> List[Dict[str, str]]:
-    """让 LLM 给出 1~4 条解法清单；失败返回空表（不阻断主流程）。"""
-    try:
-        result = service._chat(
-            prompts.SOLUTION_PLAN,
-            user_blocks(statement_excerpt(problem), spec.get("samples") or []),
-            tag="plan#1",
-            max_tokens=4096,
-        )
-    except Exception as exc:  # noqa: BLE001 - 规划失败不阻断主流程
-        if exc.__class__.__name__ == "BudgetExhausted":
-            raise
-        service._note(f"解法规划失败，退化为单解 + 暴力：{exc}")
-        return []
-    items = (result.json_obj or {}).get("approaches") or []
+def _parse_approaches(result: Any) -> Tuple[List[Dict[str, str]], str]:
+    """解析解法清单；`single_reason` 是"为什么只有一种"的如实说明。"""
+    obj = result.json_obj or {}
     approaches: List[Dict[str, str]] = []
-    for item in items[:4]:
+    for item in (obj.get("approaches") or [])[:4]:
         if not isinstance(item, dict):
             continue
         name = str(item.get("name") or "").strip()
-        if not name:
+        if not name or any(a["name"] == name for a in approaches):
             continue
         approaches.append(
             {
@@ -63,13 +62,95 @@ def plan(service: Any, problem: Dict[str, Any], spec: Dict[str, Any]) -> List[Di
                 "complexity": str(item.get("complexity") or "").strip(),
             }
         )
-    return approaches
+    return approaches, str(obj.get("single_reason") or "").strip()
+
+
+def plan(service: Any, problem: Dict[str, Any], spec: Dict[str, Any]) -> List[Dict[str, str]]:
+    """让 LLM 给 2~4 条解法清单；不足 2 条时追问一次，仍不足则如实记单解。"""
+    base = user_blocks(statement_excerpt(problem), spec.get("samples") or [])
+
+    def ask(tag: str, suffix: str = "") -> Any:
+        return service._chat(
+            prompts.SOLUTION_PLAN, base + suffix, tag=tag, max_tokens=4096
+        )
+
+    try:
+        approaches, reason = _parse_approaches(ask("plan#1"))
+    except Exception as exc:  # noqa: BLE001 - 规划失败不阻断主流程
+        if exc.__class__.__name__ == "BudgetExhausted":
+            raise
+        service._note(f"解法规划失败，退化为单解 + 暴力：{exc}")
+        return []
+
+    extra_enabled = bool(getattr(service, "enable_llm_extras", True))
+    budget_left = int(getattr(service, "call_cap", 40)) - int(
+        getattr(service, "_calls_this_run", 0)
+    )
+    if len(approaches) < 2 and extra_enabled and budget_left > 4:
+        try:
+            extra, extra_reason = _parse_approaches(ask("plan#2", SECOND_THOUGHT))
+            known = {item["name"] for item in approaches}
+            approaches.extend(item for item in extra if item["name"] not in known)
+            reason = reason or extra_reason
+        except Exception as exc:  # noqa: BLE001 - 追问失败沿用第一次结果
+            if exc.__class__.__name__ == "BudgetExhausted":
+                raise
+            service._note(f"补充解法清单失败，沿用第一次结果：{str(exc)[:100]}")
+
+    if len(approaches) < 2:
+        service._note(f"本题只产出一种解法（{reason or '模型未给出第二解'}）")
+    return approaches[:4]
 
 
 def _tag(artifact: Any, approach: Optional[Dict[str, str]]) -> None:
     if approach:
         artifact.approach = approach.get("name", "")
         artifact.complexity = approach.get("complexity", "")
+
+
+def _normalized_ast(code: str) -> str:
+    """把代码压成"只看控制流"的指纹：标识符、常量、函数名一律归一。
+
+    这样 `ans` 改叫 `res`、`ai` 改叫 `a[i]` 不会被当成新解法。
+    """
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return re.sub(r"\s+", "", code)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name):
+            node.id = "_"
+        elif isinstance(node, ast.arg):
+            node.arg = "_"
+        elif isinstance(node, ast.FunctionDef):
+            node.name = "_"
+        elif isinstance(node, ast.Constant):
+            node.value = 0
+    return ast.dump(tree)
+
+
+def same_structure(left: str, right: str) -> bool:
+    """两份代码是否只是"换壳"：AST 归一后完全相同，或字符相似度 ≥ 0.95。"""
+    a, b = _normalized_ast(left), _normalized_ast(right)
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    return difflib.SequenceMatcher(None, a, b).ratio() >= 0.95
+
+
+def is_reskin(code: str, refs: Dict[str, Any], lang: str) -> bool:
+    """新解是否与已有同语言解换壳。
+
+    注意：**不能按 verified 过滤**。build_all 跑在 _verify_from_cross 之前，
+    那时 refs 里所有产物 verified 都是 0；历史 bug 正是加了这个过滤，
+    导致主解的换壳版（#26「动态规划」）一路混进题库。
+    """
+    return any(
+        same_structure(code, other.code)
+        for other in refs.values()
+        if getattr(other, "lang", "") == lang
+    )
 
 
 def build_all(
@@ -129,14 +210,34 @@ def build_all(
         if service._calls_this_run >= max(1, service.call_cap - 2):
             service._note("备选解跳过：单题调用预算不足")
             break
-        try:
-            artifact = service._build_solution(
-                problem, spec, samples, lang="python", role=f"alt{index}",
-                template=prompts.REF_SOLUTION, cases=sample_cases, attempts=2,
-                approach_hint=_hint(approach),
+        approach_hint = _hint(approach)
+        artifact = None
+        for retry in (1, 2):
+            try:
+                artifact = service._build_solution(
+                    problem, spec, samples, lang="python", role=f"alt{index}",
+                    template=prompts.REF_SOLUTION, cases=sample_cases, attempts=2,
+                    approach_hint=approach_hint,
+                )
+            except StageFailure as exc:
+                service._note(f"备选解 {approach['name']} 未通过：{exc.message[:120]}")
+                artifact = None
+                break
+            # 结构查重：模型常把主解改个变量名就交上来（实测 #26「贪心」= 逐行暴力），
+            # 这种"第二种解法"对学生是误导。先要求换控制流重写一次，仍换壳就丢弃。
+            reskin = is_reskin(artifact.code, refs, artifact.lang)
+            if not reskin:
+                break
+            service._note(f"备选解「{approach['name']}」与已有解结构相同（第 {retry} 次）")
+            if retry == 2:
+                artifact = None
+                break
+            approach_hint += (
+                "\n\n## 硬性要求\n上一版与已有解的控制流完全相同，只改了变量名，已作废。"
+                "这次必须换一种控制流：例如先排序、先建索引、改变遍历顺序或换数据结构，"
+                "不要沿用逐层嵌套扫描。若确实做不到，明确在注释里说明，不要交换壳版本。"
             )
-        except StageFailure as exc:
-            service._note(f"备选解 {approach['name']} 未通过：{exc.message[:120]}")
+        if artifact is None:
             continue
         _tag(artifact, approach)
         refs[f"python/alt{index}"] = artifact
@@ -219,16 +320,88 @@ def _analysis_issues(analysis: Dict[str, Any], samples: List[Dict[str, str]]) ->
     return issues
 
 
-def explain(service: Any, problem: Dict[str, Any], spec: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """生成题解并落库；失败返回 None（不阻断整题）。"""
+def _methods_from_refs(refs: Optional[Dict[str, Any]]) -> List[Dict[str, str]]:
+    """解法清单：按"主解 → 备选 → 暴力"排序，同名只留一条。"""
+    if not refs:
+        return []
+    rank = {"reference": 0, "alt1": 1, "alt2": 2, "alt3": 3, "brute": 9}
+    ordered = sorted(
+        refs.values(),
+        key=lambda a: (rank.get(str(getattr(a, "role", "")), 5), str(getattr(a, "approach", ""))),
+    )
+    methods: List[Dict[str, str]] = []
+    for artifact in ordered:
+        name = str(getattr(artifact, "approach", "") or "").strip()
+        if not name or any(item["name"] == name for item in methods):
+            continue
+        methods.append(
+            {"name": name, "complexity": str(getattr(artifact, "complexity", "") or "未声明")}
+        )
+    return methods
+
+
+def _clean_approaches(items: Any, methods: List[Dict[str, str]]) -> List[Dict[str, Any]]:
+    """按方法清单清洗模型输出：名单外的丢弃、空内容的丢弃、顺序以清单为准。"""
+    names = [item["name"] for item in methods]
+    parsed: Dict[str, Dict[str, Any]] = {}
+    for item in items or []:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        if not name or (names and name not in names):
+            continue
+        idea = str(item.get("idea") or "").strip()
+        correctness = str(item.get("correctness") or "").strip()
+        if not idea and not correctness:
+            continue
+        pitfalls = [str(x).strip() for x in (item.get("pitfalls") or []) if str(x).strip()]
+        parsed[name] = {
+            "name": name,
+            "idea": idea,
+            "correctness": correctness,
+            "complexity": str(item.get("complexity") or "").strip(),
+            "pitfalls": pitfalls[:3],
+        }
+    if names:
+        return [parsed[name] for name in names if name in parsed]
+    return list(parsed.values())
+
+
+def explain(
+    service: Any,
+    problem: Dict[str, Any],
+    spec: Dict[str, Any],
+    refs: Optional[Dict[str, Any]] = None,
+) -> Optional[Dict[str, Any]]:
+    """生成题解并落库；失败返回 None（不阻断整题）。
+
+    `refs` 提供已认证的解法清单，题解就会**逐种写法各写一段**（UI 的方法切换靠它）；
+    不传时退回"只讲公共思路"的旧口径（测试与补解析入口仍可用）。
+    """
     samples = spec.get("samples") or []
+    methods = _methods_from_refs(refs)
+    user = user_blocks(statement_excerpt(problem), samples)
+    if methods:
+        user += (
+            "\n\n## 已验证的解法（每种各写一段，name 必须逐字一致）\n"
+            + json.dumps(methods, ensure_ascii=False)
+        )
     result = service._chat(
         prompts.EXPLANATION,
-        user_blocks(statement_excerpt(problem), samples),
+        user,
         tag="explanation#1",
-        max_tokens=4096,
+        max_tokens=6144,
     )
     analysis = result.json_obj or {}
+    approaches = _clean_approaches(analysis.get("approaches"), methods)
+    if approaches:
+        analysis["approaches"] = approaches
+    else:
+        analysis.pop("approaches", None)
+    missing = [item["name"] for item in methods if item["name"] not in
+               {a["name"] for a in approaches}]
+    if missing:
+        service._note(f"题解缺少这些方法的独立解析：{missing}")
     issues = _analysis_issues(analysis, samples)
     if issues:
         service._note("题解质检：" + "；".join(issues))
@@ -242,6 +415,9 @@ def explain(service: Any, problem: Dict[str, Any], spec: Dict[str, Any]) -> Opti
             previous = json.loads(row["analysis_json"])
         except json.JSONDecodeError:
             previous = {}
+    # 本次没写出按方法解析时，保留上一次的，别把已有内容清空（只加不减）
+    if not analysis.get("approaches") and previous.get("approaches"):
+        analysis["approaches"] = previous["approaches"]
     raw_flags = previous.get("quality_flags")
     merged = [str(x) for x in raw_flags] if isinstance(raw_flags, list) else []
     # 先清掉上一次题解质检写的同类标记（本次是干净题解时不能继续挂警示），
