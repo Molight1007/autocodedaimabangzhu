@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import json
 import unittest
 from typing import Any, Dict, List
 
@@ -352,6 +353,102 @@ class TestReskinGate(unittest.TestCase):
             )
         }
         self.assertFalse(is_reskin(TestNoveltyGate.RESKIN, refs, "python"))
+
+
+class TestLineNotes(unittest.TestCase):
+    """逐行代码解析：代码原文必须由本地拼、模型只给行号+讲解。"""
+
+    CODE = "n = int(input())\na = list(map(int, input().split()))\n\nans = 0\nprint(ans)"
+
+    def setUp(self) -> None:
+        from autocode.app import line_notes
+
+        self.ln = line_notes
+
+    def test_number_code_uses_real_line_numbers(self) -> None:
+        out = self.ln.number_code(self.CODE)
+        self.assertTrue(out.startswith("L1: n = int(input())"))
+        self.assertIn("L4: ", out)  # 空行也要占行号，不能压缩
+        self.assertIn("L5: print(ans)", out)
+
+    def test_code_column_comes_from_local_not_model(self) -> None:
+        model = {
+            "summary": "读入后直接输出",
+            "lines": [
+                {"n": 1, "code": "EVIL = 1", "explain": "读入 n"},
+                {"n": 2, "code": "EVIL = 2", "explain": "读入数组"},
+                {"n": 3, "code": "EVIL = 3", "explain": "空行"},
+                {"n": 4, "code": "EVIL = 4", "explain": "答案置零"},
+                {"n": 5, "code": "EVIL = 5", "explain": "输出结果"},
+            ],
+            "pitfalls": ["忘记读第二行"],
+        }
+        data = self.ln.format_line_notes(model, self.CODE)
+        self.assertIsNotNone(data)
+        assert data is not None
+        self.assertEqual(data["v"], self.ln.NOTES_VERSION)
+        self.assertEqual(data["lines"][0]["code"], "n = int(input())")
+        self.assertNotIn("EVIL", str(data))
+        self.assertEqual(data["lines"][0]["explain"], "读入 n")
+        # coverage 分母是「非空代码行」= 4（第 3 行是空行，不计入）
+        self.assertEqual(data["coverage"], "4/4")
+        self.assertEqual(len(data["lines"]), 5)  # 展示仍保留空行，行号不错位
+
+    def test_out_of_range_and_garbage_lines_are_dropped(self) -> None:
+        model = {
+            "lines": [
+                {"n": 1, "explain": "读入 n"},
+                {"n": 999, "explain": "越界"},
+                {"n": "x", "explain": "非数字"},
+                {"n": 2, "explain": "读入数组"},
+                {"n": 4, "explain": "答案置零"},
+                {"n": 5, "explain": "输出结果"},
+            ]
+        }
+        data = self.ln.format_line_notes(model, self.CODE)
+        self.assertIsNotNone(data)
+        assert data is not None
+        self.assertEqual(len(data["lines"]), 5)
+        self.assertEqual(data["lines"][2]["explain"], "")  # 空行未讲解，保留空
+
+    def test_low_coverage_is_rejected(self) -> None:
+        model = {"lines": [{"n": 1, "explain": "只讲第一行"}]}
+        self.assertIsNone(self.ln.format_line_notes(model, self.CODE))
+        self.assertIsNone(self.ln.format_line_notes({"summary": "x"}, self.CODE))
+        self.assertIsNone(self.ln.format_line_notes(model, ""))
+
+    def test_is_current_notes_distinguishes_v3_from_legacy_text(self) -> None:
+        good = {"v": 3, "lines": [{"n": 1, "code": "x", "explain": "y"}]}
+        self.assertTrue(self.ln.is_current_notes(good))
+        self.assertTrue(self.ln.is_current_notes(json.dumps(good)))
+        self.assertFalse(self.ln.is_current_notes("用二维数组保存所有仓库的编码…"))
+        self.assertFalse(self.ln.is_current_notes(json.dumps("旧纯文本讲解")))
+        self.assertFalse(self.ln.is_current_notes({"v": 2, "lines": []}))
+        self.assertFalse(self.ln.is_current_notes(None))
+
+
+class TestNotesTokenBudget(unittest.TestCase):
+    """逐行解析要覆盖 40~50 行，4096 会被必然截断、白烧一次重试；钉住下限。"""
+
+    def test_budget_large_enough_for_full_line_coverage(self) -> None:
+        from autocode.app import line_notes
+
+        # 一次成的最低档：实测 4096 必截断，client 会翻倍到 16384 重试
+        self.assertGreaterEqual(line_notes.NOTES_MAX_TOKENS, 8192)
+
+    def test_both_call_sites_use_the_constant(self) -> None:
+        """line_notes.generate 与 enrich_service 都必须用常量，避免一处回退。"""
+        from pathlib import Path
+
+        import inspect
+
+        from autocode.app import line_notes
+
+        root = Path(line_notes.__file__).resolve().parent
+        gen_src = inspect.getsource(line_notes.generate)
+        self.assertIn("NOTES_MAX_TOKENS", gen_src)
+        enrich_src = (root / "enrich_service.py").read_text(encoding="utf-8")
+        self.assertIn("line_notes.NOTES_MAX_TOKENS", enrich_src)
 
 
 if __name__ == "__main__":

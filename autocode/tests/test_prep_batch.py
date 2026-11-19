@@ -25,6 +25,7 @@ from autocode.app.prep_batch import (
     classify_failure,
     run_batch,
 )
+from autocode.app.prep_models import ARTIFACT_VERSION
 from autocode.llm.client import ChatResult, ChatUsage
 from autocode.store.db import Database
 
@@ -100,7 +101,10 @@ class TestSelectTargets(BatchCase):
         from autocode.app.prep_batch import select_targets
 
         self.db.execute("UPDATE problems SET status='preparing' WHERE id=2")
-        self.db.execute("UPDATE problems SET status='prepared' WHERE id=3")
+        self.db.execute(
+            "UPDATE problems SET status='prepared', artifact_version=? WHERE id=3",
+            (ARTIFACT_VERSION,),
+        )
         ids = [row["id"] for row in select_targets(self.db)]
         self.assertIn(1, ids)
         self.assertIn(2, ids)
@@ -109,9 +113,23 @@ class TestSelectTargets(BatchCase):
     def test_include_prepared_flag(self) -> None:
         from autocode.app.prep_batch import select_targets
 
-        self.db.execute("UPDATE problems SET status='prepared'")
+        self.db.execute(
+            "UPDATE problems SET status='prepared', artifact_version=?", (ARTIFACT_VERSION,)
+        )
         self.assertEqual(select_targets(self.db), [])
         self.assertEqual(len(select_targets(self.db, include_prepared=True)), 3)
+
+    def test_stale_prepared_is_selected_without_force(self) -> None:
+        """prepared 但版本低 = 旧版产物，必须自动被选中升级（不再依赖 --force）。"""
+        from autocode.app.prep_batch import select_targets
+
+        self.db.execute(
+            "UPDATE problems SET status='prepared', artifact_version=?", (ARTIFACT_VERSION,)
+        )
+        self.db.execute(
+            "UPDATE problems SET artifact_version=? WHERE id=1", (ARTIFACT_VERSION - 1,)
+        )
+        self.assertEqual([row["id"] for row in select_targets(self.db)], [1])
 
 
 class TestRunBatch(BatchCase):

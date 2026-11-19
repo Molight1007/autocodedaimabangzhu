@@ -31,6 +31,15 @@ STATUS_PREPARING = "preparing"
 STATUS_PREPARED = "prepared"
 STATUS_FAILED = "failed"
 
+#: 产物版本：产物结构或流程一变就 +1，与 `problems.artifact_version` 配对使用。
+#:
+#: 为什么要有它：`status='prepared'` 只说明"跑完过"，不说明"用哪版流程跑的"。
+#: 旧版产物和新版产物在库里长得一模一样，而批量选题默认跳过 prepared 的题
+#: ⇒ 改完流程后旧题永远不会被升级，用户看到的就是「代码改了、界面还是旧的」。
+#: 把「新/旧」变成可判定的数据，才能让 `prepare --all` 自动增量升级旧版产物。
+#: v4 = LLM 数据计划 + 2~4 种解法 + 四级提示 + 逐行对照代码解析。
+ARTIFACT_VERSION = 4
+
 OUTPUT_SINGLE = "single_value"
 OUTPUT_LIST = "list"
 OUTPUT_ANY = "any_solution"

@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
 from ..app import jobs
+from ..app.prep_models import ARTIFACT_VERSION
 from ..app.prep_store import PrepStore
 from ..app.quality import score_problem
 from ..llm.client import LlmConfigError, load_config
@@ -133,6 +134,7 @@ def overview() -> Dict[str, Any]:
 def problem_list() -> List[Dict[str, Any]]:
     rows = _rows(
         "SELECT p.id, p.title, p.status, p.failed_stage, p.tier, p.tags_json, p.algorithm_tags,"
+        " IFNULL(p.artifact_version, 0) AS artifact_version,"
         " (SELECT COUNT(*) FROM test_cases c WHERE c.problem_id=p.id) AS cases,"
         " (SELECT COUNT(*) FROM reference_solutions s WHERE s.problem_id=p.id) AS sols,"
         " (SELECT GROUP_CONCAT(DISTINCT lang) FROM reference_solutions s"
@@ -150,6 +152,10 @@ def problem_list() -> List[Dict[str, Any]]:
                 "title": row["title"],
                 "status": row["status"],
                 "failed_stage": row["failed_stage"],
+                # 旧版产物：UI 要能一眼分辨「这题是改流程前生成的」，否则用户会以为
+                # 代码没生效（旧版/新版在库里长得一样，只有版本号能区分）。
+                "artifact_version": int(row["artifact_version"] or 0),
+                "needs_upgrade": int(row["artifact_version"] or 0) < ARTIFACT_VERSION,
                 "tier": row["tier"],
                 "cases": row["cases"],
                 "solutions": row["sols"],
@@ -176,14 +182,28 @@ def problem_detail(pid: int) -> Dict[str, Any]:
         {"input": s.get("input", ""), "output": s.get("output", "")}
         for s in (spec.get("samples") or [])[:3]
     ]
+    # layer 的真实取值是 sample/boundary/exhaustive/stress/adversarial/user；
+    # edge/tiny/small/mid/max 是 size_class（档位），不是 layer。历史 bug 把两者混用，
+    # 导致预览只命中 sample+stress 两层、每层 2 条 → UI 上永远只看到 3 条数据。
+    # 现在按真实 layer 遍历，并在每层内按档位均衡取样，让「分级」在页面上可见。
     previews: Dict[str, List[Dict[str, Any]]] = {}
-    for layer in ("sample", "edge", "tiny", "small", "mid", "stress", USER_LAYER):
+    for layer in ("sample", "boundary", "exhaustive", "stress", "adversarial", USER_LAYER):
         rows = _rows(
             "SELECT input_data, expected_output, size_class, trust_level FROM test_cases"
-            " WHERE problem_id=? AND layer=? ORDER BY ordinal LIMIT 2",
+            " WHERE problem_id=? AND layer=? ORDER BY ordinal LIMIT 60",
             (pid, layer),
         )
-        if rows:
+        picked: List[Any] = []
+        per_size: Dict[str, int] = {}
+        for r in rows:
+            size = str(r["size_class"] or "")
+            if per_size.get(size, 0) >= 2:
+                continue
+            per_size[size] = per_size.get(size, 0) + 1
+            picked.append(r)
+            if len(picked) >= 8:
+                break
+        if picked:
             previews[layer] = [
                 {
                     "input": r["input_data"][:1200],
@@ -191,7 +211,7 @@ def problem_detail(pid: int) -> Dict[str, Any]:
                     "size": r["size_class"],
                     "trust": r["trust_level"],
                 }
-                for r in rows
+                for r in picked
             ]
     solutions = _rows(
         "SELECT lang, role, approach, complexity, verified, is_primary, verification_level, code,"
@@ -224,6 +244,8 @@ def problem_detail(pid: int) -> Dict[str, Any]:
         "title": problem["title"],
         "status": problem["status"],
         "failed_stage": problem["failed_stage"],
+        "artifact_version": int(problem["artifact_version"] or 0),
+        "needs_upgrade": int(problem["artifact_version"] or 0) < ARTIFACT_VERSION,
         "failure_advice": advice,
         "tier": problem["tier"],
         "statement": problem["statement_md"] or "",

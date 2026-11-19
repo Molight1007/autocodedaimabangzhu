@@ -24,7 +24,7 @@ REQUIRED_JSON_KEYS: dict[str, tuple[str, ...]] = {
         "complexity", "pitfalls", "tags",
     ),
     "method_analysis": ("methods",),
-    "code_notes": ("summary", "steps"),
+    "code_notes": ("summary", "lines"),
     "student_diagnose": ("category", "what_wrong", "why", "fix_steps", "next_test"),
     "solution_plan": ("approaches",),
 }
@@ -93,6 +93,14 @@ class TestKnownAntiPatterns(unittest.TestCase):
         text = loader.load(loader.CODE_NOTES)
         self.assertIn("不要复述样例", text)
         self.assertIn("因数分解", text)
+
+    def test_code_notes_requires_line_by_line_not_code_copy(self) -> None:
+        """v3：必须逐行覆盖、按 L<n> 行号引用，且禁止让模型抄写代码。"""
+        text = loader.load(loader.CODE_NOTES)
+        for token in ("L<n>", "每一个非空行", "不许合并成区间", "不要复制代码原文"):
+            self.assertIn(token, text, f"逐行对照模板缺口径：{token}")
+        self.assertIn('"lines"', text)
+        self.assertIn('"n"', text)
 
     def test_generator_cross_constraint_rule(self) -> None:
         text = loader.load(loader.GENERATOR)

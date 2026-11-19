@@ -2,7 +2,7 @@
 
 三条硬规则（P4 批量口径）：
 1. **单题失败不中断**：每题独立 try，失败落 `status=failed` + `failed_stage` + 错误摘要。
-2. **全局预算 250 次**：共享一个 `Budget`，到顶即停，剩余题标 `skipped_budget`（不改 DB 状态，
+2. **全局预算熔断**：共享一个 `Budget`，到顶即停，剩余题标 `skipped_budget`（不改 DB 状态，
    避免把"没跑"伪装成"跑失败"）。
 3. **单题时限**：`deadline_ts` 注入 `PrepService`，在每次 LLM 调用与阶段边界检查；
    超时记 `failed_stage=timeout`。
@@ -23,12 +23,19 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence
 
 from ..store.db import Database
-from .prep_models import Budget, PrepReport
+from .prep_models import ARTIFACT_VERSION, Budget, PrepReport
 from .prep_service import PrepService
 
-DEFAULT_BUDGET_PER = 20
-DEFAULT_BUDGET_TOTAL = 250
-DEFAULT_TIMEOUT_SEC = 180
+#: 单题调用上限。旧流程（单解法、无逐行解析）实测 11~13 次 ⇒ 20 够用；
+#: 现流程固定多出：alt1/alt2 生成 2~4 次、数据计划 1~2 次、逐行解析 ≤3 份 3~6 次，
+#: 加上各阶段重试，上界约 31 次。沿用 20 会把正常题误判成熔断——实测 #10 calls=25 打满。
+DEFAULT_BUDGET_PER = 45
+#: 批量总预算：33 题 × 约 25 次 ≈ 825，留余量到 1200。
+#: 注意这是**上限不是消耗**，按实际生成量计费，给足只为防误熔断。
+DEFAULT_BUDGET_TOTAL = 1200
+#: 单题墙钟。旧流程 78s/题；现流程 datasets 单阶段最高 109s + 三份逐行解析各约 35s，
+#: 600s 仍被 #9 打满 ⇒ 900s。
+DEFAULT_TIMEOUT_SEC = 900
 
 CLASS_GRAMMAR = "grammar_unsupported"
 CLASS_SPEC = "spec_invalid"
@@ -142,17 +149,31 @@ class BatchReport:
         return "\n".join(lines)
 
 
-def select_targets(db: Database, *, include_prepared: bool = False) -> List[Dict[str, Any]]:
-    """默认只跑"还没成功"的题：draft / failed / **preparing**。
+def select_targets(
+    db: Database, *, include_prepared: bool = False, artifact_version: int = ARTIFACT_VERSION
+) -> List[Dict[str, Any]]:
+    """默认跑"还没成功"和"旧版产物"的题：draft / failed / **preparing** / 低版本 prepared。
 
     为什么把 `preparing` 也算目标：上一次批量被中断（进程被杀/断电）会把题留在 `preparing`，
     若不算目标，它会被永久跳过且没有任何提示——这是"静默丢题"，比失败更难发现。
+
+    为什么把"低版本 prepared"也算目标：`status='prepared'` 只说明跑完过，不说明用哪版
+    流程跑的。旧版产物和新版产物在库里长得一模一样，若只看 status，改完流程后旧题永远
+    不会被升级——这正是「代码改了、界面还是旧的」的根因。版本号让升级变成自动的：
+    `prepare --all` 不再需要 `--force` 才能覆盖旧产物。
     """
-    sql = "SELECT id, title, tier, status FROM problems"
-    if not include_prepared:
-        sql += " WHERE status IS NULL OR status IN ('draft', 'failed', 'preparing')"
-    sql += " ORDER BY id"
-    return [dict(row) for row in db.query_all(sql)]
+    sql = (
+        "SELECT id, title, tier, status, IFNULL(artifact_version, 0) AS artifact_version"
+        " FROM problems"
+    )
+    if include_prepared:
+        return [dict(row) for row in db.query_all(sql + " ORDER BY id")]
+    sql += (
+        " WHERE status IS NULL OR status IN ('draft', 'failed', 'preparing')"
+        " OR (status = 'prepared' AND IFNULL(artifact_version, 0) < ?)"
+        " ORDER BY id"
+    )
+    return [dict(row) for row in db.query_all(sql, (int(artifact_version),))]
 
 
 def run_batch(

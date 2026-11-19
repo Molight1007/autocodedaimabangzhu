@@ -562,6 +562,10 @@ def cmd_show(args: argparse.Namespace) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
+    # 预算/时限的单一真源在 prep_batch：CLI 与批量入口若各写一份，流程一变就会漂移
+    # （曾出现「新版单题要 25+ 次调用，CLI 默认还停在 20」导致的批量熔断）。
+    from .app.prep_batch import DEFAULT_BUDGET_PER, DEFAULT_BUDGET_TOTAL, DEFAULT_TIMEOUT_SEC
+
     parser = argparse.ArgumentParser(prog="python -m autocode.cli", description="autoCode CLI")
     parser.add_argument("--db", default="", help="SQLite 路径（默认 data/autocode.db）")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -639,12 +643,18 @@ def build_parser() -> argparse.ArgumentParser:
     p_prep.add_argument("--problem-id", type=int, default=0, help="单题 id（与 --all 互斥）")
     p_prep.add_argument("--problem-id-list", type=int, nargs="+", default=None,
                         help="配合 --all 指定子集")
-    p_prep.add_argument("--all", action="store_true", help="批量跑所有 draft/failed 的题")
-    p_prep.add_argument("--force", action="store_true", help="配合 --all：连已 prepared 的题也重跑；单题：上次失败仍要重跑")
-    p_prep.add_argument("--budget", type=int, default=40, help="单题 LLM 调用上限（默认 40）")
-    p_prep.add_argument("--budget-per", type=int, default=20, help="--all 时单题调用上限（默认 20）")
-    p_prep.add_argument("--budget-total", type=int, default=250, help="--all 时全局调用上限（默认 250）")
-    p_prep.add_argument("--timeout-sec", type=float, default=180.0, help="--all 时单题墙钟上限（默认 180s）")
+    p_prep.add_argument("--all", action="store_true",
+                        help="批量跑 draft/failed/preparing 以及「旧版产物」（artifact_version 低于当前）")
+    p_prep.add_argument("--force", action="store_true",
+                        help="配合 --all：连本版已 prepared 的题也重跑；单题：上次失败仍要重跑")
+    p_prep.add_argument("--budget", type=int, default=DEFAULT_BUDGET_PER,
+                        help=f"单题 LLM 调用上限（默认 {DEFAULT_BUDGET_PER}）")
+    p_prep.add_argument("--budget-per", type=int, default=DEFAULT_BUDGET_PER,
+                        help=f"--all 时单题调用上限（默认 {DEFAULT_BUDGET_PER}）")
+    p_prep.add_argument("--budget-total", type=int, default=DEFAULT_BUDGET_TOTAL,
+                        help=f"--all 时全局调用上限（默认 {DEFAULT_BUDGET_TOTAL}）")
+    p_prep.add_argument("--timeout-sec", type=float, default=DEFAULT_TIMEOUT_SEC,
+                        help=f"--all 时单题墙钟上限（默认 {DEFAULT_TIMEOUT_SEC:.0f}s）")
     p_prep.add_argument("--quiet", action="store_true", help="不打印阶段进度")
     p_prep.set_defaults(func=cmd_prepare)
 

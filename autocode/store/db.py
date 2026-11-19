@@ -20,9 +20,10 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence
 
-#: 结构版本：v2=test_cases.source，v3=llm_calls.prompt_hash（见 `_COLUMN_MIGRATIONS` 注释）。
+#: 结构版本：v2=test_cases.source，v3=llm_calls.prompt_hash，v4=hints.approach，
+#: v5=problems.artifact_version（产物流程版本，见 `_COLUMN_MIGRATIONS` 注释）。
 #: 迁移全部幂等；版本号只用于记录升级历史，不参与业务判断。
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 PRAGMA_BUSY_TIMEOUT_MS = 5000
 
 _SCHEMA_FILE = Path(__file__).resolve().parent / "schema.sql"
@@ -108,6 +109,8 @@ class Database:
         "problems": (
             ("analysis_json", "TEXT"),
             ("data_plan_json", "TEXT"),
+            # v5：产物流程版本。老库补列后为 NULL ⇒ 一律视为旧版待升级。
+            ("artifact_version", "INTEGER"),
             ("algorithm_tags", "TEXT"),
         ),
         # v2：数据来源标记（用户合并进来的数据 source='user'）

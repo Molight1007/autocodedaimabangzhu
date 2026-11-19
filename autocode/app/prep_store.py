@@ -25,8 +25,23 @@ PROBLEM_UPDATABLE = {
     "analysis_json",
     "data_plan_json",
     "algorithm_tags",
+    "artifact_version",
     "updated_at",
 }
+
+#: 单题原子性：这些表属于"重跑会覆盖"的产物，失败时要能原样还原。
+_SNAPSHOT_TABLES = ("test_cases", "reference_solutions", "hints")
+#: problems 里由 prepare 写入的**产物**字段。
+#: 不含 status/failed_stage：失败后要保留"这次升级失败"的痕迹与原因，不能抹掉。
+_PROBLEM_PRODUCT_COLS = (
+    "spec_json",
+    "tier",
+    "lang_available",
+    "analysis_json",
+    "data_plan_json",
+    "algorithm_tags",
+    "artifact_version",
+)
 
 
 class PrepStore:
@@ -129,7 +144,11 @@ class PrepStore:
                     "  is_primary = excluded.is_primary,"
                     "  samples_expected = excluded.samples_expected,"
                     "  verification_level = excluded.verification_level,"
-                    "  degrade_reason = excluded.degrade_reason, created_at = excluded.created_at",
+                    "  degrade_reason = excluded.degrade_reason, created_at = excluded.created_at,"
+                    # 代码变了，按旧行号写的逐行讲解必然错位：清空让 line_notes 阶段重生成。
+                    # 代码没变则原样保留，避免每次重跑都白花一次 LLM 调用。
+                    "  line_notes_json = CASE WHEN reference_solutions.code <> excluded.code"
+                    " THEN NULL ELSE reference_solutions.line_notes_json END",
                     (
                         problem_id,
                         artifact.lang,
@@ -223,6 +242,53 @@ class PrepStore:
                 (problem_id,),
             )
 
+    # ── 单题原子性：失败回滚 ────────────────────────────────────────────────
+    def snapshot_problem(self, problem_id: int) -> Dict[str, Any]:
+        """给单题拍一份「重跑前」快照，供失败回滚。
+
+        为什么需要：prepare 是逐阶段边算边落库的（先换 test_cases，再写 hints/题解），
+        中途失败会留下「新数据 + 旧解析」的错配，比没跑更糟——实测 #3/#9/#10 就是这样。
+        失败时把旧产物原样写回，保证库永远停在「某个版本的完整产物」上。
+
+        边界：快照只在内存里，进程被 kill 时救不了；那种情况由 `status='preparing'`
+        + 下次重跑覆盖兜住（`select_targets` 把 preparing 算作目标）。
+        """
+        snap: Dict[str, Any] = {"problem": {}, "tables": {}}
+        row = self.db.query_one("SELECT * FROM problems WHERE id = ?", (problem_id,))
+        if row is not None:
+            keys = row.keys()
+            snap["problem"] = {col: row[col] for col in _PROBLEM_PRODUCT_COLS if col in keys}
+        for table in _SNAPSHOT_TABLES:
+            rows = self.db.query_all(f"SELECT * FROM {table} WHERE problem_id = ?", (problem_id,))
+            snap["tables"][table] = [dict(r) for r in rows]
+        return snap
+
+    def restore_problem(self, problem_id: int, snap: Dict[str, Any]) -> bool:
+        """把快照写回（失败时调用）。返回是否真的还原过。
+
+        表名/列名全部来自本模块固定白名单，值一律参数化，不拼接任何外部输入。
+        """
+        if not snap or not snap.get("tables"):
+            return False
+        with self.db.transaction() as conn:
+            for table in _SNAPSHOT_TABLES:
+                conn.execute(f"DELETE FROM {table} WHERE problem_id = ?", (problem_id,))
+                for row in snap["tables"].get(table) or []:
+                    cols = list(row.keys())
+                    conn.execute(
+                        f"INSERT INTO {table} ({', '.join(cols)})"
+                        f" VALUES ({', '.join('?' for _ in cols)})",
+                        [row[c] for c in cols],
+                    )
+            product = snap.get("problem") or {}
+            if product:
+                assignments = ", ".join(f"{col} = ?" for col in product)
+                conn.execute(
+                    f"UPDATE problems SET {assignments} WHERE id = ?",
+                    [*product.values(), problem_id],
+                )
+        return True
+
     def save_data_plan(self, problem_id: int, plan: Dict[str, Any]) -> None:
         """落库数据计划与实际产出：UI 要能展示「计划几组/实际几条」，不能只活在日志里。"""
         with self.db.transaction() as conn:
@@ -232,20 +298,31 @@ class PrepStore:
             )
 
     def has_line_notes(self, problem_id: int, lang: str, role: str) -> bool:
-        """重跑时避免为同一份解重复花钱（写过的逐行解析直接复用）。"""
+        """只对 v3 逐行对照结构判「已有」；旧版纯文本讲解视为过期，重跑会替换。
+
+        用字典判断而不 import app.line_notes，避免 store 层反向依赖 app 层。
+        """
         row = self.db.query_one(
             "SELECT line_notes_json FROM reference_solutions"
             " WHERE problem_id=? AND lang=? AND role=?",
             (problem_id, lang, role),
         )
-        return bool(row and row["line_notes_json"])
+        raw = row["line_notes_json"] if row else None
+        if not raw:
+            return False
+        try:
+            data = json.loads(raw) if isinstance(raw, str) else raw
+        except (TypeError, ValueError):
+            return False
+        return isinstance(data, dict) and data.get("v") == 3 and bool(data.get("lines"))
 
-    def save_line_notes(self, problem_id: int, lang: str, role: str, text: str) -> None:
+    def save_line_notes(self, problem_id: int, lang: str, role: str, payload: Any) -> None:
+        """payload 是结构化 dict（v3）；只序列化一次，避免库里存成 JSON 字符串。"""
         with self.db.transaction() as conn:
             conn.execute(
                 "UPDATE reference_solutions SET line_notes_json=? "
                 "WHERE problem_id=? AND lang=? AND role=?",
-                (json.dumps(text, ensure_ascii=False), problem_id, lang, role),
+                (json.dumps(payload, ensure_ascii=False), problem_id, lang, role),
             )
 
     def save_hints(self, problem_id: int, rows: List[Dict[str, Any]], batch_id: str) -> None:

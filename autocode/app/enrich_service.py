@@ -10,7 +10,7 @@ from typing import Any, Dict, Iterator, List
 
 from ..prompts import loader as prompts
 from ..store.db import default_db_path
-from . import judge
+from . import judge, line_notes
 from .prep_models import StageFailure
 from .prep_rules import spec_block, statement_excerpt, user_blocks
 
@@ -179,30 +179,32 @@ def enrich_problem(service: Any, problem: Dict[str, Any], spec: Dict[str, Any]) 
 
     notes_done = 0
     for sol in solutions:
-        if sol["line_notes_json"]:
+        if line_notes.is_current_notes(sol["line_notes_json"]):
             continue
+        code = str(sol["code"] or "")[:12000]
         body = (
             user_blocks(statement_excerpt(problem), spec.get("samples") or [])
-            + f"\n\n## 方法\n{ {'name': sol['approach'] or '未标注方法', 'complexity': sol['complexity'] or '未声明'} }\n"
-            + f"\n## 目标语言\n{sol['lang']}\n\n## 代码\n```{sol['lang']}\n{sol['code'][:12000]}\n```"
+            + "\n\n## 方法\n"
+            + json.dumps(
+                {"name": sol["approach"] or "未标注方法",
+                 "complexity": sol["complexity"] or "未声明"},
+                ensure_ascii=False,
+            )
+            + f"\n\n## 目标语言\n{sol['lang']}\n\n## 带行号的完整代码（L<n> 为真实行号）\n"
+            + line_notes.number_code(code)
         )
         res = service._chat(
             prompts.CODE_NOTES, body,
-            tag=f"code_notes#{pid}_{sol['lang']}_{sol['role']}", max_tokens=4096, json_mode=True,
+            tag=f"code_notes#{pid}_{sol['lang']}_{sol['role']}",
+            max_tokens=line_notes.NOTES_MAX_TOKENS, json_mode=True,
         )
-        data = res.json_obj or {}
-        lines = [str(data.get("summary") or "").strip()]
-        for i, step in enumerate(data.get("steps") or [], start=1):
-            if isinstance(step, dict):
-                lines.append(f"{i}. {step.get('part','')}：{step.get('explain','')}")
-        pitfalls = data.get("pitfalls") or []
-        if pitfalls:
-            lines.append("易错点：" + "；".join(str(x) for x in pitfalls))
-        text = "\n".join(x for x in lines if x)
+        payload = line_notes.format_line_notes(res.json_obj or {}, code)
+        if not payload:
+            continue
         with _db() as conn:
             conn.execute(
                 "UPDATE reference_solutions SET line_notes_json=? WHERE problem_id=? AND lang=? AND role=?",
-                (json.dumps(text, ensure_ascii=False), pid, sol["lang"], sol["role"]),
+                (json.dumps(payload, ensure_ascii=False), pid, sol["lang"], sol["role"]),
             )
         notes_done += 1
     return {"ok": True, "methods": len(approaches), "notes": notes_done, "flagged": flagged}

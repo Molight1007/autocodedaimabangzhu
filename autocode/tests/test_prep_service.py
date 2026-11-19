@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 from autocode.app import judge
+from autocode.app.prep_models import ARTIFACT_VERSION
 from autocode.app.prep_service import (
     Budget,
     BudgetExhausted,
@@ -465,6 +466,112 @@ class TestExtractCode(unittest.TestCase):
 
     def test_plain_fallback(self) -> None:
         self.assertEqual(judge.extract_code("print(1)", "python"), "print(1)")
+
+
+class TestArtifactVersionAndRollback(PipelineTestCase):
+    """旧版/新版的差距必须可判定：产物版本 + 失败回滚。
+
+    守两件事：
+    1. `status='prepared'` 不等于「本版产物」。低版本必须被 `prepare --all` 自动选中升级，
+       否则改完流程旧题永远不动——用户看到的就是「代码改了、界面还是旧的」。
+    2. 重跑失败不能留下「新数据 + 旧解析」的错配，旧产物要原样回来。
+    """
+
+    def test_success_stamps_current_version(self) -> None:
+        report = self.build(StubClient()).prepare(self.problem_id)
+        self.assertTrue(report.ok, report.error)
+        version = self.db.query_scalar(
+            "SELECT artifact_version FROM problems WHERE id = ?", (self.problem_id,)
+        )
+        self.assertEqual(int(version), ARTIFACT_VERSION)
+
+    def test_select_targets_includes_stale_prepared(self) -> None:
+        from autocode.app.prep_batch import select_targets
+
+        self.db.execute(
+            "UPDATE problems SET status='prepared', artifact_version=? WHERE id=?",
+            (ARTIFACT_VERSION - 1, self.problem_id),
+        )
+        self.assertIn(self.problem_id, [t["id"] for t in select_targets(self.db)])
+
+        self.db.execute(
+            "UPDATE problems SET artifact_version=? WHERE id=?",
+            (ARTIFACT_VERSION, self.problem_id),
+        )
+        self.assertNotIn(self.problem_id, [t["id"] for t in select_targets(self.db)])
+
+    def test_snapshot_restore_roundtrip(self) -> None:
+        from autocode.app.prep_store import PrepStore
+
+        store = PrepStore(self.db)
+        self.db.execute(
+            "UPDATE problems SET analysis_json='{\"old\":1}', data_plan_json='{\"old\":1}'"
+            " WHERE id=?",
+            (self.problem_id,),
+        )
+        before = store.snapshot_problem(self.problem_id)
+        # 模拟"新流程跑到一半"：换掉题解、清掉数据
+        self.db.execute(
+            "UPDATE problems SET analysis_json='{\"new\":1}', data_plan_json=NULL WHERE id=?",
+            (self.problem_id,),
+        )
+        self.db.execute("DELETE FROM test_cases WHERE problem_id=?", (self.problem_id,))
+        self.assertTrue(store.restore_problem(self.problem_id, before))
+        self.assertEqual(
+            json.loads(
+                str(
+                    self.db.query_scalar(
+                        "SELECT analysis_json FROM problems WHERE id=?", (self.problem_id,)
+                    )
+                )
+            ),
+            {"old": 1},
+        )
+        self.assertEqual(
+            int(
+                self.db.query_scalar(
+                    "SELECT COUNT(*) FROM test_cases WHERE problem_id=?", (self.problem_id,)
+                )
+            ),
+            1,
+        )
+
+    def test_failed_rerun_keeps_previous_artifacts(self) -> None:
+        """成功一次后再以极小预算重跑：产物不能被清掉（失败 ≠ 毁掉已有成果）。"""
+        self.assertTrue(self.build(StubClient()).prepare(self.problem_id).ok)
+        cases_before = int(
+            self.db.query_scalar(
+                "SELECT COUNT(*) FROM test_cases WHERE problem_id=?", (self.problem_id,)
+            )
+        )
+        hints_before = int(
+            self.db.query_scalar(
+                "SELECT COUNT(*) FROM hints WHERE problem_id=? AND is_active=1", (self.problem_id,)
+            )
+        )
+        report = self.build(StubClient(), max_calls=1).prepare(self.problem_id)
+        self.assertFalse(report.ok)
+        self.assertEqual(
+            int(
+                self.db.query_scalar(
+                    "SELECT COUNT(*) FROM test_cases WHERE problem_id=?", (self.problem_id,)
+                )
+            ),
+            cases_before,
+        )
+        self.assertEqual(
+            int(
+                self.db.query_scalar(
+                    "SELECT COUNT(*) FROM hints WHERE problem_id=? AND is_active=1",
+                    (self.problem_id,),
+                )
+            ),
+            hints_before,
+        )
+        self.assertEqual(
+            str(self.db.query_scalar("SELECT status FROM problems WHERE id=?", (self.problem_id,))),
+            "failed",
+        )
 
 
 if __name__ == "__main__":

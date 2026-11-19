@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS problems (
   lang_available TEXT,
   analysis_json TEXT,                                     -- LLM 题解（结构化）
   data_plan_json TEXT,                                    -- LLM 数据计划 + 实际产出（分组/档位/条数）
+  artifact_version INTEGER,                               -- 产出它的流程版本；NULL/低于当前版=旧版待升级
   algorithm_tags TEXT,                                    -- 受控词表标签 JSON
   created_at TEXT,
   updated_at TEXT,

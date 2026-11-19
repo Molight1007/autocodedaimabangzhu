@@ -35,6 +35,7 @@ from ..prompts import loader as prompts
 from ..store.db import Database, get_db
 from . import judge
 from .prep_models import (
+    ARTIFACT_VERSION,
     DEFAULT_MAX_CALLS,
     DEFAULT_TOKEN_CAP,
     GENERATOR_TIMEOUT_MS,
@@ -156,6 +157,9 @@ class PrepService(LlmStageMixin):
         # 客户端 + 记账回调（含失败/重试），与 use_problem 同一实现
         self.use_problem(int(problem_id))
 
+        # 失败回滚点：本流程逐阶段落库，中途失败会留下「新数据 + 旧解析」的错配。
+        # 旧产物先留在内存，任一阶段失败就整题还原，库不会停在半路。
+        snapshot = self.store.snapshot_problem(int(problem_id))
         self.store.update_problem(int(problem_id), status=STATUS_PREPARING, failed_stage=None)
         try:
             spec = self._run_stage(report, STAGE_SPEC, self._stage_spec_reuse, problem, samples)
@@ -222,15 +226,19 @@ class PrepService(LlmStageMixin):
                 failed_stage=None,
                 tier=spec.get("tier") or "A",
                 lang_available=",".join(available_langs()),
+                # 打上本次流程版本：批量选题据此判定「旧版待升级」，不再靠 --force 猜。
+                artifact_version=ARTIFACT_VERSION,
             )
             report.ok = True
         except BudgetExhausted as exc:
             report.failed_stage = "budget"
             report.error = str(exc)
+            self.store.restore_problem(int(problem_id), snapshot)
             self.store.mark_failed(int(problem_id), "budget", str(exc))
         except StageFailure as exc:
             report.failed_stage = exc.stage
             report.error = f"{exc.message}\n{exc.detail}".strip()
+            self.store.restore_problem(int(problem_id), snapshot)
             self.store.mark_failed(int(problem_id), exc.stage, report.error)
         finally:
             report.elapsed_ms = (time.perf_counter() - started) * 1000.0
