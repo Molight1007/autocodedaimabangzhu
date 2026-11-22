@@ -1,0 +1,26 @@
+# 把 code.example.com 换成自己的域名；证书由 Caddy 自动申请。
+# 同时必须做两件事，否则登录会失败：
+#   1) /etc/autocode/slim2.env 里 AUTOCODE_SLIM2_ALLOWED_HOSTS 加上这个域名
+#   2) 该文件里 AUTOCODE_SLIM2_TRUST_PROXY=1，否则限流会把所有请求算成 127.0.0.1
+code.example.com {
+    encode gzip
+
+    # header_up 会**覆盖**客户端自带的 X-Forwarded-For，避免伪造；
+    # 后端取最后一段作为客户端 IP。
+    reverse_proxy 127.0.0.1:8767 {
+        header_up X-Forwarded-Proto {scheme}
+        header_up X-Forwarded-For {remote_host}
+    }
+
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+        X-Content-Type-Options "nosniff"
+        Referrer-Policy "no-referrer"
+        -Server
+    }
+
+    log {
+        output file /var/log/caddy/autocode.log
+        format console
+    }
+}

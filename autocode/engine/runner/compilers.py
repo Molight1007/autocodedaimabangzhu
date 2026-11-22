@@ -128,7 +128,12 @@ def compile_cpp(
         *extra_flags,
     ]
     src_path.parent.mkdir(parents=True, exist_ok=True)
-    return run_process(argv, timeout_ms=timeout_ms, max_output_chars=200_000)
+    # cwd 必须给到源码目录：沙箱用 `--tmpfs /tmp` 覆盖临时目录，只绑定 cwd，
+    # 不传 cwd 时绑定的是服务目录，编译器就看不到 /tmp/autocode_run_* 里的源文件
+    # （报 cc1plus: fatal error: .../main.cpp: No such file or directory）。
+    return run_process(
+        argv, timeout_ms=timeout_ms, max_output_chars=200_000, cwd=src_path.parent
+    )
 
 
 def compiler_report() -> Dict[str, Optional[Dict[str, str]]]:

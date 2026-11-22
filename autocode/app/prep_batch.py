@@ -42,6 +42,7 @@ CLASS_SPEC = "spec_invalid"
 CLASS_REF_SAMPLE = "ref_sample_fail"
 CLASS_CROSS = "cross_mismatch"
 CLASS_GENERATOR = "generator_fail"
+CLASS_ARTIFACTS = "artifact_incomplete"
 CLASS_TIMEOUT = "timeout"
 CLASS_BUDGET = "budget"
 CLASS_OTHER = "other"
@@ -295,6 +296,9 @@ def classify_failure(failed_stage: str, error: str) -> str:
         return CLASS_SPEC
     if stage == "generator":
         return CLASS_GENERATOR
+    if stage == "artifacts":
+        # 全流程跑通了，但产物没达到新版契约（多解/逐行/提示分组/数据量/题解）
+        return CLASS_ARTIFACTS
     if stage == "references":
         if "对拍" in text or "分歧" in text:
             return CLASS_CROSS

@@ -16,6 +16,10 @@ STAGE_REFERENCES = "references"
 STAGE_CROSS_CHECK = "cross_check"
 STAGE_DATASETS = "datasets"
 STAGE_HINTS = "hints"
+#: 产物门：写 artifact_version 之前，用库里的产物自证「确实按 v4 流程产出」。
+#: 不加这一步，逐行解析/题解这类「失败只记 note」的软阶段会把半新产物盖成新版，
+#: 于是 select_targets 认为它已升级，永远不会再重跑（历史事故）。
+STAGE_ARTIFACTS = "artifacts"
 
 STAGE_ORDER: tuple[str, ...] = (
     STAGE_SPEC,
@@ -24,6 +28,7 @@ STAGE_ORDER: tuple[str, ...] = (
     STAGE_CROSS_CHECK,
     STAGE_DATASETS,
     STAGE_HINTS,
+    STAGE_ARTIFACTS,
 )
 
 STATUS_DRAFT = "draft"

@@ -134,6 +134,58 @@ def _decode(raw: Optional[bytes], limit: int) -> tuple[str, bool]:
     return raw.decode("utf-8", errors="replace"), truncated
 
 
+def _secret_dirs() -> list[str]:
+    """沙箱里必须遮掉的目录：库文件、管理员凭证、设置文件的父目录。
+
+    背景（2026-11-22 实测）：`--ro-bind / /` 把整个根目录只读挂进沙箱，而跑学生代码的
+    用户就是服务用户，于是 `print(open('/opt/autocode/data/slim2.db','rb').read())`
+    能把整库（含全部密码哈希与题库）从 stdout 带出来。这些目录对被测程序毫无用处，
+    直接 tmpfs 盖成空目录，路径存在但内容为空。
+    """
+    dirs: list[str] = []
+    for key in ("AUTOCODE_DB", "AUTOCODE_SLIM_CREDENTIALS", "AUTOCODE_SETTINGS_FILE"):
+        raw = str(os.environ.get(key) or "").strip()
+        if not raw:
+            continue
+        parent = str(Path(raw).expanduser().resolve().parent)
+        if parent != "/" and parent not in dirs:
+            dirs.append(parent)
+    return dirs
+
+
+def _sandbox_command(argv: Sequence[str], cwd: Optional[Path]) -> list[str]:
+    """按 `AUTOCODE_SANDBOX=bwrap` 包一层沙箱；默认不包，完整版行为不变。
+
+    只做四件事：根文件系统只读、遮掉数据目录、断网、工作目录可写。
+    刻意不做 per-run 用户隔离（那需要一次性容器），本周上线够用。
+    """
+    mode = str(os.environ.get("AUTOCODE_SANDBOX") or "").strip().lower()
+    if mode != "bwrap":
+        return list(argv)
+    workdir = str(cwd) if cwd else os.getcwd()
+    masks: list[str] = []
+    for path in _secret_dirs():
+        masks += ["--tmpfs", path]
+    # 不传 `--proc /proc`：在 systemd 加固单元（ProtectSystem=strict）里挂载新 procfs
+    # 会报 "Can't mount proc on /newroot/proc: Operation not permitted"，
+    # 而 `--unshare-pid` 本身可用。保留 pid 命名空间（学生代码无法向宿主机进程发信号），
+    # 放弃重挂 proc（沙箱内 /proc 仍是宿主视角，属已知的可接受折中）。
+    return [
+        "bwrap",
+        "--ro-bind", "/", "/",
+        "--dev", "/dev",
+        *masks,
+        "--tmpfs", "/tmp",
+        "--unshare-net",
+        "--unshare-pid",
+        "--die-with-parent",
+        "--bind", workdir, workdir,
+        "--chdir", workdir,
+        "--",
+        *argv,
+    ]
+
+
 def run_process(
     argv: Sequence[str],
     *,
@@ -146,6 +198,7 @@ def run_process(
     """跑一条命令并收集输出；超时杀进程树并置 `timed_out=True`。"""
     if not argv:
         raise RunnerEnvError("argv 不能为空")
+    argv = _sandbox_command(argv, cwd)
     started = time.perf_counter()
     kwargs = _popen_extra()
     try:

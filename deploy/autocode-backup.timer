@@ -1,0 +1,11 @@
+[Unit]
+Description=autoCode Slim 每日备份定时器（03:20，错过则开机后补跑）
+
+[Timer]
+OnCalendar=*-*-* 03:20:00
+Persistent=true
+RandomizedDelaySec=300
+Unit=autocode-backup.service
+
+[Install]
+WantedBy=timers.target

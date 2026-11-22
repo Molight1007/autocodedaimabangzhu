@@ -396,6 +396,68 @@ def cmd_prepare(args: argparse.Namespace) -> int:
     return 0 if report.ok else 1
 
 
+def cmd_audit(args: argparse.Namespace) -> int:
+    """产物体检：逐题按当前版本契约核对**库里的**产物，可选补版本号。
+
+    为什么单独一条命令：版本号只能由产物自证。历史数据是「半新半旧」的混合态，
+    靠再跑一遍全量既贵又慢；先体检，合格的补章、不合格的才进重跑队列。
+    """
+    from .app import artifact_gate
+    from .app.prep_models import ARTIFACT_VERSION
+    from .app.prep_store import PrepStore
+
+    db = _db_from_args(args)
+    store = PrepStore(db)
+    if getattr(args, "problem_id", 0):
+        rows = db.query_all(
+            "SELECT id, title, status, IFNULL(artifact_version, 0) AS v FROM problems WHERE id=?",
+            (int(args.problem_id),),
+        )
+    else:
+        rows = db.query_all(
+            "SELECT id, title, status, IFNULL(artifact_version, 0) AS v FROM problems ORDER BY id"
+        )
+    results = []
+    for row in rows:
+        pid = int(row["id"])
+        issues = artifact_gate.audit(store, pid)
+        results.append({
+            "id": pid,
+            "title": str(row["title"] or ""),
+            "status": str(row["status"] or ""),
+            "version": int(row["v"] or 0),
+            "ok": not issues,
+            "issues": issues,
+        })
+    if getattr(args, "stamp", False):
+        stamped = []
+        for item in results:
+            # 产物齐全就是「已就绪」：版本号与状态都由产物决定，不由上一次尝试的成败决定
+            # （失败尝试若已回滚到完整产物，题目本身是可用的，没必要留在重跑队列里烧钱）。
+            if item["ok"] and item["version"] < ARTIFACT_VERSION and item["status"] != "draft":
+                db.execute(
+                    "UPDATE problems SET artifact_version=?, status='prepared', failed_stage=NULL"
+                    " WHERE id=?",
+                    (ARTIFACT_VERSION, item["id"]),
+                )
+                item["version"] = ARTIFACT_VERSION
+                item["stamped"] = True
+                stamped.append(item["id"])
+        if not getattr(args, "json", False):
+            print(f"补章 {len(stamped)} 题：{stamped}")
+    if getattr(args, "json", False):
+        print(json.dumps({"version": ARTIFACT_VERSION, "rows": results}, ensure_ascii=False))
+        return 0
+    ok = sum(1 for item in results if item["ok"])
+    print(f"契约版本 v{ARTIFACT_VERSION} | 通过 {ok}/{len(results)}")
+    for item in results:
+        mark = "OK  " if item["ok"] else "FAIL"
+        print(f"{mark} #{item['id']:<3} v{item['version']:<2} {item['status']:<10} {item['title'][:28]}")
+        for issue in item["issues"]:
+            print(f"        - {issue}")
+    return 0
+
+
 def cmd_delete(args: argparse.Namespace) -> int:
     from .app import problems_admin
     from .store.db import get_db
@@ -657,6 +719,13 @@ def build_parser() -> argparse.ArgumentParser:
                         help=f"--all 时单题墙钟上限（默认 {DEFAULT_TIMEOUT_SEC:.0f}s）")
     p_prep.add_argument("--quiet", action="store_true", help="不打印阶段进度")
     p_prep.set_defaults(func=cmd_prepare)
+
+    p_audit = sub.add_parser("audit", help="产物体检：按当前版本契约核对库内产物（--stamp 给合格题补版本号）")
+    p_audit.add_argument("--problem-id", type=int, default=0, help="只查单题")
+    p_audit.add_argument("--stamp", action="store_true",
+                         help="给「全部契约通过但版本号低」的题补写 artifact_version（不调 LLM）")
+    p_audit.add_argument("--json", action="store_true", help="输出 JSON")
+    p_audit.set_defaults(func=cmd_audit)
 
     p_show = sub.add_parser("show", help="查看入库结果")
     p_show.add_argument("--problem-id", type=int, required=True)

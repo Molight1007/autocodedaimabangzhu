@@ -118,7 +118,10 @@ def export_problem(problem_id: int, *, db: Optional[Database] = None) -> Dict[st
     # 事务外打包 + 原子替换：807 条用例的包会打包几十毫秒到几百毫秒，
     # 放在写事务里会长时间占锁，把其它请求的写卡在 busy_timeout 上。
     try:
-        data = _build_zip(problem, spec, list(cases), list(solutions), list(hints), analysis, version)
+        data = _build_zip(
+            problem, spec, list(cases), list(solutions), list(hints), analysis, version,
+            figures=_figure_rows(database, problem_id),
+        )
         target_dir.mkdir(parents=True, exist_ok=True)
         target = target_dir / filename
         tmp_path = target_dir / (filename + TMP_SUFFIX)
@@ -175,6 +178,46 @@ def _cleanup_tmp(path: Optional[Path]) -> None:
         pass
 
 
+def _figure_rows(database: Database, problem_id: int) -> List[Any]:
+    """题目插图（老库可能没有该表，查不到就当没有图）。"""
+    try:
+        return database.query_all(
+            "SELECT label, page, path, after_line FROM problem_figures"
+            " WHERE problem_id=? ORDER BY ordinal, id",
+            (problem_id,),
+        )
+    except Exception:  # noqa: BLE001 - 导出不能因为插图查询失败而整体失败
+        return []
+
+
+def _figure_file(path_value: Any) -> Optional[Path]:
+    """把 `/assets/<stem>/fig_1.png` 还原成磁盘路径，文件不存在则返回 None。"""
+    rel = str(path_value or "").lstrip("/")
+    if not rel:
+        return None
+    target = project_root() / "data" / rel
+    return target if target.is_file() else None
+
+
+def _inject_figure_links(statement: str, figures: List[Any]) -> str:
+    """导出视图里把图插到 `after_line` 之后。
+
+    只改打包出来的 `problem.md` 副本；数据库里的题面原文一个字都不动
+    （题面必须保持 PDF 逐字切片，这是切题流程的铁律）。
+    """
+    if not figures:
+        return statement
+    lines = statement.split("\n")
+    ordered = sorted(figures, key=lambda f: int(f["after_line"] or 0), reverse=True)
+    for figure in ordered:
+        source = _figure_file(figure["path"])
+        if source is None:
+            continue
+        position = max(0, min(len(lines), int(figure["after_line"] or 0)))
+        lines.insert(position, f"\n![{figure['label']}](figures/{source.name})\n")
+    return "\n".join(lines)
+
+
 def _build_zip(
     problem: Any,
     spec: Dict[str, Any],
@@ -183,10 +226,18 @@ def _build_zip(
     hints: List[Any],
     analysis: Dict[str, Any],
     version: int,
+    *,
+    figures: Optional[List[Any]] = None,
 ) -> bytes:
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
-        archive.writestr("problem.md", problem["statement_md"] or "")
+        archive.writestr(
+            "problem.md", _inject_figure_links(problem["statement_md"] or "", figures or [])
+        )
+        for figure in figures or []:
+            source = _figure_file(figure["path"])
+            if source is not None:
+                archive.write(source, f"figures/{source.name}")
         archive.writestr("meta.json", json.dumps(_meta(problem, spec, solutions, version), ensure_ascii=False, indent=2))
         archive.writestr("cases.json", json.dumps(_cases_payload(cases), ensure_ascii=False, indent=2))
         archive.writestr("analysis.json", json.dumps(analysis, ensure_ascii=False, indent=2))

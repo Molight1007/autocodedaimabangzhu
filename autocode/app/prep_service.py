@@ -33,7 +33,8 @@ from ..engine.runner import VERDICT_AC, run_case
 from ..engine.verify import cross_check as cross_check_engine
 from ..prompts import loader as prompts
 from ..store.db import Database, get_db
-from . import judge
+from . import artifact_gate, judge
+from .hint_service import run_hints_stage
 from .prep_models import (
     ARTIFACT_VERSION,
     DEFAULT_MAX_CALLS,
@@ -43,6 +44,7 @@ from .prep_models import (
     MAX_SPEC_ATTEMPTS,
     ORACLE_TIMEOUT_MS,
     SAMPLE_TIMEOUT_MS,
+    STAGE_ARTIFACTS,
     STAGE_DATASETS,
     STAGE_GENERATOR,
     STAGE_HINTS,
@@ -86,6 +88,7 @@ __all__ = [
     "STAGE_REFERENCES",
     "STAGE_DATASETS",
     "STAGE_HINTS",
+    "STAGE_ARTIFACTS",
 ]
 
 
@@ -109,6 +112,8 @@ class PrepService(LlmStageMixin):
         exhaustive_cases: int = 30,
         stress_cases: int = 2,
         boundary_cases: int = 3,
+        enable_teaching: bool = True,
+        progress_cb: Any = None,
     ) -> None:
         self.db = db or get_db()
         self.store = PrepStore(self.db)
@@ -131,6 +136,12 @@ class PrepService(LlmStageMixin):
         self._problem_id: Optional[int] = None
         self.allow_parser_fallback = True
         self.enable_llm_extras = True
+        # 精简版（服务器）只生产数据：关掉提示/题解/逐行解析，产物门切到 data 档。
+        # 默认 True ⇒ 完整版行为与以前完全一致。
+        self.enable_teaching = bool(enable_teaching)
+        self.gate_profile = "full" if self.enable_teaching else "data"
+        # 进度回调（可选）：精简版用它把「当前阶段」写进任务表；默认 None ⇒ 旧行为不变。
+        self.progress_cb = progress_cb
 
     def use_problem(self, problem_id: int) -> None:
         """绑定题目并把 `client.recorder` 装好（实现见 `prep_llm.LlmStageMixin`）。"""
@@ -204,10 +215,11 @@ class PrepService(LlmStageMixin):
                 report, STAGE_DATASETS, self._stage_datasets, problem, int(problem_id), spec,
                 generator_code, refs,
             )
-            report.hints = self._run_stage(
-                report, STAGE_HINTS, self._stage_hints, problem, spec, refs
-            )
-            if self.enable_llm_extras:
+            if self.enable_teaching:
+                report.hints = self._run_stage(
+                    report, STAGE_HINTS, run_hints_stage, self, problem, spec, refs
+                )
+            if self.enable_llm_extras and self.enable_teaching:
                 try:
                     from . import line_notes
 
@@ -215,19 +227,31 @@ class PrepService(LlmStageMixin):
                 except StageFailure as exc:
                     self._note(f"逐行代码解析跳过：{exc.message[:100]}")
             try:
-                analysis = explain(self, problem, spec, refs) if self.enable_llm_extras else None
+                analysis = (
+                    explain(self, problem, spec, refs)
+                    if (self.enable_llm_extras and self.enable_teaching)
+                    else None
+                )
                 if analysis:
                     similar_local(self, int(problem_id), analysis.get("tags") or [])
             except StageFailure as exc:
                 self._note(f"题解生成失败：{exc.message[:120]}")
+            # 产物门：版本号必须由库里的产物自证，不能"跑完就盖章"。
+            # 上面几处软阶段失败只记 note，若不在这里拦住，半新产物会被标成新版，
+            # select_targets 便再也不会选中它（「代码改了、界面还是旧的」的死循环）。
+            self._run_stage(report, STAGE_ARTIFACTS, artifact_gate.gate_stage, self, int(problem_id))
+            # 只有走完整流程（含逐行解析/题解/备选解）才盖当前版本号；精简版（无教学产物）
+            # 与离线模式产出的都是"能用但不是完整契约"的产物，盖章就等于谎报。
+            keep_version = int(problem.get("artifact_version") or 0)
             self.store.update_problem(
                 int(problem_id),
                 status=STATUS_PREPARED,
                 failed_stage=None,
                 tier=spec.get("tier") or "A",
                 lang_available=",".join(available_langs()),
-                # 打上本次流程版本：批量选题据此判定「旧版待升级」，不再靠 --force 猜。
-                artifact_version=ARTIFACT_VERSION,
+                artifact_version=ARTIFACT_VERSION
+                if (self.enable_llm_extras and self.enable_teaching)
+                else keep_version,
             )
             report.ok = True
         except BudgetExhausted as exc:
@@ -258,6 +282,11 @@ class PrepService(LlmStageMixin):
             self.store.record_stage_run(report.problem_id, stage, detail="", error=error)
             raise StageFailure("timeout", error)
         started = time.perf_counter()
+        if self.progress_cb is not None:
+            try:
+                self.progress_cb(stage)
+            except Exception:  # noqa: BLE001 - 进度写失败绝不能影响流水线
+                pass
         self._log(f"== 阶段 {stage} 开始 ==")
         try:
             value, detail = func(*args)
@@ -390,30 +419,10 @@ class PrepService(LlmStageMixin):
         )
 
     def _probe_generator(self, spec: Dict[str, Any], code: str) -> Tuple[bool, str]:
-        """子进程跑 generator（禁进程内 exec），用 grammar 校验产出。"""
-        if not code.strip():
-            return False, "返回内容里没有代码"
-        checks: List[str] = []
-        for profile, seed in (("tiny", 1), ("edge", 2), ("max", 3), ("small", 4)):
-            result = run_case("python", code, "", GENERATOR_TIMEOUT_MS, args=(str(seed), profile))
-            verdict = str(result.get("verdict"))
-            if verdict != VERDICT_AC:
-                return False, (
-                    f"profile={profile} seed={seed} 执行失败 verdict={verdict}\n"
-                    f"stderr={str(result.get('stderr') or '')[:800]}"
-                )
-            text = str(result.get("stdout") or "")
-            if not text.strip():
-                return False, f"profile={profile} 没有输出任何数据"
-            try:
-                parsed = input_parser.parse_input(spec, text)
-            except grammar_engine.GrammarError as exc:
-                return False, f"profile={profile} 输出不符合 input_grammar：{exc.render()}"
-            violations = input_parser.validate_input(spec, parsed)
-            if violations:
-                return False, f"profile={profile} 校验失败：{violations[0]}"
-            checks.append(f"{profile}:{len(text)}B")
-        return True, "profiles=" + ",".join(checks)
+        """真起进程验生成器（含 edge 的 seed 敏感性，见 `generator_probe`）。"""
+        from . import generator_probe
+
+        return generator_probe.probe(spec, code)
 
     # ── ③ 参考解 + 小规模对拍 ────────────────────────────────────────────────
     def _stage_references(
@@ -646,7 +655,10 @@ class PrepService(LlmStageMixin):
                 self._note(f"数据组「{group['name']}」被格式门拒绝 {rejected} 条")
 
         generated = sum(len(layers[layer]) for layer in data_plan.LAYERS)
-        if plan.get("source") == "llm" and generated < data_plan.MIN_TOTAL:
+        # 落地不足就当场补：产物门（artifacts）要求非样例数据 ≥MIN_TOTAL，
+        # 让它在 10 分钟流水线的最后一步才失败，等于白烧一遍 LLM 调用。
+        # 这里不看 plan 来源（default 计划也可能被格式门砍到不足）。
+        if generated < data_plan.MIN_TOTAL:
             want = data_plan.MIN_TOTAL - generated
             extra, _rejected = self._generate_cases(
                 spec, generator_code, profile="tiny", count=want + 2, seed_base=8000
@@ -739,16 +751,7 @@ class PrepService(LlmStageMixin):
     def _agree(self, values: Dict[str, Optional[str]], checker: str, eps: float) -> Dict[str, Any]:
         return agree(values, checker, eps)
 
-    # ── ⑥ 提示 ──────────────────────────────────────────────────────────────
-    def _stage_hints(
-        self,
-        problem: Dict[str, Any],
-        spec: Dict[str, Any],
-        refs: Dict[str, RefArtifact],
-    ) -> Tuple[List[Dict[str, Any]], str]:
-        from .hint_service import run_hints_stage
 
-        return run_hints_stage(self, problem, spec, refs)
 
     # ── 数据生成工具 ────────────────────────────────────────────────────────
     def _generate_cases(

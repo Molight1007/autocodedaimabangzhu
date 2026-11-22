@@ -27,8 +27,15 @@ SCHEMA_VERSION = 5
 PRAGMA_BUSY_TIMEOUT_MS = 5000
 
 _SCHEMA_FILE = Path(__file__).resolve().parent / "schema.sql"
+SCHEMA_FILE_ENV = "AUTOCODE_SCHEMA_FILE"
 _DEFAULT_DB_NAME = "autocode.db"
 _ENV_DB_PATH = "AUTOCODE_DB"
+
+
+def schema_file() -> Path:
+    """建表脚本路径；精简版用 `AUTOCODE_SCHEMA_FILE` 指向自己的子集 schema。"""
+    override = os.environ.get(SCHEMA_FILE_ENV, "").strip()
+    return Path(override).expanduser() if override else _SCHEMA_FILE
 
 
 def project_root() -> Path:
@@ -86,7 +93,7 @@ class Database:
     # ── 初始化 ──────────────────────────────────────────────────────────────
     def init_schema(self) -> None:
         """建表（幂等）；成功后写 schema_migrations。"""
-        schema_sql = _SCHEMA_FILE.read_text(encoding="utf-8")
+        schema_sql = schema_file().read_text(encoding="utf-8")
         conn = self.connect()
         conn.executescript(schema_sql)
         self._migrate_columns(conn)
@@ -138,6 +145,9 @@ class Database:
         existing = {
             str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
         }
+        if not existing:
+            # 精简版 schema 不含 hints 等表；补列只针对"表存在"的库，绝不在空库上 ALTER。
+            return []
         added: List[str] = []
         for name, ddl in columns:
             if name in existing:

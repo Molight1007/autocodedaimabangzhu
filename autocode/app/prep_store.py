@@ -49,6 +49,19 @@ class PrepStore:
 
     def __init__(self, db: Database) -> None:
         self.db = db
+        self._table_cache: Dict[str, bool] = {}
+
+    def table_exists(self, name: str) -> bool:
+        """精简版 schema 不含 hints；快照/还原必须跳过不存在的表，而不是报错。"""
+        if name not in self._table_cache:
+            row = self.db.query_one(
+                "SELECT 1 AS ok FROM sqlite_master WHERE type='table' AND name=?", (name,)
+            )
+            self._table_cache[name] = row is not None
+        return self._table_cache[name]
+
+    def _snapshot_tables(self) -> List[str]:
+        return [table for table in _SNAPSHOT_TABLES if self.table_exists(table)]
 
     # ── 读 ──────────────────────────────────────────────────────────────────
     def load_problem(self, problem_id: int) -> Dict[str, Any] | None:
@@ -258,7 +271,7 @@ class PrepStore:
         if row is not None:
             keys = row.keys()
             snap["problem"] = {col: row[col] for col in _PROBLEM_PRODUCT_COLS if col in keys}
-        for table in _SNAPSHOT_TABLES:
+        for table in self._snapshot_tables():
             rows = self.db.query_all(f"SELECT * FROM {table} WHERE problem_id = ?", (problem_id,))
             snap["tables"][table] = [dict(r) for r in rows]
         return snap
@@ -271,7 +284,7 @@ class PrepStore:
         if not snap or not snap.get("tables"):
             return False
         with self.db.transaction() as conn:
-            for table in _SNAPSHOT_TABLES:
+            for table in self._snapshot_tables():
                 conn.execute(f"DELETE FROM {table} WHERE problem_id = ?", (problem_id,))
                 for row in snap["tables"].get(table) or []:
                     cols = list(row.keys())

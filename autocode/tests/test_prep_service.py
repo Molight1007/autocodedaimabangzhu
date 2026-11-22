@@ -302,7 +302,9 @@ class TestHintsInputs(PipelineTestCase):
                 approach="暴力枚举", complexity="O(n^2)",
             ),
         }
-        service._stage_hints({"id": self.problem_id, "statement_md": PROBLEM_MD}, spec, refs)
+        from autocode.app.hint_service import run_hints_stage
+
+        run_hints_stage(service, {"id": self.problem_id, "statement_md": PROBLEM_MD}, spec, refs)
         content = service.client.last_messages[1]["content"]
         self.assertIn("已有解法", content, "L2 必须知道真实用的是哪种算法")
         self.assertIn("前缀和", content, content[:400])
@@ -477,13 +479,19 @@ class TestArtifactVersionAndRollback(PipelineTestCase):
     2. 重跑失败不能留下「新数据 + 旧解析」的错配，旧产物要原样回来。
     """
 
-    def test_success_stamps_current_version(self) -> None:
+    def test_offline_run_does_not_stamp_current_version(self) -> None:
+        """离线模式（不生成备选解/逐行解析/题解）产不出 v4 契约 ⇒ 不许盖章。
+
+        盖章等于宣称"已按新版产出"，而 select_targets 据此跳过 →
+        这种半成品会被永久留在库里，正是「代码改了、界面还是旧的」的根因。
+        """
         report = self.build(StubClient()).prepare(self.problem_id)
         self.assertTrue(report.ok, report.error)
         version = self.db.query_scalar(
             "SELECT artifact_version FROM problems WHERE id = ?", (self.problem_id,)
         )
-        self.assertEqual(int(version), ARTIFACT_VERSION)
+        self.assertEqual(int(version), 0)
+        self.assertIn("离线模式", report.stages[-1].detail)
 
     def test_select_targets_includes_stale_prepared(self) -> None:
         from autocode.app.prep_batch import select_targets
@@ -576,3 +584,56 @@ class TestArtifactVersionAndRollback(PipelineTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestGeneratorProbe(PipelineTestCase):
+    """生成器探针：edge 档必须对 seed 敏感。
+
+    实测 #18 模板展开：`if profile == 'edge': out=['3 v0']; return` 写死常量，
+    7 次生成同一条，去重后边界组只剩 1 条，数据不足 10 条 → 整题在产物门被回滚。
+    这种错误要在生成阶段就拦下，反馈给模型改，而不是拖到 10 分钟后。
+    """
+
+    FROZEN_EDGE = '''```python
+import random, sys
+seed = int(sys.argv[1]); profile = sys.argv[2]
+rng = random.Random(seed)
+if profile == "edge":
+    print(1)
+    print(7)
+    raise SystemExit
+n = 1000 if profile == "max" else 10
+print(n)
+print(" ".join(str(rng.randint(-100, 100)) for _ in range(n)))
+```'''
+
+    SEED_SENSITIVE_EDGE = '''```python
+import random, sys
+seed = int(sys.argv[1]); profile = sys.argv[2]
+rng = random.Random(seed)
+if profile == "edge":
+    n = 1
+    value = seed % 2          # 同样是最小规模，数值随 seed 变化
+    print(n)
+    print(value)
+    raise SystemExit
+n = 1000 if profile == "max" else 10
+print(n)
+print(" ".join(str(rng.randint(-100, 100)) for _ in range(n)))
+```'''
+
+    def test_frozen_edge_is_rejected(self) -> None:
+        service = self.build(StubClient())
+        ok, detail = service._probe_generator(SPEC, judge.extract_code(self.FROZEN_EDGE, "python"))
+        self.assertFalse(ok, "edge 写死常量必须被拒")
+        self.assertIn("seed", detail)
+        self.assertIn("edge", detail)
+
+    def test_seed_sensitive_edge_passes(self) -> None:
+        service = self.build(StubClient())
+        ok, detail = service._probe_generator(
+            SPEC, judge.extract_code(self.SEED_SENSITIVE_EDGE, "python")
+        )
+        self.assertTrue(ok, detail)
+        self.assertIn("edge2", detail)
+        self.assertIn("edge5", detail)

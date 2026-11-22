@@ -226,6 +226,15 @@ def problem_detail(pid: int) -> Dict[str, Any]:
     )
     hints = _filter_latest_hint_batch(hints)
     similar = _rows("SELECT url, title, platform, note FROM similar_problems WHERE problem_id=?", (pid,))
+    # 题目插图：老库可能还没有该表（首次启动时 init_schema 会建），查不到就当空
+    try:
+        figures = _rows(
+            "SELECT label, page, bbox_json, path, kind, width, height, after_line"
+            " FROM problem_figures WHERE problem_id=? ORDER BY ordinal, id",
+            (pid,),
+        )
+    except Exception:  # noqa: BLE001
+        figures = []
     algorithm_tags = _jsonable(problem["algorithm_tags"])
     advice = ""
     if problem["status"] == "failed":
@@ -258,6 +267,19 @@ def problem_detail(pid: int) -> Dict[str, Any]:
             "traps": spec.get("traps") or [],
         },
         "samples": samples,
+        "figures": [
+            {
+                "label": f["label"],
+                "page": int(f["page"] or 0),
+                "bbox": _jsonable(f["bbox_json"]) or [],
+                "url": f["path"],
+                "kind": f["kind"],
+                "width": float(f["width"] or 0),
+                "height": float(f["height"] or 0),
+                "after_line": int(f["after_line"] or 0),
+            }
+            for f in figures
+        ],
         "layers": [{"layer": r["layer"], "count": r["n"]} for r in layers],
         "data_plan": _jsonable(problem["data_plan_json"]) if "data_plan_json" in problem.keys() else {},
         "previews": previews,
@@ -439,7 +461,10 @@ def import_pdf(payload: Dict[str, Any]) -> Dict[str, Any]:
     client = LlmClient(verbose=False)
     # 切题也是一次付费调用，必须落 llm_calls（problem_id 为空，属于“入库前成本”）
     client.recorder = PrepStore(get_db()).record_llm_call
-    result = ingest_pdf_file(file_path, db=get_db(), client=client)
+    # use_vision 默认开：把页图一并发给模型，图块归属由模型判断、坐标仍由代码算。
+    # 传 false 可退回旧行为（只发文本），用于纯文本模型或排障。
+    use_vision = bool(payload.get("use_vision", True))
+    result = ingest_pdf_file(file_path, db=get_db(), client=client, use_vision=use_vision)
     return result.to_dict()
 
 

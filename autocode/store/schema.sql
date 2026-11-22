@@ -32,6 +32,23 @@ CREATE TABLE IF NOT EXISTS problems (
 CREATE UNIQUE INDEX IF NOT EXISTS ux_src
   ON problems(source, source_id) WHERE source_id IS NOT NULL;
 
+CREATE TABLE IF NOT EXISTS problem_figures (
+  id INTEGER PRIMARY KEY,
+  problem_id INTEGER NOT NULL,
+  label TEXT NOT NULL,                                    -- fig_3（PDF 内全局图块编号）
+  page INTEGER NOT NULL,                                  -- 1-based 页码
+  bbox_json TEXT NOT NULL,                                -- [x0,y0,x1,y1]，单位 pt
+  path TEXT NOT NULL,                                     -- 相对项目根的图片路径
+  kind TEXT,                                              -- bitmap/vector/page
+  width REAL,
+  height REAL,
+  after_line INTEGER DEFAULT 0,                           -- 插入位置：题面内第 N 行之后（0=题首）
+  ordinal INTEGER NOT NULL DEFAULT 1,                     -- 同题内展示顺序
+  created_at TEXT,
+  UNIQUE(problem_id, label),
+  FOREIGN KEY(problem_id) REFERENCES problems(id) ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS test_cases (
   id INTEGER PRIMARY KEY,
   problem_id INTEGER NOT NULL,

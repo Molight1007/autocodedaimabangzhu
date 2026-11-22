@@ -23,7 +23,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Optional
-from urllib.parse import quote, urlparse
+from urllib.parse import quote, unquote, urlparse
 
 from . import api
 
@@ -194,6 +194,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(api.settings_view())
             if path.startswith("/api/export/"):
                 return self._serve_export(int(path.rsplit("/", 1)[-1]))
+            if path.startswith("/assets/"):
+                return self._serve_asset(path)
             if path.startswith("/api/problems/"):
                 return self._get_problem_sub(path)
             return self._json({"error": "not found"}, 404)
@@ -203,6 +205,26 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"error": "invalid id"}, 400)
         except Exception as exc:  # noqa: BLE001
             return self._json({"error": str(exc)}, 500)
+
+    def _serve_asset(self, path: str) -> None:
+        """题目插图：只读 data/assets 下的文件，`is_relative_to` 防目录穿越。"""
+        from ..app.ingest_pdf import ASSETS_ROOT
+
+        root = Path(ASSETS_ROOT).resolve()
+        # urlparse 不解码百分号转义；中文目录名（本卷取自 PDF 文件名）必须先 unquote
+        target = (root / unquote(path[len("/assets/") :])).resolve()
+        if not target.is_relative_to(root):
+            return self._json({"error": "forbidden"}, 403)
+        if not target.is_file():
+            return self._json({"error": "not found"}, 404)
+        mime = {
+            ".png": "image/png",
+            ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg",
+            ".gif": "image/gif",
+            ".webp": "image/webp",
+        }.get(target.suffix.lower(), "application/octet-stream")
+        return self._send(200, target.read_bytes(), mime)
 
     def _get_problem_sub(self, path: str) -> None:
         """`/api/problems/{id}` 及其子资源（quality / exports / job）。"""

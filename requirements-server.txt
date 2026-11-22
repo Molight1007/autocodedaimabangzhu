@@ -1,0 +1,8 @@
+# 精简版（服务器）运行时依赖。
+# 完整版的 pywebview（桌面窗口）在服务器上用不到，故不在此列。
+psutil>=5.9
+
+# 题目导入：PDF / Word 的文字抽取（2026-11-20 起支持多格式上传）。
+# pymupdf 自带 PDF 引擎（纯 wheel，不依赖系统 poppler）；python-docx 依赖 lxml。
+pymupdf>=1.24
+python-docx>=1.1

@@ -9,8 +9,9 @@
   测出 351ms vs 928ms，进程噪声盖过真实差异，给出假阴性 —— **计时判据已废弃**。
 
 本模块改为**确定性**判据，不跑代码、不联网、无噪声：
-  对「声称比主解更低阶」的备选解，数它 AST 里最深 for/while 嵌套层数。
-  若嵌套层数没有下降，说明标签与代码不符（典型：三重循环标 O(n log n)），剔除。
+  对「声称比主解更低阶」的备选解，数它 AST 里最深 for/while 嵌套层数，
+  与**它自己声明所允许的层数**（次幂，带 log 因子再 +1）比对。
+  层数超出声明，说明标签与代码不符（典型：三重循环标 O(n log n)），剔除。
 
 边界（诚实口径）：
 - 循环嵌套 ≠ 渐进复杂度，这里只做"明确不符才剔除"的保守反证，不做形式化证明；
@@ -42,6 +43,25 @@ def claimed_degree(complexity: str) -> Optional[int]:
     if "n" in text:
         return 1
     return None
+
+
+def allowed_depth(complexity: str) -> Optional[int]:
+    """声明所允许的最大循环嵌套层数；估不出（无 n / O(1)）返回 None。
+
+    为什么不能直接用次幂：`O(n log A)` 的标准实现就是**两层**嵌套
+    （外层扫 n，内层二分 log A）。只按次幂 1 判，会把正经的对数解当假货剔除
+    —— 实测 #11 移动、#18 模板展开 的「数学/动态规划」两解都是这样被误杀，
+    连带把「两种解法」判成「只有 1 种」，题目整题失败回滚。
+
+    log 因子允许多一层：O(n log n) → 2 层，O(n^2 log n) → 3 层。
+    """
+    degree = claimed_degree(complexity)
+    if degree is None:
+        return None
+    text = str(complexity or "").lower().replace(" ", "").replace("²", "^2")
+    if "log" in text or "lg(" in text or "㏒" in text:
+        return degree + 1
+    return degree
 
 
 def loop_depth(code: str) -> Optional[int]:
@@ -111,15 +131,21 @@ def audit_claims(service: Any, refs: Dict[str, Any]) -> List[str]:
             continue  # 解析不了就不下结论，保守保留
         name = getattr(artifact, "approach", "")
         claim = getattr(artifact, "complexity", "")
-        if depth >= base_depth:
+        allowed = allowed_depth(claim)
+        if allowed is None:
+            continue
+        # 两道判据，任一不符才剔除（保守反证，不做形式化证明）：
+        #   ① 嵌套层数超过自己声明允许的层数（含 log 因子给的那一层）；
+        #   ② 声称比主解更低阶，嵌套却比主解还深。
+        if depth > allowed or depth > base_depth:
             dropped.append(key)
             service._note(
-                f"备选解「{name}」声称 {claim}，但代码仍有 {depth} 层循环嵌套"
-                f"（主解 {base_depth} 层），复杂度声明与代码不符，已剔除"
+                f"备选解「{name}」声称 {claim}，但代码有 {depth} 层循环嵌套"
+                f"（声明最多允 {allowed} 层，主解 {base_depth} 层），已剔除"
             )
             refs.pop(key, None)
         else:
             service._note(
-                f"备选解「{name}」循环嵌套降至 {depth} 层（主解 {base_depth} 层），保留"
+                f"备选解「{name}」声称 {claim}，嵌套 {depth} 层 ≤ 允许 {allowed} 层（主解 {base_depth} 层），保留"
             )
     return dropped

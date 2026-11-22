@@ -1,0 +1,2658 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>题目数据工坊</title>
+<style>
+  :root{
+    --bg:#f6f7f9; --surface:#fff; --surface-2:#fbfcfd;
+    --ink:#0f172a; --muted:#5b6472; --faint:#94a1b2;
+    --line:#e6e9ef; --line-strong:#d5dae3;
+    --accent:#4f46e5; --accent-ink:#4338ca; --accent-soft:#eef2ff; --accent-line:#c7d2fe;
+    --ok:#047857; --ok-soft:#ecfdf5; --ok-line:#a7f3d0;
+    --warn:#b45309; --warn-soft:#fffbeb; --warn-line:#fde68a;
+    --bad:#b91c1c; --bad-soft:#fef2f2; --bad-line:#fecaca;
+    --r-sm:8px; --r-md:10px; --r-lg:14px;
+    --sh-1:0 1px 2px rgba(15,23,42,.05);
+    --sh-2:0 12px 32px -20px rgba(15,23,42,.3);
+    --sh-3:0 28px 70px -28px rgba(15,23,42,.38);
+    --mono:"Cascadia Code","JetBrains Mono",Consolas,ui-monospace,monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{
+    margin:0; background:var(--bg); color:var(--ink);
+    font:14px/1.65 "Inter","Segoe UI",-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;
+    -webkit-font-smoothing:antialiased; text-rendering:optimizeLegibility;
+  }
+  svg{display:block}
+  .app{height:100%; display:flex; flex-direction:column}
+
+  /* ── 顶栏 ───────────────────────────────────────────────────────────── */
+  .top{
+    height:60px; flex:0 0 60px; display:flex; align-items:center; gap:16px;
+    padding:0 18px; background:rgba(255,255,255,.86); backdrop-filter:saturate(1.5) blur(12px);
+    border-bottom:1px solid var(--line); position:relative; z-index:8;
+  }
+  .brand{display:flex; align-items:center; gap:10px; font-weight:650; font-size:14.5px; letter-spacing:-.01em}
+  .mark{
+    width:29px; height:29px; border-radius:9px; display:grid; place-items:center;
+    background:linear-gradient(140deg,#6366f1,#4338ca);
+    box-shadow:0 2px 7px rgba(79,70,229,.32), inset 0 1px 0 rgba(255,255,255,.25);
+  }
+  .mark svg{width:15px; height:15px; stroke:#fff; fill:none; stroke-width:1.8; stroke-linecap:round}
+  .nav{display:flex; gap:2px; padding:3px; background:#f1f3f7; border-radius:10px; border:1px solid var(--line)}
+  .nav button{
+    display:flex; align-items:center; gap:6px; border:0; background:none;
+    padding:6px 13px; border-radius:7px; font-size:13px; font-weight:500;
+    color:var(--muted); cursor:pointer; font-family:inherit; transition:color .13s, background .13s;
+  }
+  .nav button svg{width:14px; height:14px; stroke:currentColor; fill:none; stroke-width:1.7; stroke-linecap:round}
+  .nav button:hover{color:var(--ink)}
+  .nav button.active{background:var(--surface); color:var(--ink); box-shadow:var(--sh-1),0 0 0 1px rgba(15,23,42,.03)}
+  .spacer{flex:1}
+  .user{display:flex; align-items:center; gap:8px; color:var(--muted); font-size:12.5px}
+  .avatar{
+    width:24px; height:24px; border-radius:50%; display:grid; place-items:center;
+    background:var(--accent-soft); color:var(--accent-ink); font-size:11.5px; font-weight:650;
+    border:1px solid var(--accent-line);
+  }
+  .link{border:0; background:none; color:var(--muted); cursor:pointer; font-size:12.5px; padding:2px 4px; border-radius:6px; font-family:inherit}
+  .link:hover{color:var(--accent); background:var(--accent-soft)}
+
+  /* ── 按钮 ───────────────────────────────────────────────────────────── */
+  .btn{
+    display:inline-flex; align-items:center; justify-content:center; gap:6px;
+    height:32px; padding:0 12px; border:1px solid var(--line-strong); border-radius:var(--r-sm);
+    background:var(--surface); color:var(--ink); font:inherit; font-size:13px; font-weight:500;
+    cursor:pointer; white-space:nowrap; transition:background .13s, border-color .13s, box-shadow .13s, transform .06s;
+  }
+  .btn svg{width:14px; height:14px; stroke:currentColor; fill:none; stroke-width:1.8; stroke-linecap:round}
+  .btn:hover{background:#f8fafc; border-color:#c3cad6}
+  .btn:active{transform:translateY(.5px)}
+  .btn.primary{
+    background:linear-gradient(180deg,#5b52ea,#4f46e5); border-color:#4338ca; color:#fff;
+    box-shadow:0 1px 2px rgba(67,56,202,.28), inset 0 1px 0 rgba(255,255,255,.16);
+  }
+  .btn.primary:hover{filter:brightness(1.04); background:linear-gradient(180deg,#6159ee,#5049e8)}
+  .btn.ghost{border-color:transparent; background:transparent; color:var(--muted)}
+  .btn.ghost:hover{background:#f1f3f7; color:var(--ink)}
+  .btn.danger{color:var(--bad); border-color:var(--bad-line)}
+  .btn.danger:hover{background:var(--bad-soft)}
+  .btn:disabled{opacity:.45; cursor:not-allowed; filter:none; transform:none}
+  .btn.sm{height:28px; padding:0 10px; font-size:12.5px}
+
+  /* ── 布局 ───────────────────────────────────────────────────────────── */
+  .body{flex:1; display:flex; min-height:0}
+  .view{flex:1; display:flex; min-width:0; min-height:0}
+  .view.hidden,.hidden{display:none !important}
+
+  /* ── 左侧题库 ───────────────────────────────────────────────────────── */
+  .list{
+    width:314px; flex:0 0 314px; display:flex; flex-direction:column; min-height:0;
+    background:var(--surface); border-right:1px solid var(--line);
+  }
+  .list-head{padding:14px 14px 10px; border-bottom:1px solid var(--line); background:var(--surface)}
+  .list-title{
+    display:flex; align-items:baseline; justify-content:space-between;
+    font-size:11.5px; font-weight:600; letter-spacing:.06em; text-transform:uppercase;
+    color:var(--faint); margin-bottom:9px;
+  }
+  .list-title b{font-size:12px; color:var(--muted); letter-spacing:0; font-weight:600}
+  .search{position:relative}
+  .search svg{
+    position:absolute; left:10px; top:50%; transform:translateY(-50%);
+    width:14px; height:14px; stroke:var(--faint); fill:none; stroke-width:1.8;
+  }
+  .search input{
+    width:100%; height:32px; padding:0 10px 0 31px; border:1px solid var(--line);
+    border-radius:var(--r-sm); font:inherit; font-size:12.5px; color:var(--ink);
+    background:var(--surface-2); outline:none; transition:border-color .13s, box-shadow .13s, background .13s;
+  }
+  .search input:focus{border-color:var(--accent); background:#fff; box-shadow:0 0 0 3px rgba(79,70,229,.1)}
+  .list-body{flex:1; overflow:auto; padding:8px; scrollbar-gutter:stable}
+  .card-item{
+    position:relative; padding:10px 12px; border:1px solid transparent; border-radius:var(--r-md);
+    cursor:pointer; margin-bottom:3px; transition:background .12s, border-color .12s;
+  }
+  .card-item:hover{background:#f8fafc}
+  .card-item.active{background:var(--accent-soft); border-color:var(--accent-line)}
+  .card-item.active::before{
+    content:""; position:absolute; left:-1px; top:11px; bottom:11px; width:3px;
+    border-radius:0 3px 3px 0; background:var(--accent);
+  }
+  .card-item .ttl{
+    font-weight:600; font-size:13.5px; letter-spacing:-.01em;
+    white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+  }
+  .card-item .meta{
+    display:flex; align-items:center; gap:7px; flex-wrap:wrap;
+    color:var(--faint); font-size:11.5px; margin-top:4px;
+  }
+  .card-item .meta i{width:1px; height:9px; background:var(--line-strong); font-style:normal}
+  .dot{width:6px; height:6px; border-radius:50%; display:inline-block; background:var(--faint); flex:0 0 6px}
+  .dot.ready{background:#10b981}
+  .dot.generating{background:#f59e0b; animation:pulse 1.4s ease-in-out infinite}
+  .dot.failed{background:#ef4444}
+  .dot.draft{background:#cbd5e1}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+
+  /* ── 右侧详情 ───────────────────────────────────────────────────────── */
+  .detail{flex:1; overflow:auto; padding:0 26px 72px; min-width:0}
+  .detail.is-loading{opacity:.55; transition:opacity .15s}
+  .detail-head{
+    position:sticky; top:0; z-index:6; display:flex; align-items:flex-start; gap:18px;
+    margin:0 -26px; padding:20px 26px 13px;
+    background:rgba(246,247,249,.92); backdrop-filter:blur(10px);
+    border-bottom:1px solid transparent;
+  }
+  .detail-head h2{margin:0; font-size:19px; font-weight:650; letter-spacing:-.02em; line-height:1.35}
+  .detail-meta{display:flex; align-items:center; gap:7px; flex-wrap:wrap; color:var(--muted); font-size:12px; margin-top:5px}
+  .detail-meta i{width:1px; height:10px; background:var(--line-strong); font-style:normal}
+  .mono{font-family:var(--mono); font-size:11.5px}
+  .actions{margin-left:auto; display:flex; gap:8px; flex-wrap:wrap; padding-top:2px}
+
+  /* ── 任务提示 ───────────────────────────────────────────────────────── */
+  .job{
+    display:flex; gap:10px; align-items:flex-start; margin:12px 0; padding:11px 13px;
+    border:1px solid var(--line); border-radius:var(--r-md); background:var(--surface);
+    font-size:12.5px; color:var(--muted); box-shadow:var(--sh-1);
+  }
+  .job svg{width:15px; height:15px; flex:0 0 15px; margin-top:1px; stroke:currentColor; fill:none; stroke-width:1.7}
+  .job b{color:inherit; font-weight:600}
+  .job .spent{
+    margin-left:8px; padding:1px 7px; border-radius:999px; font-size:11.5px; font-variant-numeric:tabular-nums;
+    background:var(--accent-line); color:var(--accent-ink);
+  }
+  .job .wait{display:block; margin-top:4px; font-size:11.5px; opacity:.75}
+  .job.running{border-color:var(--accent-line); background:var(--accent-soft); color:var(--accent-ink)}
+  .job.good{border-color:var(--ok-line); background:var(--ok-soft); color:var(--ok)}
+  /* 完成态只是"上次发生了什么"，不该和运行中一样抢眼：去掉卡片外壳，压成一行 */
+  .job.done{
+    margin:9px 0; padding:6px 4px; border:0; background:transparent;
+    box-shadow:none; color:var(--muted); font-size:12px; gap:8px;
+  }
+  .job.done svg{color:var(--ok); width:14px; height:14px; flex-basis:14px}
+  .job.done b{color:var(--ink)}
+  .job.bad{border-color:var(--bad-line); background:var(--bad-soft); color:var(--bad)}
+  .job.bad .why{white-space:pre-wrap; margin-top:4px; font-size:12px; opacity:.9}
+  .spinner{
+    width:14px; height:14px; flex:0 0 14px; margin-top:2px; border-radius:50%;
+    border:2px solid rgba(67,56,202,.22); border-top-color:var(--accent);
+    animation:spin .75s linear infinite;
+  }
+  @keyframes spin{to{transform:rotate(360deg)}}
+
+  /* ── 卡片 / 折叠 ────────────────────────────────────────────────────── */
+  .card{
+    background:var(--surface); border:1px solid var(--line); border-radius:var(--r-lg);
+    box-shadow:var(--sh-1); margin-bottom:12px; overflow:hidden;
+  }
+  .card-pad{padding:16px}
+  details.card > summary{
+    display:flex; align-items:center; gap:9px; padding:11px 15px; cursor:pointer;
+    font-size:12.5px; color:var(--muted); user-select:none; list-style:none;
+  }
+  details.card > summary::-webkit-details-marker{display:none}
+  details.card > summary::before{
+    content:""; width:0; height:0; border-left:5px solid var(--faint);
+    border-top:4px solid transparent; border-bottom:4px solid transparent;
+    transition:transform .15s; flex:0 0 5px;
+  }
+  details.card[open] > summary::before{transform:rotate(90deg)}
+  details.card > summary:hover{color:var(--ink)}
+  details.card > summary .spacer{flex:1}
+  .stmt summary .preview{
+    flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+    color:var(--faint); font-size:12px;
+  }
+  details.card[open] .stmt summary .preview,
+  details.card[open] summary .preview{display:none}
+  .stmt-body{
+    padding:4px 22px 22px;
+    /* 题面是给人读长文的：用 UI 无衬线 + 1.95 行高。
+       原来 Georgia + SimSun 混排，中文实际落在宋体上，小字号发虚、行距也挤。 */
+    font:15px/1.95 "Microsoft YaHei UI","Microsoft YaHei","PingFang SC",
+         "Hiragino Sans GB","Noto Sans CJK SC","Segoe UI",sans-serif;
+    color:#1b2431; letter-spacing:.012em;
+  }
+  .stmt-body p{margin:0 0 11px}
+  .stmt-body p:last-child{margin-bottom:2px}
+  .stmt-body h3{
+    margin:26px 0 10px; font-size:15.5px; font-weight:700; letter-spacing:0;
+    color:var(--ink); padding-bottom:7px; border-bottom:1px solid var(--line);
+  }
+  .stmt-body h3:first-child{margin-top:2px}
+  .stmt-body ul{margin:0 0 12px; padding-left:22px}
+  .stmt-body li{margin:1px 0}
+  /* 样例：标题 + 两列 Input/Output 表，跟在线判题站的习惯一致 */
+  .stmt-body .sample{margin:14px 0 18px}
+  .stmt-body .sample-title{font-weight:700; margin-bottom:8px}
+  .stmt-body table.sample-table{
+    width:100%; border-collapse:collapse; table-layout:fixed;
+    border:1px solid var(--line-strong); border-radius:var(--r-sm); overflow:hidden;
+  }
+  .stmt-body table.sample-table th{
+    font-weight:600; font-size:12.5px; color:var(--muted); text-align:center;
+    background:var(--surface-2); border-bottom:1px solid var(--line-strong);
+    padding:7px 10px; letter-spacing:.02em;
+  }
+  .stmt-body table.sample-table td{
+    width:50%; vertical-align:top; padding:10px 13px;
+    border-right:1px solid var(--line-strong); background:#fff;
+  }
+  .stmt-body table.sample-table td:last-child{border-right:0}
+  .stmt-body table.sample-table pre{
+    margin:0; font:12.5px/1.68 var(--mono); white-space:pre; overflow-x:auto;
+    color:#1b2431;
+  }
+  .stmt-body pre.stmt-code{
+    margin:0 0 12px; padding:12px 14px; background:var(--surface-2);
+    border:1px solid var(--line); border-radius:var(--r-sm);
+    font:12.5px/1.7 var(--mono); white-space:pre; overflow-x:auto;
+  }
+  .stmt-body figure.stmt-fig{margin:16px 0; text-align:center}
+  .stmt-body figure.stmt-fig img{
+    max-width:100%; height:auto; border:1px solid var(--line);
+    border-radius:6px; background:#fff;
+  }
+  .details-body{padding:0 15px 15px; font-size:12.5px; color:var(--muted); line-height:1.8}
+  .details-body .muted{margin:6px 0}
+  pre.code{
+    margin:8px 0; padding:12px; background:#0f172a; color:#e2e8f0; border-radius:var(--r-sm);
+    font:12px/1.7 var(--mono); overflow:auto; max-height:340px; white-space:pre;
+  }
+  .notice{border-radius:var(--r-sm); padding:9px 11px; font-size:12.5px; margin:6px 0}
+  .notice.warn{background:var(--warn-soft); border:1px solid var(--warn-line); color:#92400e}
+
+  /* ── 标签页 ─────────────────────────────────────────────────────────── */
+  .tabs{display:flex; gap:20px; border-bottom:1px solid var(--line); margin:18px 0 15px}
+  .tab{
+    display:flex; align-items:center; gap:7px; padding:0 0 10px; border:0; background:none;
+    border-bottom:2px solid transparent; margin-bottom:-1px; cursor:pointer;
+    font:inherit; font-size:13.5px; color:var(--muted); transition:color .13s;
+  }
+  .tab:hover{color:var(--ink)}
+  .tab.active{color:var(--ink); border-bottom-color:var(--accent); font-weight:600}
+  .tab .count{
+    font-size:11.5px; font-weight:500; line-height:18px; padding:0 7px; border-radius:999px;
+    background:#eef1f6; color:var(--muted); font-variant-numeric:tabular-nums;
+  }
+  .tab.active .count{background:var(--accent-soft); color:var(--accent-ink)}
+
+  /* ── 统计块 ─────────────────────────────────────────────────────────── */
+  .tiles{display:grid; grid-template-columns:repeat(auto-fit,minmax(118px,1fr)); gap:10px; margin-bottom:14px}
+  .tile{
+    background:var(--surface); border:1px solid var(--line); border-radius:var(--r-md);
+    padding:11px 13px; box-shadow:var(--sh-1);
+  }
+  .tile .n{font-size:21px; font-weight:650; letter-spacing:-.03em; line-height:1.25; font-variant-numeric:tabular-nums}
+  .tile .n.zero{color:var(--faint); font-weight:500}
+  .tile .k{font-size:11.5px; color:var(--faint); margin-top:1px}
+  .tile.accent .n{color:var(--accent-ink)}
+  .tile.warn .n{color:var(--warn)}
+  /* 术语解释：默认收起，想弄明白的人点开 */
+  .legend{
+    border:1px solid var(--line); border-radius:var(--r-md); background:var(--surface);
+    margin-bottom:14px; box-shadow:var(--sh-1);
+  }
+  .legend > summary{
+    padding:9px 13px; font-size:12px; color:var(--muted); cursor:pointer; list-style:none;
+    display:flex; align-items:center; gap:6px; user-select:none;
+  }
+  .legend > summary::-webkit-details-marker{display:none}
+  .legend > summary::before{
+    content:"?"; width:15px; height:15px; border-radius:50%; flex:0 0 15px;
+    display:grid; place-items:center; font-size:10px; font-weight:700;
+    background:var(--accent-soft); color:var(--accent-ink); border:1px solid var(--accent-line);
+  }
+  .legend > summary:hover{color:var(--ink)}
+  .legend dl{margin:0; padding:2px 15px 13px; display:grid; grid-template-columns:86px 1fr; gap:6px 12px; font-size:12.5px}
+  .legend dt{color:var(--ink); font-weight:600}
+  .legend dd{margin:0; color:var(--muted); line-height:1.7}
+
+  /* ── 层筛选 ─────────────────────────────────────────────────────────── */
+  .data-bar{display:flex; align-items:flex-start; justify-content:space-between; gap:12px; flex-wrap:wrap; margin-bottom:12px}
+  .data-bar .chips{margin-bottom:0}
+  .export{display:flex; gap:6px; flex-shrink:0}
+  .chips{display:flex; gap:6px; flex-wrap:wrap; margin-bottom:12px}
+  .chip{
+    display:inline-flex; align-items:center; gap:6px; height:27px; padding:0 10px;
+    border:1px solid var(--line); border-radius:999px; background:var(--surface);
+    font:inherit; font-size:12px; color:var(--muted); cursor:pointer;
+    transition:background .12s, border-color .12s, color .12s;
+  }
+  .chip:hover{border-color:var(--line-strong); color:var(--ink)}
+  .chip .n{font-size:11.5px; color:var(--faint); font-variant-numeric:tabular-nums}
+  .chip.active{background:var(--accent); border-color:var(--accent); color:#fff}
+  .chip.active .n{color:rgba(255,255,255,.72)}
+
+  /* ── 表格 ───────────────────────────────────────────────────────────── */
+  .table-wrap{
+    background:var(--surface); border:1px solid var(--line); border-radius:var(--r-lg);
+    overflow:hidden; box-shadow:var(--sh-1);
+  }
+  table{width:100%; border-collapse:collapse}
+  thead th{
+    position:sticky; top:0; z-index:1; background:#f8fafc; text-align:left;
+    padding:9px 13px; border-bottom:1px solid var(--line);
+    font-size:11px; font-weight:600; letter-spacing:.05em; text-transform:uppercase; color:var(--faint);
+    white-space:nowrap;
+  }
+  tbody td{padding:9px 13px; border-bottom:1px solid #f1f3f7; vertical-align:top; font-size:12.5px}
+  tbody tr:last-child td{border-bottom:0}
+  tbody tr:hover{background:#fafbfd}
+  pre.io{
+    margin:0; padding:5px 7px; background:#f8fafc; border:1px solid #eef1f5;
+    border-radius:6px; font:12px/1.55 var(--mono); color:#334155;
+    white-space:pre-wrap; word-break:break-word; max-height:132px; overflow:auto; min-width:110px;
+  }
+  .pager{display:flex; align-items:center; justify-content:flex-end; gap:10px; margin-top:12px; color:var(--muted); font-size:12.5px}
+  .pager .range{font-variant-numeric:tabular-nums}
+
+  /* ── 徽标 ───────────────────────────────────────────────────────────── */
+  .pill{
+    display:inline-flex; align-items:center; gap:5px; height:22px; padding:0 8px;
+    border:1px solid var(--line); border-radius:999px; background:#f8fafc;
+    font-size:11.5px; color:var(--muted); white-space:nowrap;
+  }
+  .pill::before{content:""; width:5px; height:5px; border-radius:50%; background:currentColor; opacity:.55}
+  .pill.plain::before{display:none}
+  .pill.ok{background:var(--ok-soft); border-color:var(--ok-line); color:var(--ok)}
+  .pill.warn{background:var(--warn-soft); border-color:var(--warn-line); color:#92400e}
+  .pill.bad{background:var(--bad-soft); border-color:var(--bad-line); color:var(--bad)}
+
+  /* ── 面板 / 表单 ────────────────────────────────────────────────────── */
+  .panel{
+    background:var(--surface); border:1px solid var(--line); border-radius:var(--r-lg);
+    padding:15px; margin-bottom:12px; box-shadow:var(--sh-1);
+  }
+  .panel h3{margin:0 0 10px; font-size:13.5px; font-weight:650; letter-spacing:-.01em}
+  .panel .hint{color:var(--muted); font-size:12.5px; margin:-4px 0 12px; line-height:1.7}
+  .mini-help{
+    margin:10px 0 0; padding:9px 12px; border:1px dashed var(--line-strong);
+    border-radius:var(--r-sm); background:var(--surface-2);
+  }
+  .mini-help > summary{
+    cursor:pointer; font-size:12.5px; color:var(--muted); list-style:none;
+    display:flex; align-items:center; gap:6px; user-select:none;
+  }
+  .mini-help > summary::-webkit-details-marker{display:none}
+  .mini-help > summary:hover{color:var(--ink)}
+  .mini-help ul{margin:8px 0 6px; padding-left:18px; color:var(--muted); font-size:12px; line-height:1.85}
+  .mini-help li b{color:var(--ink); font-weight:600}
+  .row{display:flex; gap:9px; align-items:center; flex-wrap:wrap; margin-bottom:9px}
+  .row:last-child{margin-bottom:0}
+  textarea,select{
+    width:100%; padding:10px 12px; border:1px solid var(--line); border-radius:var(--r-sm);
+    font:13px/1.6 var(--mono); color:var(--ink); background:var(--surface); outline:none;
+    transition:border-color .13s, box-shadow .13s;
+  }
+  textarea:focus,select:focus{border-color:var(--accent); box-shadow:0 0 0 3px rgba(79,70,229,.1)}
+  textarea{min-height:128px; resize:vertical}
+  select{font-family:inherit; width:auto; padding-right:30px}
+  .row select{height:32px; padding:0 30px 0 10px; font-size:12.5px; background:var(--surface)}
+  .muted{color:var(--faint); font-size:12px}
+  .muted.err{color:var(--bad); font-size:12.5px; line-height:1.6}
+  .field{margin-bottom:13px}
+  .field label{display:block; font-size:12px; font-weight:500; color:var(--muted); margin-bottom:6px}
+  .field input{
+    width:100%; height:36px; padding:0 11px; border:1px solid var(--line); border-radius:var(--r-sm);
+    font:inherit; font-size:13px; color:var(--ink); background:var(--surface); outline:none;
+    transition:border-color .13s, box-shadow .13s;
+  }
+  .field input:focus{border-color:var(--accent); box-shadow:0 0 0 3px rgba(79,70,229,.1)}
+  .field .tip{margin-top:5px; font-size:11.5px; color:var(--faint); line-height:1.6}
+  .key-state{
+    display:flex; align-items:center; gap:8px; padding:9px 11px; margin-bottom:14px;
+    border-radius:var(--r-sm); background:var(--surface-2); border:1px solid var(--line);
+    font-size:12.5px; color:var(--muted);
+  }
+
+  /* ── 对抗数据 ───────────────────────────────────────────────────────── */
+  .adv-group{
+    background:var(--surface); border:1px solid var(--line); border-radius:var(--r-lg);
+    margin-bottom:10px; box-shadow:var(--sh-1);
+    /* 不能用 overflow:hidden：那会让左栏 sticky 失效，长列表滚到第 8 条时
+       左侧代码就跟着滚走了，左右对照的意义也就没了 */
+    overflow:visible;
+  }
+  .adv-group > summary{
+    display:flex; align-items:center; gap:9px; padding:11px 14px; cursor:pointer;
+    font-size:12.5px; color:var(--muted); user-select:none; list-style:none;
+    border-radius:var(--r-lg) var(--r-lg) 0 0;
+  }
+  .adv-group > summary::-webkit-details-marker{display:none}
+  .adv-group > summary::before{
+    content:""; width:0; height:0; border-left:5px solid var(--faint);
+    border-top:4px solid transparent; border-bottom:4px solid transparent; flex:0 0 5px;
+    transition:transform .15s;
+  }
+  .adv-group[open] > summary::before{transform:rotate(90deg)}
+  .adv-group > summary:hover{color:var(--ink)}
+  .adv-code{
+    flex:1; min-width:0; font:11.5px/1.5 var(--mono); color:var(--faint);
+    white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+  }
+
+  /* 两栏：左边这份错解全文，右边能卡住它的数据 + 错误原因。
+     代码一屏看完才好对照，所以代码面板独立滚动、滚动时固定不跟着走。 */
+  .adv-body{
+    display:grid; grid-template-columns:minmax(360px,44%) 1fr;
+    align-items:start; border-top:1px solid var(--line);
+  }
+  .adv-code-pane{
+    display:flex; flex-direction:column; min-width:0; align-self:start;
+    background:#0f172a; color:#e2e8f0; border-right:1px solid var(--line);
+    /* 右侧有十几条数据时会滚很长；sticky 让代码一直在视野里，能逐条对照。
+       top 要让开详情页那个 sticky 标题栏（约 84px）。 */
+    position:sticky; top:84px;
+    border-radius:0 0 0 var(--r-lg);
+  }
+  .pane-head{
+    display:flex; align-items:center; gap:8px; padding:9px 12px;
+    border-bottom:1px solid rgba(148,163,184,.18); flex:0 0 auto;
+  }
+  .pane-head .tag{
+    font-size:11px; letter-spacing:.04em; color:#94a3b8; text-transform:uppercase;
+  }
+  .pane-head .lang{
+    font-size:11px; padding:1px 7px; border-radius:999px;
+    background:rgba(129,140,248,.16); color:#c7d2fe; border:1px solid rgba(129,140,248,.32);
+  }
+  .pane-head .spacer{flex:1}
+  .pane-head button{
+    border:1px solid rgba(148,163,184,.3); background:transparent; color:#cbd5e1;
+    font:inherit; font-size:11.5px; padding:2px 8px; border-radius:6px; cursor:pointer;
+  }
+  .pane-head button:hover{background:rgba(148,163,184,.14); color:#fff}
+  .adv-code-scroll{overflow:auto; max-height:min(640px, calc(100vh - 190px)); padding:10px 0 14px}
+  .adv-code-pre{margin:0; font:12.5px/1.72 var(--mono); white-space:pre; tab-size:4}
+  .adv-code-pre .cl{display:block; padding-right:14px}
+  .adv-code-pre .cl:hover{background:rgba(148,163,184,.09)}
+  .adv-code-pre .cl i{
+    display:inline-block; width:46px; padding-right:14px; text-align:right;
+    color:#5b6b82; font-style:normal; user-select:none;
+  }
+  .adv-code-pane .absent{padding:14px; font-size:12px; color:#94a3b8}
+
+  .adv-data-pane{padding:12px 14px 14px; display:flex; flex-direction:column; gap:10px; min-width:0}
+  .adv-diag{
+    display:flex; gap:8px; padding:9px 11px; border-radius:var(--r-sm);
+    background:var(--bad-soft); border:1px solid var(--bad-line);
+    font-size:12.5px; line-height:1.7; color:#7f1d1d;
+  }
+  .adv-diag b{flex:0 0 auto; color:var(--bad); font-weight:650}
+  .adv-case{
+    border:1px solid var(--line); border-radius:var(--r-md);
+    background:var(--surface); padding:11px 12px;
+  }
+  .adv-case .head{display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-bottom:9px}
+  .adv-case .idx{
+    font:11.5px/1 var(--mono); color:var(--faint); font-variant-numeric:tabular-nums;
+  }
+  .adv-fields{display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:8px}
+  .adv-fields .lbl{font-size:11px; color:var(--faint); margin-bottom:4px; letter-spacing:.03em}
+  .adv-fields pre.io{max-height:150px}
+  .adv-reason{
+    margin-top:9px; padding:9px 11px; border-left:3px solid var(--bad-line);
+    background:var(--bad-soft); border-radius:0 8px 8px 0;
+    font-size:12.5px; line-height:1.75; color:#7f1d1d;
+  }
+  .adv-reason b{
+    display:block; font-size:11px; letter-spacing:.06em; color:var(--bad);
+    margin-bottom:3px; font-weight:650;
+  }
+
+  /* ── 空状态 / 骨架 ──────────────────────────────────────────────────── */
+  .empty{
+    display:flex; flex-direction:column; align-items:center; gap:10px;
+    text-align:center; margin:14vh auto 0; max-width:360px; color:var(--faint);
+  }
+  .empty .ico{
+    width:48px; height:48px; border-radius:14px; display:grid; place-items:center;
+    background:var(--surface); border:1px solid var(--line); box-shadow:var(--sh-1); margin-bottom:2px;
+  }
+  .empty .ico svg{width:22px; height:22px; stroke:var(--faint); fill:none; stroke-width:1.6}
+  .empty h3{margin:0; font-size:14.5px; font-weight:650; color:var(--ink)}
+  .empty p{margin:0 0 6px; font-size:12.5px; line-height:1.75}
+  .empty.compact{margin:34px auto}
+  .skel{padding:4px 0}
+  .skel .bar{
+    height:12px; border-radius:6px; margin-bottom:11px;
+    background:linear-gradient(90deg,#eef1f6 25%,#f7f9fc 37%,#eef1f6 63%);
+    background-size:400% 100%; animation:shimmer 1.4s ease infinite;
+  }
+  @keyframes shimmer{0%{background-position:100% 0}100%{background-position:0 0}}
+
+  /* ── 导入视图 ───────────────────────────────────────────────────────── */
+  .import-page{flex:1; overflow:auto; padding:38px 24px 40px}
+  .import-inner{max-width:760px; margin:0 auto}
+  .import-head h1{margin:0 0 8px; font-size:22px; font-weight:680; letter-spacing:-.025em}
+  .import-head p{margin:0 0 24px; color:var(--muted); font-size:13px; line-height:1.8}
+  .dropzone{
+    position:relative; border:1.5px dashed var(--line-strong); border-radius:16px;
+    background:var(--surface); padding:32px 20px; text-align:center; cursor:pointer;
+    transition:border-color .16s, background .16s, transform .16s, box-shadow .16s;
+  }
+  .dropzone:hover,.dropzone.over{
+    border-color:var(--accent); background:var(--accent-soft);
+    transform:translateY(-1px); box-shadow:var(--sh-2);
+  }
+  .dropzone .dz-icon{
+    width:48px; height:48px; border-radius:14px; margin:0 auto 12px;
+    display:grid; place-items:center; background:var(--accent-soft); border:1px solid var(--accent-line);
+  }
+  .dropzone:hover .dz-icon,.dropzone.over .dz-icon{background:#fff}
+  .dropzone svg{width:22px; height:22px; stroke:var(--accent); fill:none; stroke-width:1.6; stroke-linecap:round}
+  .dropzone .dz-main{font-size:14px; font-weight:550; color:var(--ink)}
+  .dropzone .dz-sub{font-size:12px; color:var(--faint); margin-top:6px}
+  .or{display:flex; align-items:center; gap:12px; margin:20px 0 14px; color:var(--faint); font-size:12px}
+  .or::before,.or::after{content:""; flex:1; height:1px; background:var(--line)}
+  #raw{min-height:172px}
+  .tips{
+    margin:22px 0 0; padding:14px 18px 14px 32px; background:var(--surface);
+    border:1px solid var(--line); border-radius:var(--r-md); box-shadow:var(--sh-1);
+    color:var(--muted); font-size:12.5px; line-height:1.9;
+  }
+  .tips li{margin:0 0 3px}
+  .tips li:last-child{margin-bottom:0}
+  .tips li::marker{color:var(--faint)}
+  .tips b{color:var(--ink); font-weight:600}
+  .import-done{
+    display:flex; align-items:center; gap:9px; padding:11px 14px;
+    background:var(--surface); border:1px solid var(--line); border-radius:var(--r-md);
+    font-size:12.5px; color:var(--muted); box-shadow:var(--sh-1);
+  }
+  .import-done .name{color:var(--ink); font-weight:600}
+  .import-done .spacer{flex:1}
+  /* 导入进度：三步状态 + 进度条，遮罩挡住重复点击 */
+  .imp-mask{
+    position:fixed; inset:0; z-index:90; display:flex; align-items:center; justify-content:center;
+    background:rgba(15,23,42,.42); padding:20px;
+  }
+  .imp-mask.hidden{display:none}
+  .imp-card{
+    width:min(430px,94vw); background:var(--surface); border-radius:var(--r-lg);
+    box-shadow:var(--sh-3); padding:22px 22px 18px;
+  }
+  .imp-title{font-size:15.5px; font-weight:650; letter-spacing:-.01em; display:flex; align-items:center; gap:8px}
+  .imp-title .spin{
+    width:15px; height:15px; border-radius:50%; flex:none;
+    border:2px solid var(--accent-line); border-top-color:var(--accent);
+    animation:imp-spin .75s linear infinite;
+  }
+  .imp-card.ok .imp-title .spin{
+    border:0; background:var(--ok); animation:none; position:relative;
+  }
+  .imp-card.ok .imp-title .spin::after{
+    content:""; position:absolute; left:4px; top:1px; width:5px; height:9px;
+    border:1.8px solid #fff; border-top:0; border-left:0; transform:rotate(42deg);
+  }
+  .imp-card.bad .imp-title .spin{border:0; background:var(--bad); animation:none}
+  .imp-card.bad .imp-title .spin::after{
+    content:"!"; position:absolute; inset:0; color:#fff; font-size:11px;
+    font-weight:700; line-height:15px; text-align:center;
+  }
+  @keyframes imp-spin{to{transform:rotate(360deg)}}
+  .imp-steps{list-style:none; margin:15px 0 0; padding:0; display:grid; gap:10px}
+  .imp-steps .step{display:flex; align-items:center; gap:9px; font-size:13px; color:var(--faint)}
+  .imp-steps .step i{
+    width:15px; height:15px; border-radius:50%; flex:none; position:relative;
+    border:2px solid var(--line-strong); box-sizing:border-box;
+  }
+  .imp-steps .step em{margin-left:auto; font-style:normal; font-size:12px; color:var(--faint); font-variant-numeric:tabular-nums}
+  .imp-steps .step[data-state="run"]{color:var(--ink)}
+  .imp-steps .step[data-state="run"] i{border-color:var(--accent); border-right-color:transparent; animation:imp-spin .75s linear infinite}
+  .imp-steps .step[data-state="done"]{color:var(--ink)}
+  .imp-steps .step[data-state="done"] i{border-color:var(--ok); background:var(--ok)}
+  .imp-steps .step[data-state="done"] i::after{
+    content:""; position:absolute; left:3.5px; top:1px; width:4px; height:7px;
+    border:1.6px solid #fff; border-top:0; border-left:0; transform:rotate(42deg);
+  }
+  .imp-steps .step[data-state="fail"]{color:var(--bad)}
+  .imp-steps .step[data-state="fail"] i{border-color:var(--bad); background:var(--bad)}
+  .imp-bar{height:6px; border-radius:99px; background:var(--line); overflow:hidden; margin-top:17px}
+  .imp-bar b{
+    display:block; height:100%; width:0; border-radius:99px; background:var(--accent);
+    transition:width .45s cubic-bezier(.4,0,.2,1);
+  }
+  .imp-card.ok .imp-bar b{background:var(--ok)}
+  .imp-card.bad .imp-bar b{background:var(--bad)}
+  .imp-note{margin-top:10px; font-size:12.5px; color:var(--muted); line-height:1.6}
+  .imp-note.err{color:var(--bad)}
+  .imp-foot{margin-top:15px; display:flex; justify-content:flex-end; gap:8px}
+  .imp-foot.hidden{display:none}
+  /* 导入成功后常驻的绿条，不会自己消失 */
+  .imp-ok{
+    display:flex; align-items:center; gap:10px; margin-top:14px; padding:11px 14px;
+    background:var(--ok-soft); border:1px solid var(--ok-line); border-radius:var(--r-md);
+  }
+  .imp-ok.hidden{display:none}
+  .imp-ok .tick{
+    width:20px; height:20px; border-radius:50%; background:var(--ok); flex:none; position:relative;
+  }
+  .imp-ok .tick::after{
+    content:""; position:absolute; left:6px; top:3px; width:5px; height:9px;
+    border:1.9px solid #fff; border-top:0; border-left:0; transform:rotate(42deg);
+  }
+  .imp-ok b{color:var(--ok); font-weight:650}
+  .imp-ok span{font-size:12.5px; color:var(--muted)}
+  .imp-ok .spacer{flex:1}
+  .ver{
+    font-size:11px; color:var(--faint); padding:2px 7px; border-radius:99px;
+    border:1px solid var(--line); background:var(--surface-2); margin-left:8px;
+    font-variant-numeric:tabular-nums;
+  }
+  .seg{
+    display:flex; gap:11px; align-items:flex-start; padding:12px 14px; margin-bottom:8px;
+    background:var(--surface); border:1px solid var(--line); border-radius:var(--r-md);
+    cursor:pointer; transition:border-color .12s, box-shadow .12s, background .12s;
+  }
+  .seg:hover{border-color:var(--line-strong); box-shadow:var(--sh-1)}
+  .seg.picked{border-color:var(--accent-line); background:#fbfcff}
+  .seg input{
+    width:16px; height:16px; margin:3px 0 0; accent-color:var(--accent);
+    flex:0 0 16px; cursor:pointer;
+  }
+  .seg-main{flex:1; min-width:0}
+  .seg-title{font-size:13.5px; font-weight:600; letter-spacing:-.01em}
+  .seg-meta{display:flex; gap:9px; flex-wrap:wrap; color:var(--faint); font-size:11.5px; margin-top:4px}
+  .seg-meta i{width:1px; height:9px; background:var(--line-strong); font-style:normal}
+  .seg-meta .warn-text{color:var(--warn)}
+  .import-actions{
+    display:flex; align-items:center; gap:10px;
+    margin-top:14px; padding:12px 14px;
+    background:var(--surface);
+    border:1px solid var(--line); border-radius:var(--r-md); box-shadow:var(--sh-1);
+  }
+  .import-actions .spacer{flex:1}
+
+  /* ── 弹窗 ───────────────────────────────────────────────────────────── */
+  .modal{
+    position:fixed; inset:0; z-index:20; display:flex; align-items:center; justify-content:center;
+    padding:24px; background:rgba(15,23,42,.42); backdrop-filter:blur(3px);
+  }
+  .modal.hidden{display:none}
+  .sheet{
+    width:min(520px,96vw); max-height:90vh; display:flex; flex-direction:column;
+    background:var(--surface); border-radius:16px; box-shadow:var(--sh-3);
+    border:1px solid rgba(255,255,255,.7); animation:pop .18s ease-out;
+  }
+  @keyframes pop{from{opacity:0; transform:translateY(6px) scale(.99)}to{opacity:1; transform:none}}
+  .sheet-head{display:flex; align-items:center; padding:16px 20px; border-bottom:1px solid var(--line)}
+  .sheet-head h2{margin:0; font-size:15px; font-weight:650; letter-spacing:-.01em}
+  .sheet-body{padding:18px 20px; overflow:auto}
+  .sheet-foot{display:flex; justify-content:space-between; align-items:center; gap:9px; padding:14px 20px; border-top:1px solid var(--line); background:var(--surface-2); border-radius:0 0 16px 16px}
+
+  /* ── 提示条 ─────────────────────────────────────────────────────────── */
+  #toast{
+    position:fixed; left:50%; bottom:28px; z-index:30;
+    display:flex; align-items:center; gap:9px;
+    max-width:min(560px,86vw); padding:11px 16px; border-radius:11px;
+    background:#0f172a; color:#f8fafc; font-size:12.5px; line-height:1.5;
+    box-shadow:var(--sh-3); opacity:0; transform:translate(-50%,10px);
+    transition:opacity .2s, transform .2s; pointer-events:none;
+  }
+  #toast::before{content:""; width:6px; height:6px; border-radius:50%; background:#818cf8; flex:0 0 6px}
+  #toast.show{opacity:1; transform:translate(-50%,0)}
+
+  @media (max-width:900px){
+    .list{width:250px; flex-basis:250px}
+    .adv-body{grid-template-columns:1fr}
+    .adv-code-pane{border-right:0; border-bottom:1px solid var(--line); position:static}
+    .adv-code-scroll{max-height:320px}
+    .adv-fields{grid-template-columns:1fr}
+    .detail{padding:0 16px 60px}
+    .detail-head{margin:0 -16px; padding:16px 16px 11px}
+  }
+  @media (max-width:660px){
+    .brand .name{display:none}
+    .list{width:200px; flex-basis:200px}
+    .tiles{grid-template-columns:repeat(2,1fr)}
+  }
+  /* ── 问题反馈 ─────────────────────────────────────────────────────────── */
+  .fb-badge{min-width:17px; height:17px; padding:0 5px; margin-left:6px; border-radius:999px;
+    background:var(--bad); color:#fff; font-size:11px; line-height:17px; text-align:center;
+    font-variant-numeric:tabular-nums}
+  .fb-badge.hidden{display:none}
+  .fb-form{border:1px solid var(--line); border-radius:var(--r-md); padding:12px;
+    background:var(--surface-2); margin-bottom:14px}
+  .fb-form .row{display:flex; gap:8px}
+  .fb-form select{flex:0 0 104px; width:104px}
+  .fb-form input{flex:1; min-width:0}
+  .fb-form textarea{min-height:76px; margin-top:8px}
+  .fb-form .foot{display:flex; align-items:center; gap:10px; margin-top:8px}
+  .fb-tabs{display:flex; gap:6px; margin-bottom:10px; flex-wrap:wrap}
+  .fb-list{max-height:42vh; overflow:auto; padding-right:2px}
+  .fb-item{border:1px solid var(--line); border-radius:var(--r-md); padding:11px 12px;
+    margin-bottom:9px; background:var(--surface)}
+  .fb-item .head{display:flex; align-items:center; gap:8px; flex-wrap:wrap}
+  .fb-item .title{font-weight:600}
+  .fb-item .meta{font-size:12px; color:var(--faint); margin-left:auto}
+  .fb-item .body{white-space:pre-wrap; margin:7px 0 2px}
+  .fb-reply{border-left:3px solid var(--line-strong); background:var(--surface-2);
+    border-radius:0 6px 6px 0; padding:7px 10px; margin:7px 0}
+  .fb-reply.admin{border-left-color:var(--accent); background:var(--accent-soft)}
+  .fb-reply .who{font-size:12px; color:var(--muted); margin-bottom:2px}
+  .fb-reply .text{white-space:pre-wrap}
+  .fb-status{font-size:11.5px; padding:0 8px; border-radius:999px; border:1px solid var(--line-strong);
+    color:var(--muted); background:var(--surface)}
+  .fb-status.open{border-color:var(--warn-line); background:var(--warn-soft); color:var(--warn)}
+  .fb-status.answered{border-color:var(--ok-line); background:var(--ok-soft); color:var(--ok)}
+  .fb-status.closed{border-color:var(--line-strong); color:var(--faint)}
+  .fb-actions{display:flex; gap:8px; align-items:center; margin-top:8px}
+  .fb-actions input{flex:1; min-width:0}
+  .fb-empty{color:var(--faint); text-align:center; padding:26px 0}
+  .fb-foot{margin-top:12px; padding-top:10px; border-top:1px solid var(--line);
+    font-size:12px; color:var(--muted)}
+  .fb-foot a{color:var(--accent-ink); text-decoration:none}
+
+</style>
+</head>
+<body>
+<div class="app">
+  <header class="top">
+    <div class="brand">
+      <span class="mark"><svg viewBox="0 0 24 24"><path d="M12 3 3 7.5l9 4.5 9-4.5L12 3Z"/><path d="M3 12.5 12 17l9-4.5"/><path d="M3 17 12 21l9-4"/></svg></span>
+      <span class="name">题目数据工坊</span>
+      <span class="ver" id="build-tag" title="部署版本">插图版 11-22</span>
+    </div>
+    <nav class="nav">
+      <button id="nav-bank" class="active">
+        <svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h10"/></svg>题库
+      </button>
+      <button id="nav-import">
+        <svg viewBox="0 0 24 24"><path d="M12 16V4m0 0L8 8m4-4 4 4"/><path d="M4 16v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>导入
+      </button>
+    </nav>
+    <div class="spacer"></div>
+    <button class="btn ghost" id="btn-feedback" title="问题与建议">
+      <svg viewBox="0 0 24 24"><path d="M21 12a8 8 0 0 1-8 8H8l-4 3v-6.5A8 8 0 0 1 12 4h1a8 8 0 0 1 8 8Z"/></svg>
+      反馈<span class="fb-badge hidden" id="fb-badge">0</span>
+    </button>
+    <button class="btn ghost" id="btn-settings" title="模型与 API Key 设置">
+      <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.6 1.6 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.6 1.6 0 0 0-1.8-.3 1.6 1.6 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1A1.6 1.6 0 0 0 9 19.4a1.6 1.6 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.6 1.6 0 0 0 .3-1.8 1.6 1.6 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1A1.6 1.6 0 0 0 4.6 9a1.6 1.6 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.6 1.6 0 0 0 1.8.3H9a1.6 1.6 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.6 1.6 0 0 0 1 1.5 1.6 1.6 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.6 1.6 0 0 0-.3 1.8V9a1.6 1.6 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.6 1.6 0 0 0-1.5 1z"/></svg>
+      设置
+    </button>
+    <div class="user">
+      <span class="avatar" id="avatar"></span>
+      <span id="user"></span>
+      <button class="link" id="btn-logout">退出</button>
+    </div>
+  </header>
+
+  <div class="body">
+    <div class="view" id="view-bank">
+      <aside class="list">
+        <div class="list-head">
+          <div class="list-title"><span>题库</span><b id="list-count"></b></div>
+          <div class="search" id="search-box">
+            <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.2-3.2"/></svg>
+            <input id="q" placeholder="搜索题目…" autocomplete="off" />
+          </div>
+        </div>
+        <div class="list-body" id="problem-list"></div>
+      </aside>
+      <main class="detail" id="detail"></main>
+    </div>
+
+    <div class="view hidden" id="view-import">
+      <div class="import-page">
+        <div class="import-inner">
+          <div class="import-head">
+            <h1>导入题目</h1>
+            <p>上传整卷或粘贴题面。哪几段是题、边界在哪，由模型判断；题面本身由程序按行号从原文切片，模型改不了字。</p>
+          </div>
+
+          <div id="import-form">
+            <div class="dropzone" id="dropzone" role="button" tabindex="0" aria-label="选择文件导入">
+              <div class="dz-icon">
+                <svg viewBox="0 0 24 24"><path d="M12 16V4m0 0L8 8m4-4 4 4"/><path d="M4 16v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>
+              </div>
+              <div class="dz-main">把文件拖到这里，或点击选择</div>
+              <div class="dz-sub">PDF / Word(.docx) / TXT / Markdown</div>
+              <input type="file" id="file" accept=".pdf,.docx,.txt,.md,.markdown,.csv" hidden />
+            </div>
+
+            <div class="or">或者直接粘贴题面</div>
+            <textarea id="raw" placeholder="把整份题面粘贴到这里"></textarea>
+            <div class="row" style="margin-top:9px">
+              <button class="btn primary" id="btn-segment">
+                <svg viewBox="0 0 24 24"><path d="M4 7h16M4 12h10M4 17h7"/></svg>开始切题
+              </button>
+              <span class="muted" id="seg-msg"></span>
+              <span class="muted" id="file-name" style="margin-left:auto"></span>
+            </div>
+          </div>
+
+          <div class="import-done hidden" id="import-done">
+            <span class="dot ready"></span>
+            <span id="import-done-text"></span>
+            <span class="spacer"></span>
+            <button class="btn sm" id="btn-reimport">重新导入</button>
+          </div>
+
+          <details class="card hidden" id="src-box" style="margin-top:12px">
+            <summary><span id="src-summary"></span></summary>
+            <pre id="src-pre" class="stmt-body" style="font-family:var(--mono); font-size:12.5px; line-height:1.75"></pre>
+          </details>
+
+          <ul class="tips" id="import-tips">
+            <li><b>识别交给模型</b>：哪几段是题、边界在哪，都由它判断，不需要人工校对。</li>
+            <li><b>题面不可篡改</b>：切题只标行号，题面由程序从原文切片。</li>
+            <li><b>支持格式</b>：PDF / Word(.docx) / TXT / Markdown；扫描件请先 OCR。</li>
+          </ul>
+
+          <div class="imp-ok hidden" id="imp-ok">
+            <span class="tick"></span>
+            <b id="imp-ok-title">导入成功</b>
+            <span id="imp-ok-sub"></span>
+          </div>
+
+          <div id="segments" style="margin-top:14px"></div>
+
+          <div class="import-actions hidden" id="import-actions">
+            <span class="muted" id="selected-count"></span>
+            <div class="spacer"></div>
+            <button class="btn" id="btn-reset">清空重来</button>
+            <button class="btn primary" id="btn-confirm" disabled>确认入库</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="modal hidden" id="modal-settings">
+  <div class="sheet" role="dialog" aria-modal="true" aria-label="模型设置">
+    <div class="sheet-head">
+      <h2>模型设置</h2>
+      <div class="spacer"></div>
+      <button class="link" id="close-settings">关闭</button>
+    </div>
+    <div class="sheet-body">
+      <div class="key-state" id="st-hint"></div>
+      <div class="field">
+        <label for="st-key">API Key</label>
+        <input id="st-key" type="password" autocomplete="off" spellcheck="false" />
+        <div class="tip">只保存在这台服务器上，<b>只有你自己的账号能用</b>；接口只回传后 4 位，不存明文到浏览器。</div>
+      </div>
+      <div class="field">
+        <label for="st-base">Base URL</label>
+        <input id="st-base" spellcheck="false" placeholder="https://api.deepseek.com/v1" />
+      </div>
+      <div class="field">
+        <label for="st-model">模型</label>
+        <input id="st-model" spellcheck="false" placeholder="deepseek-chat" />
+      </div>
+      <div class="row" style="margin-top:14px">
+        <button class="btn" id="btn-test">测试连接</button>
+        <span class="muted" id="st-msg"></span>
+      </div>
+    </div>
+    <div class="sheet-foot">
+      <button class="btn danger" id="btn-clear-key">清除已保存的 Key</button>
+      <button class="btn primary" id="btn-save-settings">保存</button>
+    </div>
+  </div>
+</div>
+
+
+<div class="modal hidden" id="modal-feedback">
+  <div class="sheet" style="width:min(760px,96vw)" role="dialog" aria-modal="true" aria-label="问题与建议">
+    <div class="sheet-head">
+      <h2>问题与建议</h2>
+      <div class="spacer"></div>
+      <button class="link" id="close-feedback">关闭</button>
+    </div>
+    <div class="sheet-body">
+      <div class="fb-form">
+        <div class="row">
+          <select id="fb-kind">
+            <option value="bug">遇到问题</option>
+            <option value="idea">改进建议</option>
+            <option value="other">其他</option>
+          </select>
+          <input id="fb-title" maxlength="80" placeholder="一句话说清：哪里不对 / 想要什么" />
+        </div>
+        <textarea id="fb-body" maxlength="2000" placeholder="具体描述：你在做什么、看到什么、期望是什么。有题号或报错原文请一并写上。"></textarea>
+        <div class="foot">
+          <button class="btn primary" id="btn-fb-submit">提交</button>
+          <span class="muted" id="fb-msg"></span>
+        </div>
+      </div>
+      <div class="fb-tabs" id="fb-tabs"></div>
+      <div class="fb-list" id="fb-list"></div>
+      <div class="fb-foot">
+        项目地址：<a href="https://github.com/Molight1007/autocodedaimabangzhu" target="_blank" rel="noopener">github.com/Molight1007/autocodedaimabangzhu</a>
+        <span class="muted">（也可以在这上面提 Issue）</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="modal hidden" id="modal-delete">
+  <div class="sheet" style="width:min(460px,96vw)" role="dialog" aria-modal="true" aria-label="删除题目">
+    <div class="sheet-head">
+      <h2>删除题目</h2>
+      <div class="spacer"></div>
+      <button class="link" id="close-delete">关闭</button>
+    </div>
+    <div class="sheet-body">
+      <div class="notice warn" id="del-summary"></div>
+      <div class="field" style="margin-top:14px">
+        <label for="del-title">输入题目名称确认</label>
+        <input id="del-title" autocomplete="off" spellcheck="false" />
+        <div class="tip" id="del-target"></div>
+      </div>
+    </div>
+    <div class="sheet-foot">
+      <button class="btn" id="btn-del-cancel">取消</button>
+      <button class="btn danger" id="btn-del-confirm" disabled>永久删除</button>
+    </div>
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<div class="imp-mask hidden" id="imp-mask">
+  <div class="imp-card" id="imp-card" role="status" aria-live="polite">
+    <div class="imp-title"><span class="spin"></span><span id="imp-title-text">正在导入</span></div>
+    <ul class="imp-steps">
+      <li class="step" id="imp-s1" data-state="wait"><i></i><span>读取文件</span><em></em></li>
+      <li class="step" id="imp-s2" data-state="wait"><i></i><span>解析文档</span><em></em></li>
+      <li class="step" id="imp-s3" data-state="wait"><i></i><span>模型切题</span><em></em></li>
+    </ul>
+    <div class="imp-bar"><b id="imp-bar-fill"></b></div>
+    <div class="imp-note" id="imp-note">准备中…</div>
+    <div class="imp-foot hidden" id="imp-foot">
+      <button class="btn" id="imp-close">关闭</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const S = {
+  problems: [], current: null, detail: null,
+  tab: 'data', layer: '', offset: 0, limit: 30,
+  cases: { items: [], total: 0 },
+  adv: [], advSubs: [],
+  batchId: null, segments: [],
+  advCode: '', advLang: 'python',
+  timer: null, pollJobId: 0, pollProblemId: 0, pollMisses: 0,
+  detailToken: 0, listToken: 0, settingsOpen: false, feedbackOpen: false,
+  deleteTitle: '', user: '', role: 'student',
+};
+
+const $ = (id) => document.getElementById(id);
+const esc = (value) => String(value == null ? '' : value)
+  .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+  .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+const num = (value) => Number(value || 0).toLocaleString('zh-CN');
+
+// 题面 + 插图：按 after_line 把图插到指定行之后。题面是纯文本直出（pre-wrap），
+// 这里只加 <figure>，不改任何文字——原文仍是程序按行号切的，一个字没动。
+// ── 题面排版 ────────────────────────────────────────────────────────────────
+// 题面原文是一行一行从 PDF 切出来的：段落被硬换行、样例是裸文本、小节只有【】标记。
+// 这里把它还原成人能读的样子——分节标题、合并段落、样例做成 Input/Output 表格，
+// 跟在线判题站的排版习惯一致。只做展示，不改一个字。
+const STMT_MARK = /^\s*【\s*([^】]{1,16}?)\s*】\s*$/;
+const STMT_BULLET = /^\s*[•·▪◆■*]\s*/;
+const STMT_CJK = /[\u3000-\u9fff\uff00-\uffef]/;
+const STMT_SAMPLE = /^样例\s*(\d+)?\s*(输入|输出|解释)?$/;
+//: 模型给的样例标签块，形如 `【样例1 输入】`
+const LAYOUT_SAMPLE_LABEL = /^【?\s*样例\s*(\d+)?\s*(输入|输出)\s*】?$/;
+//: 允许的块类型，与后端 validators.BLOCK_KINDS 一一对应
+const LAYOUT_KINDS = new Set(['heading', 'para', 'list', 'code', 'sample_input', 'sample_output']);
+
+function stmtJoinLines(lines) {
+  let text = '';
+  lines.forEach((raw) => {
+    const line = raw.trim();
+    if (!line) return;
+    if (!text) { text = line; return; }
+    const left = text.slice(-1);
+    const right = line.slice(0, 1);
+    // 中文硬换行不能补空格，否则段中会冒出多余空白；英文单词之间才需要
+    text += (STMT_CJK.test(left) || STMT_CJK.test(right) ? '' : ' ') + line;
+  });
+  return text;
+}
+
+function stmtSameTitle(line, title) {
+  const norm = (value) => String(value || '')
+    .replace(/[（(][^）)]*[）)]\s*$/, '')
+    .replace(/\s+/g, '')
+    .trim();
+  const left = norm(line);
+  const right = norm(title);
+  return Boolean(left && right && left === right);
+}
+
+function parseStatementBlocks(raw, title) {
+  const lines = String(raw || '').replace(/\r\n?/g, '\n').split('\n');
+  const blocks = [];
+  let para = [];
+  let paraStart = 0;
+  let bullets = [];
+  let bulletStart = 0;
+  let sample = null;
+
+  const flushPara = (upto) => {
+    if (para.length) {
+      blocks.push({ kind: 'para', text: stmtJoinLines(para), start: paraStart, end: upto });
+    }
+    para = [];
+  };
+  const flushBullets = (upto) => {
+    if (bullets.length) {
+      blocks.push({ kind: 'list', items: bullets.slice(), start: bulletStart, end: upto });
+    }
+    bullets = [];
+  };
+  const flushSample = (upto) => {
+    if (!sample) return;
+    blocks.push({
+      kind: 'sample',
+      label: sample.label,
+      input: sample.input.join('\n').replace(/\s+$/, ''),
+      output: sample.output.join('\n').replace(/\s+$/, ''),
+      start: sample.start,
+      end: upto,
+    });
+    sample = null;
+  };
+  const flushAll = (upto) => { flushPara(upto); flushBullets(upto); flushSample(upto); };
+
+  lines.forEach((line, index) => {
+    const number = index + 1;
+    const trimmed = line.trim();
+    const mark = line.match(STMT_MARK);
+
+    if (mark) {
+      const name = mark[1].trim();
+      const sampleMatch = name.match(STMT_SAMPLE);
+      const mode = sampleMatch && (sampleMatch[2] === '输入' || sampleMatch[2] === '输出')
+        ? sampleMatch[2]
+        : '';
+
+      if (mode) {
+        // 同一组样例的「输入」「输出」要并进同一张表，所以这里不能整体 flush
+        flushPara(index);
+        flushBullets(index);
+        const seq = Number(sampleMatch[1]) || 1;
+        const key = mode === '输入' ? 'input' : 'output';
+        const paired = sample && sample.index === seq && sample.mode !== key;
+        if (paired) {
+          sample.mode = key;
+        } else {
+          flushSample(index);
+          sample = {
+            index: seq, label: `示例 ${seq}`, input: [], output: [], start: number, mode: key,
+          };
+        }
+        return;
+      }
+
+      flushAll(index);
+      if (sampleMatch && sampleMatch[2] === '解释') {
+        const seq = Number(sampleMatch[1]) || 1;
+        blocks.push({ kind: 'heading', text: `示例 ${seq} 解释`, start: number, end: number });
+      } else if (name === '样例解释') {
+        blocks.push({ kind: 'heading', text: '样例解释', start: number, end: number });
+      } else {
+        blocks.push({ kind: 'heading', text: name, start: number, end: number });
+      }
+      return;
+    }
+
+    if (sample) {
+      sample[sample.mode].push(line);
+      return;
+    }
+    if (!trimmed) return;
+    if (index === 0 && stmtSameTitle(trimmed, title)) return;  // 首行是题名，标题栏已经有
+
+    if (STMT_BULLET.test(line)) {
+      flushPara(number - 1);
+      if (!bullets.length) bulletStart = number;
+      bullets.push(trimmed.replace(STMT_BULLET, ''));
+      return;
+    }
+    if (bullets.length) {
+      // 列表项在 PDF 里会被硬换行折断：续行并回上一条，否则一条读起来像两条
+      bullets[bullets.length - 1] = stmtJoinLines([bullets[bullets.length - 1], line]);
+      return;
+    }
+    if (!para.length) paraStart = number;
+    para.push(line);
+  });
+
+  flushAll(lines.length);
+  return blocks;
+}
+
+function renderStatementBlock(block) {
+  if (block.kind === 'heading') return `<h3>${esc(block.text)}</h3>`;
+  if (block.kind === 'list') {
+    return `<ul>${block.items.map((item) => `<li>${esc(item)}</li>`).join('')}</ul>`;
+  }
+  if (block.kind === 'sample') {
+    const output = block.output
+      ? `<pre>${esc(block.output)}</pre>`
+      : '<pre class="empty">（无）</pre>';
+    return `<div class="sample"><div class="sample-title">${esc(block.label)}</div>`
+      + '<table class="sample-table"><thead><tr><th>Input</th><th>Output</th></tr></thead>'
+      + `<tbody><tr><td><pre>${esc(block.input)}</pre></td><td>${output}</td></tr></tbody></table></div>`;
+  }
+  return `<p>${esc(block.text)}</p>`;
+}
+
+// ── 按模型给的拼块渲染（块=类型+行号；怎么显示由这里决定）────────────────────
+function layoutBlocks(layout, total) {
+  if (!Array.isArray(layout) || !layout.length) return null;
+  const blocks = [];
+  let last = 0;
+  for (const item of layout) {
+    const kind = String(item && item.kind || '');
+    const from = Number(item && item.from);
+    const to = Number(item && item.to);
+    if (!LAYOUT_KINDS.has(kind)) return null;
+    if (!Number.isInteger(from) || !Number.isInteger(to)) return null;
+    if (from < 1 || to < from || to > total || from <= last) return null;
+    blocks.push({ kind, from, to });
+    last = to;
+  }
+  return blocks;
+}
+
+function renderByLayout(blocks, lines, pushFigures) {
+  const out = [];
+  const slice = (block) => lines.slice(block.from - 1, block.to).join('\n');
+  let cursor = 0;
+  let sampleNo = 0;
+
+  const emitFigures = (block) => pushFigures(block.to);
+
+  while (cursor < blocks.length) {
+    const block = blocks[cursor];
+    const text = slice(block).trim();
+
+    // 样例：`【样例1 输入】 + 数据 + 【样例1 输出】 + 数据` 合成一张两列表
+    const isSampleStart = block.kind === 'sample_input'
+      || block.kind === 'sample_output'
+      || (block.kind === 'heading' && LAYOUT_SAMPLE_LABEL.test(text));
+    if (isSampleStart) {
+      let next = cursor;
+      let input = '';
+      let output = '';
+      let end = block.to;
+      if (blocks[next].kind === 'heading' && LAYOUT_SAMPLE_LABEL.test(slice(blocks[next]).trim())) {
+        next += 1;
+      }
+      if (blocks[next] && blocks[next].kind === 'sample_input') {
+        input = slice(blocks[next]);
+        end = blocks[next].to;
+        next += 1;
+      }
+      if (blocks[next] && blocks[next].kind === 'heading'
+          && LAYOUT_SAMPLE_LABEL.test(slice(blocks[next]).trim())) {
+        next += 1;
+      }
+      if (blocks[next] && blocks[next].kind === 'sample_output') {
+        output = slice(blocks[next]);
+        end = blocks[next].to;
+        next += 1;
+      }
+      if (input || output) {
+        sampleNo += 1;
+        out.push(
+          `<div class="sample"><div class="sample-title">示例 ${sampleNo}</div>`
+          + '<table class="sample-table"><thead><tr><th>Input</th><th>Output</th></tr></thead>'
+          + `<tbody><tr><td><pre>${esc(input)}</pre></td>`
+          + `<td>${output ? `<pre>${esc(output)}</pre>` : '<pre class="empty">（无）</pre>'}</td>`
+          + '</tr></tbody></table></div>'
+        );
+        pushFigures(end);
+        cursor = next;
+        continue;
+      }
+    }
+
+    if (block.kind === 'heading') {
+      out.push(`<h3>${esc(text.replace(/^【\s*|\s*】$/g, ''))}</h3>`);
+    } else if (block.kind === 'list') {
+      const items = slice(block).split('\n')
+        .filter((line) => line.trim())
+        .map((line) => `<li>${esc(line.trim().replace(STMT_BULLET, ''))}</li>`);
+      out.push(items.length ? `<ul>${items.join('')}</ul>` : `<p>${esc(text)}</p>`);
+    } else if (block.kind === 'code') {
+      out.push(`<pre class="stmt-code">${esc(slice(block))}</pre>`);
+    } else {
+      out.push(`<p>${esc(stmtJoinLines(slice(block).split('\n')))}</p>`);
+    }
+    emitFigures(block);
+    cursor += 1;
+  }
+  return out.join('\n');
+}
+
+function renderStatement(statement, figures, title, layout) {
+  const lines = String(statement || '').replace(/\r\n?/g, '\n').split('\n');
+  const figs = (Array.isArray(figures) ? figures : [])
+    .filter((item) => item && item.url)
+    .sort((a, b) => (Number(a.after_line) || 0) - (Number(b.after_line) || 0));
+  const out = [];
+  let cursor = 0;
+  const pushFigures = (upto) => {
+    while (cursor < figs.length && (Number(figs[cursor].after_line) || 0) <= upto) {
+      const fig = figs[cursor++];
+      out.push(
+        `<figure class="stmt-fig"><img src="${esc(fig.url)}" `
+        + `alt="${esc(fig.label || '题面插图')}" loading="lazy"></figure>`
+      );
+    }
+  };
+
+  // 首选模型给的拼块；块不合法（旧数据/被改坏）就退回自动排版，绝不让正文错位
+  const blocks = layoutBlocks(layout, lines.length);
+  if (blocks) {
+    const html = renderByLayout(blocks, lines, pushFigures);
+    pushFigures(Number.MAX_SAFE_INTEGER);
+    return html + (out.length ? '\n' + out.join('\n') : '');
+  }
+
+  const parsed = parseStatementBlocks(statement, title);
+  if (!parsed.length) {
+    pushFigures(Number.MAX_SAFE_INTEGER);
+    return out.join('\n') || `<p>${esc(statement || '—')}</p>`;
+  }
+  parsed.forEach((block) => {
+    out.push(renderStatementBlock(block));
+    // 图插在"它所属的整块"之后：宁可落在段落末尾，也不把一段话从中间劈开
+    pushFigures(block.end);
+  });
+  pushFigures(Number.MAX_SAFE_INTEGER);
+  return out.join('\n');
+}
+
+const STATUS_TEXT = { draft: '待生成', generating: '生成中', ready: '已就绪', failed: '生成失败' };
+//: 与 slim2/config.py 的 JOB_TIMEOUT_MIN 对齐：超过这个时长服务端才判超时。
+const JOB_TIMEOUT_MIN = 30;
+const POLL_MS = 2000;
+//: 连续失败 30 次（约 60 秒）仍拿不到状态，才认为前端掉线，提示刷新。
+const POLL_MAX_MISSES = 30;
+const LAYER_TEXT = { sample: '样例', boundary: '边界', typical: '典型', stress: '压力', trap: '陷阱' };
+const JUDGE_TEXT = {
+  token: '逐词比较', line: '逐行比较', exact: '完全一致',
+  float: '浮点容差', special: '特殊判题', interactive: '交互',
+};
+const TRUST_TEXT = { cross_verified: '双模型一致', reference_only: '标程实跑', partial: '部分复核', unreviewed: '未复核', sample: '题面样例' };
+const STAGE_TEXT = {
+  '数据生成': '正在生成测试数据', '重试生成': '首轮数据不合格，正在重试生成',
+  '数据复核': '正在独立复核', '参考解复算': '正在用标程复算数据',
+  '编译学生代码': '正在编译错解', '样例基线': '正在跑样例',
+  '构造对抗数据': '正在构造对抗数据', '真跑验证': '正在真跑验证', '复核对抗数据': '正在复核对抗数据',
+};
+// 失败时后端给的是内部阶段名（dataset / dataset_review…），界面要讲人话
+const FAIL_STAGE_TEXT = {
+  dataset: '数据生成', dataset_review: '数据复核', adversarial: '构造对抗数据',
+  adversarial_review: '复核对抗数据', process: '进程异常',
+};
+const ICONS = {
+  check: '<svg viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></svg>',
+  alert: '<svg viewBox="0 0 24 24"><path d="M12 9v4m0 4h.01"/><path d="M10.3 3.9 1.9 18a2 2 0 0 0 1.7 3h16.8a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>',
+  minus: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M8 12h8"/></svg>',
+  info: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 16v-5m0-3h.01"/></svg>',
+};
+
+function toast(message) {
+  const node = $('toast');
+  node.textContent = message;
+  node.classList.add('show');
+  clearTimeout(node._timer);
+  node._timer = setTimeout(() => node.classList.remove('show'), 2800);
+}
+
+async function api(path, options) {
+  let response;
+  try {
+    response = await fetch(path, options || {});
+  } catch (error) {
+    // fetch 只在网络层失败时抛错，报的是 "Failed to fetch"，对用户没有任何信息量
+    throw new Error('连不上服务器（网络中断或服务正在重启）');
+  }
+  if (response.status === 401) { location.replace('/login'); throw new Error('请先登录'); }
+  const data = await response.json().catch(() => ({ error: '服务返回了非 JSON' }));
+  if (!response.ok && data.error) throw new Error(data.error);
+  return data;
+}
+
+function post(path, body) {
+  return api(path, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body || {}),
+  });
+}
+
+// ── 空状态 ──────────────────────────────────────────────────────────────────
+function emptyDetail() {
+  $('detail').innerHTML = `
+    <div class="empty">
+      <div class="ico"><svg viewBox="0 0 24 24"><path d="M12 3 3 7.5l9 4.5 9-4.5L12 3Z"/><path d="M3 12.5 12 17l9-4.5"/></svg></div>
+      <h3>选一道题开始</h3>
+      <p>左侧是题库。还没有题目的话，去「导入」传一份题面，模型会自动切题。</p>
+      <button class="btn primary" id="btn-empty-import">去导入题目</button>
+    </div>`;
+  const button = $('btn-empty-import');
+  if (button) button.addEventListener('click', () => switchView('import'));
+}
+
+function skeleton() {
+  return `<div class="skel">
+    <div class="bar" style="width:34%; height:20px"></div>
+    <div class="bar" style="width:52%"></div>
+    <div class="bar" style="width:100%; height:64px; margin-top:16px"></div>
+    <div class="bar" style="width:100%; height:180px; margin-top:16px"></div>
+  </div>`;
+}
+
+// ── 题目列表 ────────────────────────────────────────────────────────────────
+async function loadProblems(selectId) {
+  const token = ++S.listToken;
+  const q = $('q').value.trim();
+  let data;
+  try {
+    data = await api('/api/problems?limit=100&q=' + encodeURIComponent(q));
+  } catch (error) { toast(error.message); return; }
+  if (token !== S.listToken) return;  // 搜索结果乱序返回时只认最后一次
+  S.problems = data.items || [];
+  $('list-count').textContent = q ? `${data.total} 条匹配` : `${data.total} 道`;
+  if (!S.problems.length) {
+    $('problem-list').innerHTML = q
+      ? `<div class="empty compact"><h3>没有匹配的题目</h3><p>换个关键词试试</p>
+           <button class="btn" id="btn-clear-q">清除搜索</button></div>`
+      : `<div class="empty compact"><h3>题库还是空的</h3><p>导入一份题面，模型会切出题目。</p>
+           <button class="btn primary" id="btn-empty-import2">去导入</button></div>`;
+    const clear = $('btn-clear-q');
+    if (clear) clear.addEventListener('click', () => { $('q').value = ''; loadProblems(); });
+    const go = $('btn-empty-import2');
+    if (go) go.addEventListener('click', () => switchView('import'));
+    if (selectId) { /* 没有可选项 */ }
+    return;
+  }
+  $('problem-list').innerHTML = S.problems.map(item => `
+      <div class="card-item ${item.id === S.current ? 'active' : ''}" data-id="${item.id}">
+        <div class="ttl">${esc(item.title)}</div>
+        <div class="meta">
+          <span class="dot ${esc(item.status)}"></span>
+          <span>${esc(STATUS_TEXT[item.status] || item.status)}</span>
+          <i></i><span>#${item.id}</span>
+          <i></i><span>v${item.version || 0}</span>
+          <i></i><span>${item.cases} 条</span>
+        </div>
+      </div>`).join('');
+  document.querySelectorAll('.card-item').forEach(node => {
+    node.addEventListener('click', () => openProblem(Number(node.dataset.id)));
+  });
+  if (selectId) await openProblem(selectId);
+}
+
+// ── 详情 ────────────────────────────────────────────────────────────────────
+async function openProblem(id) {
+  if (id !== S.current) {
+    S.advCode = ''; S.advLang = 'python';  // 换题不带着上题的错解
+    S.adv = []; S.advSubs = [];
+    const draft = $('adv-code');
+    if (draft) draft.value = '';  // renderDetail 会先把 DOM 里的值存回状态，这里必须先清
+  }
+  S.current = id;
+  S.offset = 0;
+  S.layer = '';
+  S.detail = null;
+  document.querySelectorAll('.card-item').forEach(node => {
+    node.classList.toggle('active', Number(node.dataset.id) === id);
+  });
+  $('detail').innerHTML = skeleton();
+  await refreshDetail();
+  $('detail').classList.remove('is-loading');
+}
+
+async function refreshDetail() {
+  if (!S.current) return;
+  const token = ++S.detailToken;
+  const pid = S.current;
+  let detail, cases, adv;
+  try {
+    [detail, cases, adv] = await Promise.all([
+      api('/api/problems/' + pid),
+      api(`/api/problems/${pid}/cases?limit=${S.limit}&offset=${S.offset}`
+        + (S.layer ? '&layer=' + encodeURIComponent(S.layer) : '')),
+      api(`/api/problems/${pid}/adversarial`),
+    ]);
+  } catch (error) {
+    if (token !== S.detailToken) return;
+    $('detail').innerHTML = `<div class="empty"><h3>加载失败</h3><p>${esc(error.message)}</p></div>`;
+    return;
+  }
+  if (token !== S.detailToken) return;  // 用户已经切到别的题
+  S.detail = detail;
+  S.cases = cases;
+  S.adv = adv.items || [];
+  S.advSubs = adv.submissions || [];
+  renderDetail();
+  ensurePolling();
+}
+
+// 题面默认展开：核对数据时几乎总要回看题目要求；用户收起后记住这个选择
+function statementOpen() {
+  return localStorage.getItem('stmt-open') !== '0';
+}
+
+function renderDetail() {
+  const d = S.detail;
+  if (!d) return;
+  const datasetJob = d.jobs.dataset || {};
+  const advJobState = d.jobs.adversarial || {};
+  // 同一道题同时跑两个任务只会互相抢资源，按钮层面直接挡住
+  const busy = datasetJob.status === 'running' || advJobState.status === 'running';
+  // 代码框活在 DOM 里，切标签时会被连带销毁；先存进状态，渲染时再填回去
+  const codeBox = $('adv-code');
+  if (codeBox) S.advCode = codeBox.value;
+  const langBox = $('adv-lang');
+  if (langBox) S.advLang = langBox.value;
+
+  $('detail').innerHTML = `
+    <div class="detail-head">
+      <div style="min-width:0">
+        <h2>${esc(d.title)}</h2>
+        <div class="detail-meta">
+          <span>#${d.id}</span><i></i>
+          <span title="判题方式：${esc(d.judge_type)}${d.tolerance ? '，容差 ' + esc(d.tolerance) : ''}">
+            判题 ${esc(JUDGE_TEXT[d.judge_type] || d.judge_type)}</span><i></i>
+          <span title="每次重新生成 +1，旧版本留在库里但不参与判题">数据版本 v${d.version}</span><i></i>
+          <span>${esc(STATUS_TEXT[d.status] || d.status)}</span>
+        </div>
+      </div>
+      <div class="actions">
+        <button class="btn primary" id="btn-gen" ${busy ? 'disabled' : ''}>
+          <svg viewBox="0 0 24 24"><path d="M12 3v18M3 12h18"/></svg>
+          ${d.version > 0 ? '重新生成' : '生成测试数据'}</button>
+        ${busy ? '<button class="btn danger" id="btn-cancel">取消</button>' : ''}
+        <button class="btn danger" id="btn-delete" ${busy ? 'disabled' : ''}>删除</button>
+      </div>
+    </div>
+    <div id="job-dataset"></div>
+    <div id="job-adversarial"></div>
+    <details class="card stmt" ${statementOpen() ? 'open' : ''}>
+      <summary>
+        <span>题面 · ${d.statement.length} 字${(d.constraints || []).length ? ' · 约束 ' + d.constraints.length + ' 条' : ''}</span>
+        <span class="preview">${esc(d.statement.slice(0, 90).replace(/\s+/g, ' '))}</span>
+      </summary>
+      <div class="stmt-body">${renderStatement(d.statement, d.figures || [], d.title, d.layout || [])}</div>
+    </details>
+    ${qualityPanel(d)}
+    <div class="tabs">
+      <button class="tab ${S.tab === 'data' ? 'active' : ''}" data-tab="data">
+        测试数据<span class="count">${d.total_cases}</span></button>
+      <button class="tab ${S.tab === 'adv' ? 'active' : ''}" data-tab="adv">
+        对抗数据<span class="count">${S.adv.length}</span></button>
+    </div>
+    <div id="tab-body"></div>`;
+
+  $('job-dataset').outerHTML = jobLine(datasetJob, '测试数据', 'dataset');
+  $('job-adversarial').outerHTML = jobLine(advJobState, '对抗数据', 'adversarial');
+
+  $('tab-body').innerHTML = S.tab === 'data' ? renderDataTab(d) : renderAdvTab(busy);
+  bindDetail();
+  if (S.tab === 'data') bindPager();
+}
+
+function elapsedText(seconds, startedAt) {
+  // 优先用服务端算好的 elapsed_s：客户端时钟可能偏（实测有机器慢 21 秒）
+  let total = Number(seconds);
+  if (!Number.isFinite(total) || total <= 0) {
+    const started = Date.parse(startedAt || '');
+    total = started ? Math.max(0, Math.round((Date.now() - started) / 1000)) : 0;
+  }
+  if (!total) return '';
+  if (total < 60) return total + ' 秒';
+  const minutes = Math.floor(total / 60);
+  return minutes + ' 分 ' + (total % 60) + ' 秒';
+}
+
+function jobLine(job, label, kind) {
+  const id = `job-${kind}`;
+  if (!job || job.status === 'none') return `<div id="${id}" hidden></div>`;
+  if (job.status === 'offline') {
+    // 轮询失败不是任务失败：任务还在服务器上跑，只是这一秒没取到状态。
+    return `<div class="job running" id="${id}">
+      <span class="spinner"></span>
+      <div>${esc(label)}：连接中断，正在恢复（第 ${job.misses || 1} 次）…
+        <span class="wait">任务仍在服务器上执行，网络恢复后会自动接上</span></div>
+    </div>`;
+  }
+  if (job.status === 'running') {
+    const text = STAGE_TEXT[job.stage] || (job.stage ? '正在' + job.stage : '正在处理');
+    const spent = elapsedText(job.elapsed_s, job.started_at);
+    return `<div class="job running" id="${id}">
+      <span class="spinner"></span>
+      <div>${esc(label)}：${esc(text)}…${spent ? `<span class="spent">已 ${spent}</span>` : ''}
+        <span class="wait">写标程与生成并行，通常 3 次模型调用 + 两次真跑核验；单次调用 20~60 秒，超过 ${JOB_TIMEOUT_MIN} 分钟才判超时</span></div>
+    </div>`;
+  }
+  if (job.status === 'failed' && job.failed_stage === 'cancelled') {
+    return `<div class="job" id="${id}">
+      <span class="job-ico">${ICONS.minus}</span>
+      <div><b>${esc(label)}已取消</b>${job.error ? `<div class="why">${esc(job.error)}</div>` : ''}</div>
+    </div>`;
+  }
+  if (job.status === 'failed') {
+    return `<div class="job bad" id="${id}">
+      <span class="job-ico">${ICONS.alert}</span>
+      <div><b>${esc(label)}失败</b>${job.failed_stage ? '（' + esc(FAIL_STAGE_TEXT[job.failed_stage] || job.failed_stage) + '）' : ''}
+        <div class="why">${esc(job.error || '未知原因')}</div></div>
+    </div>`;
+  }
+  const r = job.result || {};
+  if (label === '测试数据') {
+    const rv = r.run_verification;
+    // 老数据没有 run_verification 字段：不显示"未经标程实跑"，否则会被误读成本次校验失败
+    let extra = '';
+    if (rv && rv.engaged) {
+      const v = rv.verdicts || {};
+      extra = `；标程实跑 ${v.agree || 0} 条一致`
+        + (v.corrected ? `、修正 ${v.corrected} 条` : '')
+        + (v.conflict ? `、剔除 ${v.conflict} 条冲突` : '');
+    } else if (rv) {
+      extra = `；本次未经标程实跑（${esc(rv.reason || '参考解不可用')}）`;
+    }
+    return `<div class="job done" id="${id}">
+      <span class="job-ico">${ICONS.check}</span>
+      <div>已入库 v${r.version}：<b>${r.accepted}</b> 条通过复核，${r.rejected} 条被剔除${extra}</div>
+    </div>`;
+  }
+  if (r.caught) {
+    return `<div class="job done" id="${id}">
+      <span class="job-ico">${ICONS.check}</span>
+      <div>已入库 <b>${r.caught}</b> 条能卡住该错解的用例${
+        r.total > r.caught ? `（另有 ${r.total - r.caught} 条被复核驳回）` : ''}</div>
+    </div>`;
+  }
+  // caught=0 不一定是失败：模型可能正确判断这份代码在题面约束下没有 bug
+  const why = (r.diagnosis && r.diagnosis.divergence)
+    ? String(r.diagnosis.divergence).slice(0, 200)
+    : (r.message || '没有找到能卡住这份代码的输入');
+  return `<div class="job" id="${id}">
+    <span class="job-ico">${ICONS.info}</span>
+    <div><b>没有生成对抗用例</b><div class="why">${esc(why)}</div></div>
+  </div>`;
+}
+
+function qualityPanel(d) {
+  const q = d.quality || {};
+  const rv = q.run_verification;
+  if (!rv) return '';
+  const v = rv.verdicts || {};
+  const facts = [];
+  if (q.model) facts.push(`模型 ${esc(q.model)}`);
+  if (q.calls) facts.push(`${q.calls} 次调用`);
+  if (q.tokens) facts.push(`${num(q.tokens)} tokens`);
+  return `
+    <details class="card">
+      <summary>
+        <span class="pill ${rv.engaged ? 'ok' : 'warn'} plain">${rv.engaged ? '标程实跑已启用' : '未经标程实跑'}</span>
+        <span>样例 ${esc(rv.samples || '—')}</span>
+        <span>· 一致 ${v.agree || 0}</span>
+        <span>· 修正 ${v.corrected || 0}</span>
+        <span>· 剔除 ${v.conflict || 0}</span>
+        <span class="spacer"></span>
+        <span class="mono">${esc(String(rv.code_hash || '').slice(0, 10))}</span>
+      </summary>
+      <div class="details-body">
+        ${rv.engaged ? '' : `<div class="notice warn">${esc(rv.reason || '参考解不可用')}</div>`}
+        <div class="muted">参考解代码已存档，不在界面展示；本页只保留核对结果与 code_hash。</div>
+        ${facts.length ? `<div class="muted">${facts.join(' · ')}</div>` : ''}
+      </div>
+    </details>`;
+}
+
+function legend() {
+  return `<details class="legend">
+    <summary>这些数字怎么看？</summary>
+    <dl>
+      <dt>数据条数</dt><dd>当前版本可用于判题的用例总数，按样例 / 边界 / 典型 / 压力 / 陷阱分层。</dd>
+      <dt>双模型一致</dt><dd>生成与复核是两段独立对话，两边算出同一个答案。占多数说明这批数据一致性好。</dd>
+      <dt>标程实跑</dt><dd>另写一份参考解在评测机上真跑，用真实输出核对期望值。这类数据可信度最高。</dd>
+      <dt>题面样例</dt><dd>直接取自题面，最可信，但数量少、覆盖不了边界和陷阱。</dd>
+    </dl>
+  </details>`;
+}
+
+function renderDataTab(d) {
+  if (!d.version) {
+    return `<div class="panel">
+      <h3>这道题还没有测试数据</h3>
+      <div class="hint">点「生成测试数据」后会走三步，每条数据都要过两道独立核算才会入库：</div>
+      <ol class="flow" style="margin:0 0 14px; padding-left:18px; color:var(--muted); font-size:12.5px; line-height:1.95">
+        <li><b style="color:var(--ink)">生成</b>　按题面写分层用例（样例 / 边界 / 典型 / 压力 / 陷阱）</li>
+        <li><b style="color:var(--ink)">复核</b>　另一段独立上下文逐条重算期望输出</li>
+        <li><b style="color:var(--ink)">复算</b>　用标程在评测机上真跑，核对最终结果</li>
+      </ol>
+      <button class="btn primary" id="btn-gen-2">生成测试数据</button>
+    </div>`;
+  }
+  const chips = ['', 'sample', 'boundary', 'typical', 'stress', 'trap'].map(name => {
+    const n = name ? (d.layers[name] || 0) : d.total_cases;
+    return `<button class="chip ${S.layer === name ? 'active' : ''}" data-layer="${name}">
+      ${esc(name ? LAYER_TEXT[name] : '全部')}<span class="n">${n}</span></button>`;
+  }).join('');
+
+  const other = (d.trusts.partial || 0) + (d.trusts.unreviewed || 0);
+  const tiles = `
+    <div class="tiles">
+      <div class="tile accent"><div class="n">${d.total_cases}</div><div class="k">数据条数</div></div>
+      <div class="tile"><div class="n ${d.trusts.cross_verified ? '' : 'zero'}">${d.trusts.cross_verified || 0}</div><div class="k">双模型一致</div></div>
+      <div class="tile"><div class="n ${d.trusts.reference_only ? '' : 'zero'}">${d.trusts.reference_only || 0}</div><div class="k">标程实跑</div></div>
+      <div class="tile"><div class="n ${d.trusts.sample ? '' : 'zero'}">${d.trusts.sample || 0}</div><div class="k">题面样例</div></div>
+      ${other ? `<div class="tile warn"><div class="n">${other}</div><div class="k">待复核</div></div>` : ''}
+    </div>`;
+
+  const rows = S.cases.items.map(item => `
+    <tr>
+      <td><span class="pill plain">${esc(LAYER_TEXT[item.layer] || item.layer)}</span></td>
+      <td class="mono" style="color:var(--faint)">${esc(item.size_class || '—')}</td>
+      <td><pre class="io">${esc(item.input)}</pre></td>
+      <td><pre class="io">${esc(item.expected_output)}</pre></td>
+      <td><span class="pill ${item.trust === 'unreviewed' ? 'warn' : 'ok'}">${esc(TRUST_TEXT[item.trust] || item.trust || '—')}</span></td>
+    </tr>`).join('');
+
+  return `
+    ${tiles}
+    ${legend()}
+    <div class="data-bar">
+      <div class="chips">${chips}</div>
+      <div class="export">
+        <button class="btn sm" id="btn-export-json">导出 JSON</button>
+        <button class="btn sm" id="btn-export-csv">导出 CSV</button>
+      </div>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th style="width:76px">层</th><th style="width:76px">规模</th><th>输入</th><th>期望输出</th><th style="width:104px">可信度</th></tr></thead>
+        <tbody>${rows || '<tr><td colspan="5" class="muted" style="padding:18px 13px">这一层没有数据</td></tr>'}</tbody>
+      </table>
+    </div>
+    <div class="pager">
+      <span class="range">${S.cases.total ? S.offset + 1 : 0}–${Math.min(S.offset + S.limit, S.cases.total)} / ${S.cases.total}</span>
+      <button class="btn sm" id="prev" ${S.offset <= 0 ? 'disabled' : ''}>上一页</button>
+      <button class="btn sm" id="next" ${S.offset + S.limit >= S.cases.total ? 'disabled' : ''}>下一页</button>
+    </div>`;
+}
+
+function renderAdvTab(busy) {
+  // 每行一个 span：行号列固定宽度，代码横向滚动时不跟着跑
+  const codeLines = (code) => String(code || '').split('\n').map((line, i) =>
+    `<span class="cl"><i>${i + 1}</i>${esc(line) || ' '}</span>`).join('');
+
+  const caseCard = (item, index) => `
+    <div class="adv-case">
+      <div class="head">
+        <span class="idx">#${index + 1}</span>
+        <span class="pill bad">${esc(item.verdict || 'WA')}</span>
+        ${item.targets ? `<span class="muted">${esc(item.targets)}</span>` : ''}
+        <span class="pill ${item.review === 'accept' ? 'ok' : 'warn'}">复核 ${esc(item.review || '无')}</span>
+      </div>
+      <div class="adv-fields">
+        <div><div class="lbl">输入</div><pre class="io">${esc(item.input)}</pre></div>
+        <div><div class="lbl">期望输出</div><pre class="io">${esc(item.expected_output)}</pre></div>
+        <div><div class="lbl">学生实际输出</div><pre class="io">${esc(item.actual_output)}</pre></div>
+      </div>
+      <div class="adv-reason"><b>错误原因${
+        item.reason_is_fallback ? '（旧数据，只有目标描述）' : ''}</b>${
+        esc(item.failure_reason || '模型没有给出这条的错误原因')}</div>
+    </div>`;
+
+  // 按"哪份错解"分组：同题多份错解的用例不能混在一屏，
+  // 否则会以为这次提交又生成了这么多条
+  const groups = [];
+  const at = {};
+  for (const item of S.adv) {
+    const key = item.submission_id;
+    if (!(key in at)) {
+      at[key] = groups.length;
+      groups.push({ id: key, lang: item.lang, items: [] });
+    }
+    groups[at[key]].items.push(item);
+  }
+  const subs = new Map((S.advSubs || []).map(item => [item.id, item]));
+
+  const archived = groups.map((g, index) => {
+    const sub = subs.get(g.id) || {};
+    const diag = sub.diagnosis || {};
+    const code = sub.code || '';
+    const lang = sub.lang || g.lang || '?';
+    const head = String(code || '').replace(/\s+/g, ' ').slice(0, 90);
+    return `
+    <details class="adv-group" ${index === 0 ? 'open' : ''}>
+      <summary>
+        <span class="pill plain">错解 #${g.id}</span>
+        <span class="pill plain">${esc(lang)}</span>
+        <span class="adv-code">${esc(head) || '（源码不可用）'}</span>
+        <span class="muted">${g.items.length} 条</span>
+      </summary>
+      <div class="adv-body">
+        <div class="adv-code-pane">
+          <div class="pane-head">
+            <span class="tag">错解代码</span>
+            <span class="lang">${esc(lang)}</span>
+            <span class="spacer"></span>
+            ${code ? `<button type="button" data-copy="${g.id}">复制</button>` : ''}
+          </div>
+          ${code
+            ? `<div class="adv-code-scroll"><pre class="adv-code-pre">${codeLines(code)}</pre></div>
+               ${sub.truncated ? '<div class="absent">代码过长，只显示前 12000 字符</div>' : ''}`
+            : `<div class="absent">这份错解的源码没有取到（可能已被清理），只能看右侧数据。</div>`}
+        </div>
+        <div class="adv-data-pane">
+          ${diag.divergence
+            ? `<div class="adv-diag"><b>整体判断</b><span>${esc(diag.divergence)}${
+                diag.trigger_condition ? '；触发条件：' + esc(diag.trigger_condition) : ''}</span></div>`
+            : ''}
+          ${g.items.map(caseCard).join('')}
+        </div>
+      </div>
+    </details>`;
+  }).join('');
+
+  return `
+    <div class="panel">
+      <h3>用一份错解生成对抗数据</h3>
+      <div class="hint">粘贴一份能通过题面样例、但逻辑有漏洞的代码。系统会编译、真跑，只保留能卡住它的输入。</div>
+      <details class="mini-help">
+        <summary>不知道写什么错解？</summary>
+        <ul>
+          <li><b>边界少算</b>：循环从 1 开始、漏掉最后一个元素</li>
+          <li><b>初始值错</b>：最大值初始化成 0，遇到全负数就错</li>
+          <li><b>类型溢出</b>：C / C++ 用 int 存两个 10⁹ 相加</li>
+          <li><b>负数取模</b>：C 里 <code>-3 % 2 == -1</code>，不能当偶数</li>
+          <li><b>特殊值</b>：n=1、空输入、全零没有单独处理</li>
+        </ul>
+        <div class="muted">前提：这份代码必须能通过题面样例。样例就错的代码不需要对抗数据，系统会直接拒绝。</div>
+      </details>
+      <textarea id="adv-code" placeholder="粘贴学生错解">${esc(S.advCode)}</textarea>
+      <div class="row" style="margin-top:9px">
+        <select id="adv-lang">
+          <option value="python" ${S.advLang === 'python' ? 'selected' : ''}>Python</option>
+          <option value="cpp" ${S.advLang === 'cpp' ? 'selected' : ''}>C++</option>
+          <option value="c" ${S.advLang === 'c' ? 'selected' : ''}>C</option>
+        </select>
+        <button class="btn primary" id="btn-adv" ${busy ? 'disabled' : ''}>生成对抗数据</button>
+      </div>
+    </div>
+    ${archived || `<div class="empty compact"><h3>还没有对抗数据</h3><p>上面提交一份错解，系统会找出能卡住它的输入。</p></div>`}`;
+}
+
+function bindDetail() {
+  const gen = $('btn-gen');
+  if (gen) gen.addEventListener('click', startDataset);
+  const gen2 = $('btn-gen-2');
+  if (gen2) gen2.addEventListener('click', startDataset);
+  const cancel = $('btn-cancel');
+  if (cancel) cancel.addEventListener('click', cancelJob);
+  const del = $('btn-delete');
+  if (del) del.addEventListener('click', deleteProblem);
+  document.querySelectorAll('.tab').forEach(tab => {
+    tab.addEventListener('click', () => { S.tab = tab.dataset.tab; renderDetail(); });
+  });
+  document.querySelectorAll('.chip[data-layer]').forEach(chip => {
+    chip.addEventListener('click', () => {
+      S.layer = chip.dataset.layer;
+      S.offset = 0;
+      refreshDetail();
+    });
+  });
+  const adv = $('btn-adv');
+  if (adv) adv.addEventListener('click', startAdversarial);
+  // 错解代码面板的复制按钮：代码在 S.advSubs 里，不重复塞进 DOM 属性
+  document.querySelectorAll('[data-copy]').forEach(button => {
+    button.addEventListener('click', async () => {
+      const sub = (S.advSubs || []).find(item => String(item.id) === button.dataset.copy);
+      if (!sub) return;
+      try {
+        await navigator.clipboard.writeText(sub.code || '');
+        toast('代码已复制');
+      } catch (error) {
+        toast('浏览器不允许自动复制，请手动选中代码');
+      }
+    });
+  });
+  const exJson = $('btn-export-json');
+  if (exJson) exJson.addEventListener('click', () => downloadExport('json'));
+  const exCsv = $('btn-export-csv');
+  if (exCsv) exCsv.addEventListener('click', () => downloadExport('csv'));
+}
+
+function bindPager() {
+  const prev = $('prev');
+  if (prev) prev.addEventListener('click', () => {
+    S.offset = Math.max(0, S.offset - S.limit);
+    refreshDetail();
+  });
+  const next = $('next');
+  if (next) next.addEventListener('click', () => {
+    S.offset += S.limit;
+    refreshDetail();
+  });
+}
+
+// ── 生成任务 ────────────────────────────────────────────────────────────────
+async function startDataset() {
+  if (!S.current) return;
+  const buttons = [$('btn-gen'), $('btn-gen-2')].filter(Boolean);
+  buttons.forEach(button => { button.disabled = true; });
+  try {
+    await post('/api/problems/' + S.current + '/datasets', {});
+    toast('已启动，正在生成测试数据');
+    await refreshDetail();
+  } catch (error) {
+    toast(error.message);
+    buttons.forEach(button => { button.disabled = false; });
+  }
+}
+
+async function startAdversarial() {
+  if (!S.current) return;
+  const code = $('adv-code').value;
+  if (!code.trim()) { toast('请先粘贴错解代码'); return; }
+  const button = $('btn-adv');
+  if (button) { button.disabled = true; button.textContent = '提交中…'; }
+  try {
+    await post('/api/problems/' + S.current + '/submissions', {
+      lang: $('adv-lang').value, code: code,
+    });
+    toast('已提交，正在编译并构造对抗数据');
+    await refreshDetail();
+  } catch (error) {
+    toast(error.message);
+    if (button && document.body.contains(button)) {
+      button.disabled = false; button.textContent = '生成对抗数据';
+    }
+  }
+}
+
+async function cancelJob() {
+  if (!S.current) return;
+  try {
+    await post('/api/problems/' + S.current + '/cancel', {});
+    toast('已取消');
+    await refreshDetail();
+    await loadProblems();
+  } catch (error) { toast(error.message); }
+}
+
+// ── 导出 ────────────────────────────────────────────────────────────────────
+async function downloadExport(fmt) {
+  if (!S.current) return;
+  const buttons = [$('btn-export-json'), $('btn-export-csv')].filter(Boolean);
+  buttons.forEach(button => { button.disabled = true; });
+  try {
+    const response = await fetch(`/api/problems/${S.current}/export?format=${fmt}`);
+    if (response.status === 401) { location.replace('/login'); return; }
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      throw new Error(data.error || '导出失败');
+    }
+    const blob = await response.blob();
+    const disposition = response.headers.get('Content-Disposition') || '';
+    const match = /filename="([^"]+)"/.exec(disposition);
+    const name = match ? match[1] : `problem-${S.current}.${fmt}`;
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = name;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+    toast(`已导出 ${name}`);
+  } catch (error) {
+    toast(error.message);
+  } finally {
+    buttons.forEach(button => {
+      if (document.body.contains(button)) button.disabled = false;
+    });
+  }
+}
+
+// ── 删除：有数据的题必须输入名称 ────────────────────────────────────────────
+function openDeleteModal(d) {
+  S.deleteTitle = d.title;
+  $('del-summary').innerHTML = `《${esc(d.title)}》有 <b>${d.total_cases}</b> 条测试数据、`
+    + `<b>${S.adv.length}</b> 条对抗数据。删除后一并消失，无法恢复。`;
+  $('del-target').textContent = `完整名称：${d.title}`;
+  $('del-title').value = '';
+  $('btn-del-confirm').disabled = true;
+  $('modal-delete').classList.remove('hidden');
+  $('del-title').focus();
+}
+
+function closeDeleteModal() {
+  $('modal-delete').classList.add('hidden');
+  S.deleteTitle = '';
+}
+
+async function performDelete(confirmTitle) {
+  try {
+    await post('/api/problems/' + S.current + '/delete', { confirm_title: confirmTitle });
+    closeDeleteModal();
+    S.current = null;
+    S.detail = null;
+    emptyDetail();
+    await loadProblems();
+    toast('已删除');
+  } catch (error) {
+    toast(error.message);
+  }
+}
+
+async function deleteProblem() {
+  if (!S.current || !S.detail) return;
+  const d = S.detail;
+  const hasData = d.total_cases > 0 || S.adv.length > 0;
+  if (hasData) { openDeleteModal(d); return; }
+  if (!confirm('删除这道还没有数据的题？')) return;
+  await performDelete('');
+}
+
+// ── 任务轮询：刷新页面后仍然接管正在跑的任务 ────────────────────────────────
+function ensurePolling() {
+  if (!S.detail) return;
+  for (const kind of ['dataset', 'adversarial']) {
+    const job = (S.detail.jobs || {})[kind] || {};
+    if (job.status === 'running' && job.job_id && job.job_id !== S.pollJobId) {
+      startPolling(Number(job.job_id), S.current, kind);
+      return;
+    }
+  }
+}
+
+function startPolling(jobId, problemId, kind) {
+  clearInterval(S.timer);
+  S.pollJobId = jobId;
+  S.pollProblemId = problemId;
+  S.pollMisses = 0;
+  const label = kind === 'dataset' ? '测试数据' : '对抗数据';
+  S.timer = setInterval(async () => {
+    let job = null;
+    let failure = '';
+    try {
+      job = await api('/api/jobs/' + jobId);
+    } catch (error) {
+      failure = error.message || '连接中断';
+    }
+    const sameProblem = S.current === problemId && S.detail && S.detail.id === problemId;
+    if (failure) {
+      // 服务重启、网络抖动都会让单次请求失败。只失败一次就停，界面会永远停在
+      // 「正在生成」且再也不会自己恢复——那才是真正的卡死。这里继续重试。
+      S.pollMisses += 1;
+      if (S.pollMisses >= POLL_MAX_MISSES) {
+        clearInterval(S.timer); S.timer = null; S.pollJobId = 0;
+        toast('连不上服务器，任务状态未知，请刷新页面');
+        return;
+      }
+      if (sameProblem) {
+        const box = $('job-' + kind);
+        if (box) {
+          box.outerHTML = jobLine(
+            { status: 'offline', job_id: jobId, misses: S.pollMisses, error: failure }, label, kind
+          );
+        }
+      }
+      return;
+    }
+    S.pollMisses = 0;
+    if (job.status === 'running') {
+      // 只替换任务条，不整页重绘：整页重绘会把正在输入的对抗代码框焦点冲掉
+      if (sameProblem) {
+        const box = $('job-' + kind);
+        if (box) box.outerHTML = jobLine({ ...job, status: 'running', job_id: jobId }, label, kind);
+      }
+      return;
+    }
+    clearInterval(S.timer); S.timer = null; S.pollJobId = 0;
+    if (job.status === 'failed' && job.failed_stage !== 'cancelled') toast(job.error || '任务失败');
+    if (sameProblem) await refreshDetail();
+    await loadProblems();
+  }, POLL_MS);
+}
+
+// ── 视图切换：题库 / 导入 ───────────────────────────────────────────────────
+function switchView(name) {
+  const toImport = name === 'import';
+  $('view-bank').classList.toggle('hidden', toImport);
+  $('view-import').classList.toggle('hidden', !toImport);
+  $('nav-bank').classList.toggle('active', !toImport);
+  $('nav-import').classList.toggle('active', toImport);
+  $('search-box').classList.toggle('hidden', toImport);
+  document.title = toImport ? '导入 · 题目数据工坊' : '题目数据工坊';
+  const hash = '#/' + (toImport ? 'import' : 'bank');
+  if (location.hash !== hash) history.replaceState(null, '', hash);
+}
+
+function currentView() {
+  return location.hash === '#/import' ? 'import' : 'bank';
+}
+
+// ── 导入 ────────────────────────────────────────────────────────────────────
+function resetImport() {
+  S.batchId = null; S.segments = [];
+  $('segments').innerHTML = ''; $('seg-msg').textContent = '';
+  $('seg-msg').classList.remove('err');
+  $('raw').value = '';
+  $('file-name').textContent = '';
+  $('src-box').classList.add('hidden');
+  $('src-pre').textContent = '';
+  $('import-actions').classList.add('hidden');
+  $('import-tips').classList.remove('hidden');
+  $('import-form').classList.remove('hidden');
+  $('import-done').classList.add('hidden');
+  $('imp-ok').classList.add('hidden');
+  $('imp-mask').classList.add('hidden');
+  $('btn-confirm').disabled = true;
+}
+
+//: 切题结果统一入口：文件上传与粘贴文本都走这里，避免两套渲染逻辑走岔
+function applySegments(data) {
+  S.batchId = data.batch_id;
+  S.segments = (data.segments || []).map(item => ({ ...item, selected: true }));
+  renderSegments();
+  const warnings = data.warnings || [];
+  $('seg-msg').textContent = `切出 ${S.segments.length} 道题` + (warnings.length ? `，${warnings.length} 条提醒` : '');
+  if (warnings.length) toast(warnings[0]);
+  $('import-actions').classList.remove('hidden');
+  // 结果出来以后说明块和上传表单都没用了，收成一行摘要，让结果和操作条同屏
+  $('import-tips').classList.add('hidden');
+  $('import-form').classList.add('hidden');
+  const src = data.source;
+  const origin = src
+    ? `${src.filename} · ${num(src.chars)} 字`
+    : `粘贴的题面 · ${num(($('raw').value || '').length)} 字`;
+  $('import-done-text').innerHTML = `已识别 <span class="name">${esc(origin)}</span> · 切出 <b>${S.segments.length}</b> 道题`;
+  $('import-done').classList.remove('hidden');
+  if (src) {
+    $('src-box').classList.remove('hidden');
+    $('src-summary').textContent = `查看抽取的原文 · ${src.filename} · ${src.chars} 字`;
+    $('src-pre').textContent = src.preview || src.text || '';
+  }
+}
+
+async function doSegment() {
+  const button = $('btn-segment');
+  button.disabled = true;
+  $('imp-ok').classList.add('hidden');
+  $('seg-msg').classList.remove('err');
+  $('seg-msg').textContent = '';
+
+  const started = performance.now();
+  const chars = num(($('raw').value || '').length);
+  impOpen('正在切题');
+  impStep(0, 'done', '粘贴文本');
+  impStep(1, 'done', `${chars} 字`);
+  impBar(66);
+  impStep(2, 'run');
+  impNote('模型正在判断题目边界，通常几秒到几十秒…');
+
+  try {
+    const data = await post('/api/import/text', {
+      text: $('raw').value,
+      source_name: $('file-name').textContent,
+    });
+    if (data && data.error) return impFail(data.error, 2);
+    const seconds = ((performance.now() - started) / 1000).toFixed(1);
+    const total = (data.segments || []).length;
+    impStep(2, 'done', `${total} 道题`);
+    applySegments(data);
+    impSucceed(`切出 ${total} 道题，用时 ${seconds}s`);
+    $('imp-ok-title').textContent = `导入成功 · ${total} 道题`;
+    $('imp-ok-sub').textContent = `粘贴文本 · 用时 ${seconds}s`;
+    $('imp-ok').classList.remove('hidden');
+    setTimeout(() => $('segments').scrollIntoView({ behavior: 'smooth', block: 'start' }), 1150);
+  } catch (error) {
+    // toast 只活 3 秒，长的错误信息会看不完；遮罩里留着让人能读完
+    impFail(error.message, 2);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+function renderSegments() {
+  $('segments').innerHTML = S.segments.map((item, index) => `
+    <label class="seg ${item.selected ? 'picked' : ''}">
+      <input type="checkbox" data-index="${index}" ${item.selected ? 'checked' : ''} />
+      <div class="seg-main">
+        <div class="seg-title">${esc(item.title)}</div>
+        <div class="seg-meta">
+          <span>行 ${esc(item.lines)}</span><i></i>
+          <span>${item.chars} 字</span><i></i>
+          <span>样例 ${item.samples} 组</span><i></i>
+          ${item.figures ? `<span>图 ${item.figures} 张</span><i></i>` : ''}
+          <span>判定 ${esc(item.judge_type)}</span><i></i>
+          <span>置信度 ${esc(item.confidence)}</span>
+          ${item.note ? `<i></i><span class="warn-text">${esc(item.note)}</span>` : ''}
+        </div>
+      </div>
+    </label>`).join('');
+  document.querySelectorAll('#segments input[type=checkbox]').forEach(box => {
+    box.addEventListener('change', () => {
+      S.segments[Number(box.dataset.index)].selected = box.checked;
+      updateConfirmState();
+    });
+  });
+  updateConfirmState();
+}
+
+function updateConfirmState() {
+  const picked = S.segments.filter(item => item.selected).length;
+  $('btn-confirm').disabled = picked === 0;
+  $('selected-count').textContent = S.segments.length
+    ? `已选 ${picked} / ${S.segments.length} 道`
+    : '';
+  document.querySelectorAll('#segments .seg').forEach((node, index) => {
+    node.classList.toggle('picked', !!(S.segments[index] && S.segments[index].selected));
+  });
+}
+
+async function doConfirm() {
+  if (!S.batchId) return;
+  const indices = S.segments.map((item, index) => item.selected ? index + 1 : null).filter(Boolean);
+  const button = $('btn-confirm');
+  button.disabled = true;
+  try {
+    const data = await post('/api/import/' + S.batchId + '/confirm', { indices: indices });
+    const imported = data.imported || [];
+    const duplicates = data.duplicates || [];
+    resetImport();
+    switchView('bank');
+    await loadProblems();
+    if (imported.length) {
+      toast(`已入库 ${imported.length} 道` + (duplicates.length ? `，${duplicates.length} 道重复已跳过` : ''));
+      await openProblem(imported[0].problem_id);
+    } else {
+      toast(duplicates.length ? '这些题已经在题库里了' : '没有入库任何题目');
+    }
+  } catch (error) {
+    toast(error.message);
+    button.disabled = false;
+  }
+}
+
+// ── 事件绑定 ────────────────────────────────────────────────────────────────
+$('nav-bank').addEventListener('click', () => switchView('bank'));
+$('nav-import').addEventListener('click', () => switchView('import'));
+$('btn-reset').addEventListener('click', resetImport);
+$('btn-reimport').addEventListener('click', () => {
+  resetImport();
+  const box = document.querySelector('.import-page');
+  if (box) box.scrollTop = 0;
+});
+$('btn-segment').addEventListener('click', doSegment);
+$('btn-confirm').addEventListener('click', doConfirm);
+window.addEventListener('hashchange', () => switchView(currentView()));
+
+function toBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const raw = String(reader.result || '');
+      resolve(raw.slice(raw.indexOf(',') + 1));
+    };
+    reader.onerror = () => reject(new Error('读取文件失败'));
+    reader.readAsDataURL(file);
+  });
+}
+
+// ── 导入进度：进度条只按"阶段真正完成"推进，不用假百分比 ───────────────────
+const IMP_STEPS = ['imp-s1', 'imp-s2', 'imp-s3'];
+
+function fmtSize(bytes) {
+  const size = Number(bytes || 0);
+  if (size >= 1048576) return (size / 1048576).toFixed(1) + ' MB';
+  if (size >= 1024) return Math.round(size / 1024) + ' KB';
+  return size + ' B';
+}
+
+function impOpen(title) {
+  $('imp-card').classList.remove('ok', 'bad');
+  $('imp-title-text').textContent = title || '正在导入';
+  IMP_STEPS.forEach((id) => {
+    $(id).dataset.state = 'wait';
+    $(id).querySelector('em').textContent = '';
+  });
+  $('imp-bar-fill').style.width = '4%';
+  $('imp-note').classList.remove('err');
+  $('imp-note').textContent = '准备中…';
+  $('imp-foot').classList.add('hidden');
+  $('imp-mask').classList.remove('hidden');
+}
+
+function impStep(index, state, detail) {
+  const node = $(IMP_STEPS[index]);
+  node.dataset.state = state;
+  if (detail !== undefined) node.querySelector('em').textContent = detail;
+}
+
+function impBar(percent) {
+  $('imp-bar-fill').style.width = Math.max(4, Math.min(100, percent)) + '%';
+}
+
+function impNote(text) {
+  $('imp-note').classList.remove('err');
+  $('imp-note').textContent = text;
+}
+
+function impSucceed(summary) {
+  $('imp-card').classList.add('ok');
+  $('imp-title-text').textContent = '导入完成';
+  IMP_STEPS.forEach((id) => { $(id).dataset.state = 'done'; });
+  impBar(100);
+  $('imp-note').textContent = summary;
+  setTimeout(() => $('imp-mask').classList.add('hidden'), 1100);
+}
+
+function impFail(message, stepIndex) {
+  $('imp-card').classList.add('bad');
+  $('imp-title-text').textContent = '导入失败';
+  if (typeof stepIndex === 'number') $(IMP_STEPS[stepIndex]).dataset.state = 'fail';
+  $('imp-note').classList.add('err');
+  $('imp-note').textContent = message;
+  $('imp-foot').classList.remove('hidden');
+  $('imp-close').onclick = () => $('imp-mask').classList.add('hidden');
+  toast(message);
+}
+async function uploadFile(file) {
+  $('file-name').textContent = file.name;
+  $('segments').innerHTML = '';
+  $('import-actions').classList.add('hidden');
+  $('src-box').classList.add('hidden');
+  $('imp-ok').classList.add('hidden');
+  $('seg-msg').classList.remove('err');
+  $('seg-msg').textContent = '';
+  $('btn-confirm').disabled = true;
+
+  const started = performance.now();
+  const sizeText = file.size ? fmtSize(file.size) : '';
+  impOpen('正在导入');
+  impStep(0, 'run', sizeText);
+  impNote('正在读取本地文件…');
+
+  let contentB64;
+  try {
+    contentB64 = await toBase64(file);
+  } catch (error) {
+    return impFail(error.message, 0);
+  }
+  impStep(0, 'done', sizeText);
+  impBar(33);
+
+  // 第一阶段：抽文字 + 图块坐标（这一步是纯本地解析，很快但必须真实完成再往下走）
+  impStep(1, 'run');
+  impNote('正在解析文档，抽出文字与插图坐标…');
+  let prepared;
+  try {
+    prepared = await post('/api/import/extract', {
+      filename: file.name,
+      content_b64: contentB64,
+    });
+  } catch (error) {
+    return impFail(error.message, 1);
+  }
+  if (prepared.error) return impFail(prepared.error, 1);
+
+  const blockCount = Array.isArray(prepared.figures) ? prepared.figures.length : 0;
+  impStep(1, 'done', `${num(prepared.chars)} 字${blockCount ? ` · ${blockCount} 个图块` : ''}`);
+  impBar(66);
+
+  // 第二阶段：模型切题（耗时主要在这一次调用）
+  impStep(2, 'run');
+  impNote('模型正在判断题目边界，通常几秒到几十秒…');
+  let data;
+  try {
+    data = await post('/api/import/text', {
+      text: prepared.text,
+      source_name: prepared.filename || file.name,
+      kind: 'file',
+      figures: prepared.figures || [],
+      page_ranges: prepared.page_ranges || [],
+      pdf_key: prepared.pdf_key || '',
+    });
+  } catch (error) {
+    return impFail(error.message, 2);
+  }
+  if (data && data.error) return impFail(data.error, 2);
+
+  // 两段式调用不会自带 source，补回去，让结果摘要和一步式一致
+  data.source = data.source || {
+    filename: prepared.filename || file.name,
+    chars: prepared.chars,
+    preview: prepared.text,
+  };
+
+  const seconds = ((performance.now() - started) / 1000).toFixed(1);
+  const segments = data.segments || [];
+  const withFigs = segments.filter((item) => Number(item.figures) > 0);
+  const figTotal = withFigs.reduce((sum, item) => sum + Number(item.figures), 0);
+
+  impStep(2, 'done', `${segments.length} 道题`);
+  applySegments(data);
+  impSucceed(
+    `切出 ${segments.length} 道题` +
+    (figTotal ? `，${withFigs.length} 道题带图（共 ${figTotal} 张）` : '，本卷没有插图') +
+    `，用时 ${seconds}s`
+  );
+
+  $('imp-ok-title').textContent = `导入成功 · ${segments.length} 道题`;
+  $('imp-ok-sub').textContent = figTotal
+    ? `${withFigs.length} 道题带图（共 ${figTotal} 张）· 用时 ${seconds}s`
+    : `本卷没有插图 · 用时 ${seconds}s`;
+  $('imp-ok').classList.remove('hidden');
+  setTimeout(() => $('segments').scrollIntoView({ behavior: 'smooth', block: 'start' }), 1150);
+}
+
+$('dropzone').addEventListener('click', () => $('file').click());
+$('dropzone').addEventListener('keydown', (event) => {
+  if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); $('file').click(); }
+});
+$('file').addEventListener('change', (event) => {
+  const input = event.target;
+  const file = input.files && input.files[0];
+  input.value = '';
+  if (file) uploadFile(file);
+});
+
+// 拖拽上传：dragover 必须 preventDefault，否则浏览器会直接打开文件
+['dragenter', 'dragover'].forEach(name => $('dropzone').addEventListener(name, (event) => {
+  event.preventDefault();
+  $('dropzone').classList.add('over');
+}));
+['dragleave', 'dragend'].forEach(name => $('dropzone').addEventListener(name, () => {
+  $('dropzone').classList.remove('over');
+}));
+$('dropzone').addEventListener('drop', (event) => {
+  event.preventDefault();
+  $('dropzone').classList.remove('over');
+  const file = event.dataTransfer && event.dataTransfer.files && event.dataTransfer.files[0];
+  if (file) uploadFile(file);
+});
+
+// ── 问题反馈 ────────────────────────────────────────────────────────────────
+const FB_KIND = { bug: '问题', idea: '建议', other: '其他' };
+const FB_STATUS = { open: '待处理', answered: '已回复', closed: '已解决' };
+let fbFilter = '';
+
+function fbTime(text) {
+  return String(text || '').replace('T', ' ').slice(5, 16);
+}
+
+async function openFeedback() {
+  $('modal-feedback').classList.remove('hidden');
+  S.feedbackOpen = true;
+  $('fb-msg').textContent = '';
+  await loadFeedback();
+}
+
+function closeFeedback() {
+  $('modal-feedback').classList.add('hidden');
+  S.feedbackOpen = false;
+}
+
+async function loadFeedback() {
+  const query = fbFilter ? `?status=${fbFilter}` : '';
+  try {
+    renderFeedback(await api('/api/feedback' + query));
+  } catch (error) {
+    toast(error.message);
+  }
+}
+
+function renderFeedback(data) {
+  const admin = S.role === 'admin';
+  const tabs = [['', '全部'], ['open', '待处理'], ['answered', '已回复'], ['closed', '已解决']];
+  $('fb-tabs').innerHTML = tabs.map(([key, label]) => {
+    const count = key ? (data.stats || {})[key] || 0 : (data.total || 0);
+    return `<button class="chip ${fbFilter === key ? 'active' : ''}" data-fb-tab="${key}">`
+      + `${label}<span class="n">${count}</span></button>`;
+  }).join('');
+  $('fb-tabs').querySelectorAll('[data-fb-tab]').forEach((button) => {
+    button.addEventListener('click', () => { fbFilter = button.dataset.fbTab; loadFeedback(); });
+  });
+
+  if (!data.items || !data.items.length) {
+    $('fb-list').innerHTML = '<div class="fb-empty">还没有记录。遇到问题或想到改进，就在上面写一条。</div>';
+    return;
+  }
+
+  $('fb-list').innerHTML = data.items.map((item) => {
+    const replies = (item.replies || []).map((reply) => `
+      <div class="fb-reply ${reply.role === 'admin' ? 'admin' : ''}">
+        <div class="who">${reply.role === 'admin' ? '管理员' : '我'} · ${esc(fbTime(reply.created_at))}</div>
+        <div class="text">${esc(reply.body)}</div>
+      </div>`).join('');
+    const canClose = admin || item.user === S.user;
+    const actions = item.status === 'closed' ? '' : `
+        <div class="fb-actions">
+          <input id="fb-reply-${item.id}" maxlength="2000" placeholder="${admin ? '回复这个同学…' : '补充说明…'}" />
+          <button class="btn" data-fb-reply="${item.id}">发送</button>
+          ${canClose ? `<button class="btn ghost" data-fb-close="${item.id}">标记已解决</button>` : ''}
+        </div>`;
+    return `
+      <div class="fb-item">
+        <div class="head">
+          <span class="fb-status ${esc(item.status)}">${esc(FB_STATUS[item.status] || item.status)}</span>
+          <span class="title">${esc(item.title)}</span>
+          <span class="meta">${esc(admin ? (item.name || item.user) : FB_KIND[item.kind])} · ${esc(fbTime(item.created_at))}</span>
+        </div>
+        <div class="body">${esc(item.body)}</div>
+        ${replies}${actions}
+      </div>`;
+  }).join('');
+
+  $('fb-list').querySelectorAll('[data-fb-reply]').forEach((button) => {
+    button.addEventListener('click', () => sendFeedbackReply(Number(button.dataset.fbReply)));
+  });
+  $('fb-list').querySelectorAll('[data-fb-close]').forEach((button) => {
+    button.addEventListener('click', () => closeFeedbackItem(Number(button.dataset.fbClose)));
+  });
+}
+
+async function submitFeedback() {
+  const title = $('fb-title').value.trim();
+  const body = $('fb-body').value.trim();
+  if (title.length < 4) { $('fb-msg').textContent = '标题至少 4 个字'; return; }
+  if (body.length < 5) { $('fb-msg').textContent = '再写几句具体情况'; return; }
+  $('fb-msg').textContent = '提交中…';
+  try {
+    await post('/api/feedback', { kind: $('fb-kind').value, title, body });
+    $('fb-title').value = '';
+    $('fb-body').value = '';
+    $('fb-msg').textContent = '已提交，管理员回复后会显示在这里';
+    await loadFeedback();
+  } catch (error) {
+    $('fb-msg').textContent = error.message;
+  }
+}
+
+async function sendFeedbackReply(id) {
+  const input = $(`fb-reply-${id}`);
+  const body = input ? input.value.trim() : '';
+  if (!body) return;
+  try {
+    await post(`/api/feedback/${id}/replies`, { body });
+    await loadFeedback();
+  } catch (error) { toast(error.message); }
+}
+
+async function closeFeedbackItem(id) {
+  try {
+    await post(`/api/feedback/${id}/close`, {});
+    await loadFeedback();
+  } catch (error) { toast(error.message); }
+}
+
+async function refreshFeedbackBadge() {
+  if (S.role !== 'admin') return;
+  try {
+    const data = await api('/api/feedback?status=open&limit=1');
+    const count = (data.stats || {}).open || 0;
+    const badge = $('fb-badge');
+    badge.textContent = String(count);
+    badge.classList.toggle('hidden', count <= 0);
+  } catch (error) { /* 角标失败不打扰主流程 */ }
+}
+
+$('btn-feedback').addEventListener('click', openFeedback);
+$('close-feedback').addEventListener('click', closeFeedback);
+$('modal-feedback').addEventListener('click', (event) => {
+  if (event.target === $('modal-feedback')) closeFeedback();
+});
+$('btn-fb-submit').addEventListener('click', submitFeedback);
+
+// ── 模型设置 ────────────────────────────────────────────────────────────────
+const KEY_SOURCE_TEXT = { user: '你自己的 Key', missing: '尚未配置' };
+
+async function openSettings() {
+  $('modal-settings').classList.remove('hidden');
+  S.settingsOpen = true;
+  $('st-key').value = '';
+  $('st-msg').textContent = '';
+  try {
+    const d = await api('/api/settings');
+    $('st-base').value = d.base_url || '';
+    $('st-model').value = d.model || '';
+    $('st-key').placeholder = d.configured
+      ? `已配置 ${d.api_key_masked}，留空表示不修改`
+      : '粘贴你的 API Key';
+    $('btn-clear-key').disabled = !d.configured;
+    const text = d.hint || `账号 ${d.user} 的 Key：${d.api_key_masked}（只有你自己能用，别人看不到也用不了）`;
+    $('st-hint').innerHTML = `<span class="dot ${d.configured ? 'ready' : 'failed'}"></span><span>${esc(text)}</span>`;
+  } catch (error) {
+    toast(error.message);
+  }
+}
+
+function closeSettings() {
+  $('modal-settings').classList.add('hidden');
+  S.settingsOpen = false;
+}
+
+function settingsPayload(extra) {
+  return Object.assign({
+    api_key: $('st-key').value.trim(),
+    base_url: $('st-base').value.trim(),
+    model: $('st-model').value.trim(),
+  }, extra || {});
+}
+
+$('btn-settings').addEventListener('click', openSettings);
+$('close-settings').addEventListener('click', closeSettings);
+$('modal-settings').addEventListener('click', (event) => {
+  if (event.target === $('modal-settings')) closeSettings();
+});
+$('close-delete').addEventListener('click', closeDeleteModal);
+$('btn-del-cancel').addEventListener('click', closeDeleteModal);
+$('modal-delete').addEventListener('click', (event) => {
+  if (event.target === $('modal-delete')) closeDeleteModal();
+});
+$('del-title').addEventListener('input', () => {
+  $('btn-del-confirm').disabled = $('del-title').value.trim() !== S.deleteTitle;
+});
+$('btn-del-confirm').addEventListener('click', () => {
+  performDelete($('del-title').value.trim());
+});
+// 题面的展开/收起要记住：重建 DOM 后仍按上次的选择渲染
+document.addEventListener('toggle', (event) => {
+  const node = event.target;
+  if (node && node.classList && node.classList.contains('stmt')) {
+    localStorage.setItem('stmt-open', node.open ? '1' : '0');
+  }
+}, true);
+document.addEventListener('keydown', (event) => {
+  if (event.key !== 'Escape') return;
+  if (S.settingsOpen) closeSettings();
+  if (S.feedbackOpen) closeFeedback();
+  if (!$('modal-delete').classList.contains('hidden')) closeDeleteModal();
+});
+
+$('btn-test').addEventListener('click', async () => {
+  const button = $('btn-test');
+  button.disabled = true;
+  $('st-msg').textContent = '正在请求模型…';
+  try {
+    const d = await post('/api/settings/test', settingsPayload());
+    $('st-msg').textContent = `连通 ✓ ${d.model}，${d.elapsed_ms} ms`;
+  } catch (error) {
+    $('st-msg').textContent = '';
+    toast(error.message);
+  } finally {
+    button.disabled = false;
+  }
+});
+
+$('btn-save-settings').addEventListener('click', async () => {
+  const button = $('btn-save-settings');
+  button.disabled = true;
+  try {
+    const d = await post('/api/settings', settingsPayload());
+    toast(d.configured ? '已保存，新的 Key 立即生效' : '已保存，但还没有可用的 Key');
+    closeSettings();
+  } catch (error) {
+    toast(error.message);
+  } finally {
+    button.disabled = false;
+  }
+});
+
+$('btn-clear-key').addEventListener('click', async () => {
+  if (!confirm('清除后页面不再使用这份 Key；若服务器也没配环境变量，生成会直接失败。确定清除？')) return;
+  try {
+    await post('/api/settings', { clear_key: true });
+    toast('已清除页面保存的 Key');
+    closeSettings();
+  } catch (error) {
+    toast(error.message);
+  }
+});
+
+$('btn-logout').addEventListener('click', async () => {
+  await post('/api/logout', {});
+  location.replace('/login');
+});
+
+let searchTimer = null;
+$('q').addEventListener('input', () => {
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(() => loadProblems(), 250);
+});
+
+(async function boot() {
+  let session;
+  try {
+    session = await api('/api/session');
+  } catch (error) { location.replace('/login'); return; }
+  if (!session.authenticated) { location.replace('/login'); return; }
+  S.user = session.user;
+  S.role = session.role || 'student';
+  $('user').textContent = session.name || session.user;
+  $('avatar').textContent = String(session.user || '?').slice(0, 1).toUpperCase();
+  emptyDetail();
+  resetImport();
+  switchView(currentView());
+  await loadProblems();
+  await refreshFeedbackBadge();
+})();
+</script>
+</body>
+</html>

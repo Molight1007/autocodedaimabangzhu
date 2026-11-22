@@ -120,6 +120,8 @@ class ProblemSection:
     slug: str
     lines: List[str]
     source_id: str
+    #: 题目插图（已裁剪落盘）。md 导入路径为空；PDF 路径由 ingest_pdf 填充。
+    figures: List[Dict[str, Any]] = field(default_factory=list)
 
     @property
     def statement_md(self) -> str:
@@ -138,6 +140,7 @@ class IngestedProblem:
     created: bool
     statement_chars: int
     injection_hits: List[str] = field(default_factory=list)
+    figures: List[Dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -149,6 +152,7 @@ class IngestedProblem:
             "created": self.created,
             "statement_chars": self.statement_chars,
             "injection_hits": list(self.injection_hits),
+            "figures": len(self.figures),
         }
 
 
@@ -578,6 +582,37 @@ def _upsert_samples(db: Database, problem_id: int, samples: Sequence[Sample]) ->
             )
 
 
+def _upsert_figures(db: Database, problem_id: int, figures: Sequence[Dict[str, Any]]) -> None:
+    """写入题目插图；按 `label` 覆盖，重复导入不会堆积重复行。
+
+    只删本表旧行，不动 `problems.statement_md` —— 题面永远保持 PDF 原文逐字切片。
+    """
+    if not figures:
+        return
+    now = _now()
+    with db.transaction() as conn:
+        conn.execute("DELETE FROM problem_figures WHERE problem_id = ?", (problem_id,))
+        for ordinal, figure in enumerate(figures, start=1):
+            conn.execute(
+                "INSERT INTO problem_figures(problem_id, label, page, bbox_json, path, kind,"
+                " width, height, after_line, ordinal, created_at)"
+                " VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    problem_id,
+                    str(figure.get("id") or figure.get("label") or f"fig_{ordinal}"),
+                    int(figure.get("page") or 1),
+                    json.dumps(figure.get("bbox") or [], ensure_ascii=False),
+                    str(figure.get("path") or ""),
+                    str(figure.get("kind") or ""),
+                    float(figure.get("width") or 0),
+                    float(figure.get("height") or 0),
+                    int(figure.get("after_line") or 0),
+                    ordinal,
+                    now,
+                ),
+            )
+
+
 def ingest_text(
     text: str,
     *,
@@ -616,6 +651,7 @@ def ingest_sections(
         if statement_updated:
             report.warnings.append(f"{section.title}: 题面已更新（样例层已同步刷新，spec 等已有产物保留）")
         _upsert_samples(database, problem_id, samples)
+        _upsert_figures(database, problem_id, section.figures)
         hits = detect_injection("\n".join(section.lines))
         tokens = extract_injected_identifiers("\n".join(section.lines))
         if hits:
@@ -647,6 +683,7 @@ def ingest_sections(
                 created=created,
                 statement_chars=len(section.statement_md),
                 injection_hits=hits,
+                figures=list(section.figures),
             )
         )
     return report

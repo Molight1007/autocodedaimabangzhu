@@ -164,6 +164,16 @@ class TestChat(unittest.TestCase):
         client.chat([{"role": "user", "content": "hi"}], max_tokens=10)
         self.assertEqual(client.payloads[0]["max_tokens"], MIN_MAX_TOKENS)
 
+    def test_truncated_retry_disables_thinking(self) -> None:
+        """推理模型把预算烧在思考上导致 length 截断：重试必须关思考，只加预算没用。"""
+        client = FakeTransportClient([
+            _body('{"partial": true}', finish="length"),
+            _body('{"ok": true}'),
+        ])
+        result = client.chat([{"role": "user", "content": "hi"}], json_mode=True)
+        self.assertEqual(result.json_obj, {"ok": True})
+        self.assertEqual(client.payloads[1]["thinking"], {"type": "disabled"})
+
     def test_empty_content_retried_with_bigger_budget(self) -> None:
         delays: List[float] = []
         client = FakeTransportClient(

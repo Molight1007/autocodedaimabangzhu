@@ -36,6 +36,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
+from .keys import project_key_file, read_key_file
+from .messages import has_image_blocks, strip_image_blocks
+
 DEFAULT_BASE_URL = "https://api.deepseek.com/v1"
 DEFAULT_MODEL = "deepseek-chat"
 DEFAULT_TIMEOUT_S = 180
@@ -114,20 +117,6 @@ def mask_key(key: str) -> str:
     if len(text) <= 4:
         return "****" if text else "<missing>"
     return f"****{text[-4:]}"
-
-
-def project_key_file() -> Path:
-    """`<repo>/File/key.txt`（已 gitignore）。"""
-    return Path(__file__).resolve().parents[2] / "File" / "key.txt"
-
-
-def read_key_file(path: Optional[Path] = None) -> str:
-    """读本地 key 文件；不存在/空则返回空串（不抛，交由上层决策）。"""
-    target = Path(path) if path is not None else project_key_file()
-    try:
-        return target.read_text(encoding="utf-8").strip()
-    except OSError:
-        return ""
 
 
 @dataclass
@@ -305,6 +294,7 @@ class LlmClient:
         self._key_file = key_file
         self._json_mode_supported = True  # 进程内记住服务端能力，避免反复 400
         self._thinking_supported = True  # 服务端不认 thinking 时置 False，后续不再发
+        self._vision_supported = True  # 当前模型不收图片时置 False，之后自动剥图重试
         self.recorder: Any = None  # 可注入回调：每次尝试落库（含失败）
         self._file_fallback_done = self.config.key_source != "env"
         self.calls = 0
@@ -322,12 +312,13 @@ class LlmClient:
             "key_source": self.config.key_source,
             "key": self.config.masked_key,
             "json_mode": self._json_mode_supported,
+            "vision": self._vision_supported,
         }
 
     # ── 主入口 ──────────────────────────────────────────────────────────────
     def chat(
         self,
-        messages: List[Dict[str, str]],
+        messages: List[Dict[str, Any]],
         *,
         json_mode: bool = True,
         temperature: float = 0.2,
@@ -364,6 +355,9 @@ class LlmClient:
         empty_retry_done = False
         truncated_retry_done = False
         for attempt in range(1, attempts_allowed + 1):
+            # 上一轮被判定"模型不收图"：后续所有重试都剥成纯文本（幂等）。
+            if not self._vision_supported:
+                attempt_messages = strip_image_blocks(attempt_messages)
             # 整题墙钟：调用前先查，调用中由 _post_bounded 卡住（旧实现只查调用前）。
             remaining: Optional[float] = None
             if deadline_ts is not None:
@@ -416,6 +410,11 @@ class LlmClient:
                 if truncated_retry_done or on_truncate == "stop":
                     break
                 truncated_retry_done = True
+                # 推理模型把预算烧在思考上时，翻倍预算只是再烧一次（实测 16384 仍截断）。
+                # 先关思考：同样的 JSON 任务通常一次就能装下。
+                if thinking != "disabled":
+                    thinking = "disabled"
+                    self._log(f"[llm] {tag or 'chat'} 输出被截断，重试时关闭 thinking")
                 # 提示词要求"少写"，扩预算只会怂恿模型写更长（v2 实测教训）。
                 hint, budget_tokens = self._truncate_retry(
                     json_mode=json_mode, on_truncate=on_truncate, budget_tokens=budget_tokens
@@ -460,7 +459,7 @@ class LlmClient:
 
     # ── 内部 ────────────────────────────────────────────────────────────────
     def _payload_for(
-        self, attempt_messages: List[Dict[str, str]], *, temperature: float,
+        self, attempt_messages: List[Dict[str, Any]], *, temperature: float,
         budget_tokens: int, thinking: str, thinking_budget: int, json_mode: bool,
     ) -> Tuple[Dict[str, Any], bool]:
         """构造请求体，返回 (payload, 本次是否真的启用 json_mode)。"""
@@ -562,7 +561,7 @@ class LlmClient:
         return hint, last_error
 
     @staticmethod
-    def _correction(messages: List[Dict[str, str]], hint: str) -> List[Dict[str, str]]:
+    def _correction(messages: List[Dict[str, Any]], hint: str) -> List[Dict[str, Any]]:
         """构造纠错重发消息：**不回喂残缺输出**（模型会当成"续写上文"），只留占位。
 
         旧实现把 `result.content[:1500]` 半截 JSON/代码作为 assistant 回喂，实测
@@ -618,6 +617,16 @@ class LlmClient:
         sent_format = "response_format" in payload
         if status == 400:
             blames_format = any(k in detail for k in ("response_format", "json_object", "json mode"))
+            # 图片归因要排在 thinking 之前：模型不收图时报的是 "does not support image"，
+            # 既没提 thinking 也没提 format，会命中下面的"无点名就关 thinking"分支，
+            # 白烧一次调用才轮到真正原因。
+            if self._vision_supported and has_image_blocks(payload.get("messages")):
+                if any(k in detail for k in ("image", "vision", "multimodal")):
+                    self._vision_supported = False
+                    self._log(
+                        f"[llm] {tag or 'chat'} 当前模型不接受图片输入，降级为纯文本重试"
+                    )
+                    return True
             # 错误体没点名谁时，优先关"自造的未知字段"thinking，别误伤 json_mode。
             if sent_thinking and ("thinking" in detail or not blames_format):
                 if self._thinking_supported:

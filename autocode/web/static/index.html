@@ -110,6 +110,12 @@
   .statement code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:13px;
     background:var(--accent-soft);color:#3730a3;padding:1px 5px;border-radius:6px}
   .statement pre code{background:none;padding:0;color:inherit}
+  .statement figure{margin:16px 0 18px;text-align:center}
+  .statement figure img{max-width:100%;height:auto;border:1px solid var(--border);border-radius:10px;
+    background:#fff;padding:6px;box-shadow:var(--shadow)}
+  .statement figcaption{font-size:12px;color:var(--muted);margin-top:6px}
+  .statement .fig-missing{display:inline-block;margin:10px 0;padding:6px 10px;border:1px dashed var(--amber);
+    border-radius:8px;background:var(--amber-soft);color:var(--amber);font-size:12px}
   pre.code{margin:10px 0 0;background:#0f172a;color:#e2e8f0;border-radius:12px;padding:14px 16px;overflow:auto;max-height:520px;font-size:12.5px;line-height:1.55}
   .method{border:1px solid var(--border);border-radius:12px;margin-bottom:12px;overflow:hidden;background:var(--surface)}
   .method-head{display:flex;align-items:center;gap:8px;padding:12px 14px;background:var(--surface-2);border-bottom:1px solid var(--border);flex-wrap:wrap}
@@ -532,8 +538,17 @@ function show(view){
   $('#nav-library').classList.toggle('active', view==='library');
 }
 
+const STAGE_LABEL = {spec:'题面解析失败', generator:'数据生成器未通过', references:'参考解未通过样例/对拍',
+  datasets:'分层数据生成失败', hints:'提示生成失败', artifacts:'产物未达新版契约（多解/逐行解析/提示分组/数据量/题解）',
+  budget:'调用预算熔断', timeout:'单题超时'};
 function statusPill(p){
-  if(p.status==='failed') return '<span class="status bad">需处理</span>';
+  if(p.status==='failed'){
+    // 失败题往往还挂着上一版产物：必须同时告诉他「要处理」和「现在看到的是旧内容」，
+    // 否则用户会以为改流程没生效（旧版/新版在界面上长得一样）。
+    const why = STAGE_LABEL[p.failed_stage] || p.failed_stage || '';
+    const label = p.needs_upgrade ? '需处理 · 旧版内容' : '需处理';
+    return `<span class="status bad" title="${esc(why || '上次生成失败')}">${label}</span>`;
+  }
   if(p.status==='prepared'){
     // 旧版产物：用改流程之前的代码生成的——界面看着像新的，内容其实不是。
     // 只有 artifact_version 能区分，所以必须显式标出来，否则用户会以为改动没生效。
@@ -654,7 +669,7 @@ function pdfResultHtml(r){
   imported.forEach(x=>{
     rows.push(`<div class="batch-item"><svg class="i i-sm" style="color:var(--green);margin-top:3px"><use href="#i-check-circle"/></svg>
       <div>入库 · <a class="row-link" href="?problem=${Number(x.id)}">#${Number(x.id)} ${esc(x.title||'')}</a>
-      <span class="hintline" style="margin-left:8px">样例 ${Number(x.samples)||0} 组 · ${x.created?'新建':'已存在'}</span></div></div>`);
+      <span class="hintline" style="margin-left:8px">样例 ${Number(x.samples)||0} 组${x.figures?` · 图 ${Number(x.figures)} 张`:''} · ${x.created?'新建':'已存在'}</span></div></div>`);
   });
   skipped.forEach(x=>{
     rows.push(`<div class="batch-item bad"><svg class="i i-sm" style="color:var(--red);margin-top:3px"><use href="#i-alert"/></svg>
@@ -674,7 +689,8 @@ async function importPdf(){
     const r=await postJSON('/api/import/pdf',{path});
     box.innerHTML=pdfResultHtml(r);
     const ok=(r.imported||[]).length, skip=(r.skipped||[]).length;
-    status.textContent=`入库 ${ok} 题${skip?`，跳过 ${skip} 题`:''}`;
+    const figs=Number(r.figures_total)||0, pages=Number(r.page_images)||0;
+    status.textContent=`入库 ${ok} 题${skip?`，跳过 ${skip} 题`:''}${figs?`，抽出插图 ${figs} 张`:''}${pages?`（${pages} 页页图已送模型）`:''}`;
     status.className='statusline '+(ok?'ok':'bad');
     $$('#i-batch-result .row-link').forEach(a=>a.addEventListener('click',e=>{e.preventDefault();location.href=a.getAttribute('href');}));
   }catch(e){
@@ -1019,9 +1035,20 @@ function inlineMd(s){
   return s.replace(/`([^`]+)`/g,'<code>$1</code>')
           .replace(/\*\*([^*]+)\*\*/g,'<strong>$1</strong>');
 }
-function renderStatement(raw){
+function renderStatement(raw, figures){
   const lines=String(raw||'').replace(/\r\n?/g,'\n').split('\n');
+  const figs=(Array.isArray(figures)?figures:[]).filter(f=>f&&f.url)
+    .slice().sort((a,b)=>(Number(a.after_line)||0)-(Number(b.after_line)||0));
+  let figAt=0;
   const out=[]; let buf='', list='', fence=false, code=[], dataBuf=[];
+  const flushFigs=(upto)=>{
+    while(figAt<figs.length && (Number(figs[figAt].after_line)||0)<=upto){
+      const f=figs[figAt++];
+      flushP(); flushData(); flushList();
+      out.push(`<figure><img src="${esc(f.url)}" alt="${esc(f.label||'题目插图')}" loading="lazy">`
+        +`<figcaption>${f.page?`第 ${Number(f.page)} 页 · `:''}${esc(f.label||'')}</figcaption></figure>`);
+    }
+  };
   const flushP=()=>{ if(buf){ out.push(`<p>${inlineMd(buf)}</p>`); buf=''; } };
   const flushData=()=>{
     if(!dataBuf.length) return;
@@ -1043,7 +1070,9 @@ function renderStatement(raw){
   const flushList=()=>{ if(list){ out.push(`</${list}>`); list=''; } };
   const isData=t=>!/[A-Za-z\u4e00-\u9fff]/.test(t)
     && /^[\d\s.,:;+\-*/%()=<>[\]{}|\u2010-\u2015\u2212]+$/.test(t) && t.length<=120;
-  for(const rawLine of lines){
+  for(let lineNo=0; lineNo<lines.length; lineNo++){
+    flushFigs(lineNo);  // 先把"应在前 N 行之后"的插图输出，再排版正文
+    const rawLine=lines[lineNo];
     const line=rawLine.replace(/\s+$/,''); const t=line.trim();
     if(/^```/.test(t)){
       if(fence){ out.push(`<pre class="data"><code>${code.join('\n')}</code></pre>`); code=[]; fence=false; }
@@ -1072,6 +1101,7 @@ function renderStatement(raw){
     buf=joinProse(buf,t);
   }
   if(fence && code.length) out.push(`<pre class="data"><code>${code.join('\n')}</code></pre>`);
+  flushFigs(lines.length);
   flushP(); flushData(); flushList();
   return out.join('\n') || '—';
 }
@@ -1079,7 +1109,7 @@ function renderStatement(raw){
 function detailBody(p,groups,langs){
   if(STATE.tab==='practice'){ return practiceView(p); }
   if(STATE.tab==='statement'){
-    return `<div class="sec"><h4>题面</h4><div class="card statement">${renderStatement(esc(p.statement||''))}</div></div>
+    return `<div class="sec"><h4>题面</h4><div class="card statement">${renderStatement(esc(p.statement||''), p.figures||[])}</div></div>
       <div class="sec"><h4>样例</h4>${(p.samples||[]).map((s,i)=>`
         <div class="card" style="margin-bottom:10px"><div class="hintline">样例 ${i+1}</div>
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:8px">

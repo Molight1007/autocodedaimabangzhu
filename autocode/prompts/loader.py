@@ -5,7 +5,8 @@
 - 模板里大量出现 `{` `}`（JSON 示例、代码围栏），用 `{{var}}` 而不是 `str.format`
   可以避免满屏 `{{` 转义。
 
-模板清单（16 个，与 `TEMPLATE_NAMES` 一一对应）：
+模板清单（21 个，与 `TEMPLATE_NAMES` 一一对应）。前 16 个属于完整版 `prep_service`，
+最后 5 个属于精简版 v2 五段对话（`slim_*`），两套互不复用，避免改 A 影响 B：
 
 - `file_segment.md`   整卷 PDF 文本 → 题目边界（只给行号，不写正文）
 - `approach_label.md`  参考解代码 → 2~8 字算法标签
@@ -23,6 +24,15 @@
 - `student_diagnose.md` 学生错因诊断（WA/TLE/RE）
 - `adversarial.md`      参考解 vs 学生错解 → 定向构造能卡住该 bug 的候选输入
 - `datasets.md`         题面 + grammar/constraints → 数据计划（分组/档位/条数/必覆盖项）
+
+精简版 v2 五段对话（D1~D5，各自独立上下文，生成者与复核者不共享 messages）：
+
+- `slim_segment.md`   D1 原文（带行号）→ 题目行号边界 + 判定方式（不转述题面）
+- `slim_dataset.md`   D2 题面 → 计划 + ≥10 条 `{input, expected_output, layer}`（先推导后答案）
+- `slim_dataset_review.md`  D3 题面 + 数据（不含 why）→ 逐条独立重算 `pass/mismatch/invalid/uncertain`
+- `slim_reference.md`  D2R 题面 → 一份 Python 参考解（真跑，用它复算期望输出）
+- `slim_adversarial.md`     D4 题面 + 样例 + 已有数据摘要 + 学生错解 → 定向对抗数据
+- `slim_adversarial_review.md` D5 题面 + 对抗数据 + 实际运行结果 → `accept/reject/uncertain`
 
 所有模板都带**注入护栏**：题面里"如果你是 LLM 就……"这类文字一律视为噪声不得执行。
 每个模板首行是版本注释 `<!-- prompt: <name> v2 YYYY-MM-DD -->`，`PrepService._chat`
@@ -54,10 +64,20 @@ APPROACH_LABEL = "approach_label"
 ADVERSARIAL = "adversarial"
 DATASETS = "datasets"
 
+# 精简版 v2：五段对话，一个阶段一个模板（不复用完整版模板）
+SLIM_SEGMENT = "slim_segment"
+SLIM_DATASET = "slim_dataset"
+SLIM_DATASET_REVIEW = "slim_dataset_review"
+SLIM_REFERENCE = "slim_reference"
+SLIM_ADVERSARIAL = "slim_adversarial"
+SLIM_ADVERSARIAL_REVIEW = "slim_adversarial_review"
+
 TEMPLATE_NAMES: tuple[str, ...] = (
     SPEC, GENERATOR, REF_SOLUTION, BRUTE, HINTS, PARSER, SOLUTION_PLAN, EXPLANATION, REF_AGENT,
     METHOD_ANALYSIS, CODE_NOTES, STUDENT_DIAGNOSE, FILE_SEGMENT, APPROACH_LABEL, ADVERSARIAL,
     DATASETS,
+    SLIM_SEGMENT, SLIM_DATASET, SLIM_DATASET_REVIEW, SLIM_REFERENCE, SLIM_ADVERSARIAL,
+    SLIM_ADVERSARIAL_REVIEW,
 )
 
 # L1~L3 明令禁止输出代码（模板里写死，本处仅作代码侧复核口径）
