@@ -17,6 +17,8 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Sequence, Tuple
 
 from ..engine.verify.comparator import compare
+from . import config
+from .layout_blocks import check_blocks
 
 LAYERS: tuple[str, ...] = ("boundary", "typical", "stress", "trap")
 SIZE_CLASSES: tuple[str, ...] = ("tiny", "small", "medium", "large")
@@ -39,54 +41,6 @@ FAILURE_MODES: tuple[str, ...] = (
 
 MIN_INPUT_CHARS = 1
 
-#: 排版分块的类型。少而固定：多一种类型就多一条前端分支，收益不成正比。
-BLOCK_KINDS: tuple[str, ...] = (
-    "heading", "para", "list", "code", "sample_input", "sample_output",
-)
-
-
-def check_blocks(raw: Any, total: int) -> Tuple[Any, List[str]]:
-    """校验模型给的分块。返回 (可用的块列表 或 None, 告警)。
-
-    只做结构性校验（类型、范围、顺序、重叠）；**覆盖是否完整**要等切成题面文本后
-    再查，因为那一步才知道每行是不是空的（见 segment.check_layout_coverage）。
-
-    任何一种不合法都整题作废返回 None —— 排版是"锦上添花"，宁可退回自动模式，
-    也不能让错位的块把正文拼到别的小节下面。
-    """
-    if raw is None:
-        return None, []
-    if not isinstance(raw, list) or not raw:
-        return None, ["排版分块不是非空数组，已退回自动排版"]
-
-    blocks: List[Dict[str, Any]] = []
-    last_end = 0
-    for position, item in enumerate(raw, start=1):
-        if not isinstance(item, dict):
-            return None, [f"排版分块第 {position} 项不是对象，已退回自动排版"]
-        kind = str(item.get("kind") or "").strip()
-        if kind not in BLOCK_KINDS:
-            return None, [f"排版分块第 {position} 项类型 {kind!r} 不支持，已退回自动排版"]
-        try:
-            start = int(item.get("from"))
-            end = int(item.get("to"))
-        except (TypeError, ValueError):
-            return None, [f"排版分块第 {position} 项行号不是整数，已退回自动排版"]
-        if start < 1 or end < start or end > total:
-            return None, [f"排版分块第 {position} 项行号 {start}-{end} 越界（本题共 {total} 行）"]
-        if start <= last_end:
-            # 同类型的块重叠（模型常把一段话拆成首尾相接的两块）可以安全合并：
-            # 内容顺序没变，只是并回一块。跨类型重叠无法判断谁该在前，直接作废。
-            previous = blocks[-1] if blocks else None
-            if previous is not None and previous["kind"] == kind and start > previous["from"]:
-                previous["to"] = max(int(previous["to"]), end)
-                last_end = previous["to"]
-                continue
-            return None, [f"排版分块第 {position} 项与上一块重叠或乱序，已退回自动排版"]
-        blocks.append({"kind": kind, "from": start, "to": end})
-        last_end = end
-    return blocks, []
-
 
 def check_layout_coverage(blocks: Sequence[Dict[str, Any]], lines: Sequence[str]) -> Tuple[bool, str]:
     """块必须覆盖本题所有非空行（题名那一行除外）。
@@ -105,11 +59,11 @@ def check_layout_coverage(blocks: Sequence[Dict[str, Any]], lines: Sequence[str]
         return True, ""
     preview = "、".join(str(item) for item in missing[:6])
     return False, f"有 {len(missing)} 行没被任何分块覆盖（第 {preview} 行）"
-MAX_INPUT_CHARS = 2_000
-MAX_OUTPUT_CHARS = 4_000
+MAX_INPUT_CHARS = config.MAX_INPUT_CHARS  # 唯一真源在 config，保留别名给旧调用
+MAX_OUTPUT_CHARS = config.MAX_OUTPUT_CHARS
+MAX_ADVERSARIAL_OUTPUT_CHARS = 4_000  # D4 输出预算更紧，单独收紧
 MAX_DERIVE_CHARS = 240
-#: 每条对抗用例的"错误原因"（给人看的解释）：够写清一行代码怎么错，又不至于变成小作文
-MAX_REASON_CHARS = 240
+MAX_REASON_CHARS = 240  # 错误原因：够写清一行代码怎么错，不写成小作文
 
 #: 空话判据：这些短语没有指向具体行/变量，等于没解释。
 _BANNED_REASON = (
@@ -169,8 +123,22 @@ def parse_tolerance(raw: Any) -> float:
     return value if value > 0 else 1e-6
 
 
+#: 本版本**能执行**的判定方式（`JUDGE_TYPES` 的子集）。`unordered` 用于答案顺序不限的题。
+SUPPORTED_JUDGES = ("token", "line", "exact", "float", "unordered")
+
+
 def judge_supported(judge_type: str) -> bool:
-    return _text(judge_type) in ("token", "line", "exact", "float")
+    return _text(judge_type) in SUPPORTED_JUDGES
+
+
+def loose_tokens(value: Any) -> List[str]:
+    """把答案拆成"与顺序、括号、逗号无关"的记号多重集。
+
+    只用于两处：`unordered` 判定，以及核对"题面样例被转成标准输入后，
+    答案还是不是同一个"。`[0,1]`、`0 1`、`0, 1` 在这里等价。
+    """
+    text = norm_text(value).translate(str.maketrans({c: " " for c in "[](){},'\""}))
+    return sorted(text.split())
 
 
 def compare_output(
@@ -192,6 +160,10 @@ def compare_output(
     if mode == "token":
         result = compare("exact", exp, act)
         return bool(result.ok), "" if result.ok else str(result.reason or "token_mismatch")
+    if mode == "unordered":
+        # 顺序、括号、逗号都不参与比较：`[0,1]` = `[1,0]` = `0 1`
+        ok = loose_tokens(exp) == loose_tokens(act)
+        return ok, "" if ok else "unordered_mismatch"
     raise ValueError(f"不支持的判定方式 {mode!r}")
 
 
@@ -237,6 +209,30 @@ def _reason_bad(text: str) -> bool:
     return any(token in text for token in _BANNED_REASON)
 
 
+def _clean_skips(raw: Any, start: int, end: int, title: str, draft: Draft) -> List[int]:
+    """`skip_lines`：题面内部不属于题面的行（导航、状态标签、代码区、评论）。
+
+    只校验范围与类型，不猜"该不该跳"；跳掉一半以上记告警，让人看得见。
+    """
+    if not isinstance(raw, list):
+        return []
+    kept: List[int] = []
+    for item in raw:
+        if isinstance(item, bool):
+            continue
+        try:
+            number = int(item)
+        except (TypeError, ValueError):
+            continue
+        if start < number <= end and number not in kept:
+            kept.append(number)
+    if start in kept:
+        kept.remove(start)  # 标题行不能跳：没有标题的题面无法在库里定位
+    if len(kept) > (end - start + 1) // 2:
+        draft.warnings.append(f"《{title}》标了 {len(kept)} 行不属于题面，超过一半，请核对")
+    return sorted(kept)
+
+
 # ── D1 切题 ─────────────────────────────────────────────────────────────────
 def check_segments(obj: Any, total_lines: int, max_problems: int) -> Draft:
     draft = Draft(payload=_as_dict(obj))
@@ -278,9 +274,10 @@ def check_segments(obj: Any, total_lines: int, max_problems: int) -> Draft:
         # 约束不截断：漏掉一条真实约束，后面生成的数据就可能越界
         constraints = [_text(item)[:200] for item in _as_list(row.get("constraints")) if _text(item)]
         confidence = _text(row.get("confidence"))
-        blocks, block_warnings = check_blocks(row.get("blocks"), end - start + 1)
+        blocks, block_warnings = check_blocks(row.get("blocks"), end - start + 1, offset=start - 1)
         for warning in block_warnings:
             draft.warnings.append(f"《{title}》{warning}")
+        skip_lines = _clean_skips(row.get("skip_lines"), start, end, title, draft)
         parsed.append(
             {
                 "title": title,
@@ -293,6 +290,7 @@ def check_segments(obj: Any, total_lines: int, max_problems: int) -> Draft:
                 "sample_count": max(0, sample_count),
                 "confidence": confidence if confidence in CONFIDENCES else "medium",
                 "note": _text(row.get("note"))[:120],
+                "skip_lines": skip_lines,
                 "blocks": blocks,
             }
         )
@@ -346,22 +344,22 @@ def check_dataset(
     plan = _as_dict(draft.payload.get("plan"))
     cases_raw = _as_list(draft.payload.get("cases"))
     draft.payload = {"analysis": analysis, "plan": plan}
-
     unsupported = _text(analysis.get("unsupported_reason"))
     if unsupported:
         return draft.fail(f"模型判定本题暂不支持：{unsupported[:200]}")
     if not cases_raw:
-        return draft.fail("模型没有产出任何数据")
-
+        # 空 cases 且无说明（同一次拒绝的另一种形状）：带上分析摘要，别只留一句"没有产出"
+        hint = _text(analysis.get("answer_model")) or _text(analysis.get("input_model"))
+        return draft.fail("模型没有产出任何数据" + (f"（它的分析：{hint[:140]}）" if hint else ""))
     try:
         target = int(plan.get("target_count"))
     except (TypeError, ValueError):
-        target = 0
+        # 没给计划就按实际条数算：配额该落在数据上，不是落在模型的自报数字上
+        target = len(cases_raw)
     if target < min_cases:
         # 下限是产品要求（每题至少 10 组），不是对模型的猜测
         return draft.fail(f"计划条数 {target} 少于下限 {min_cases} 条")
     if target > max_cases:
-        # 上限只作提醒：复杂题确实可能需要更多数据，出不出得来看输出长度
         draft.warnings.append(f"计划 {target} 条，超过单批参考上限 {max_cases} 条，仍按计划处理")
     if len(cases_raw) != target:
         return draft.fail(f"计划 {target} 条，实际给出 {len(cases_raw)} 条")
@@ -371,7 +369,9 @@ def check_dataset(
         layer_counts = {name: int(layers.get(name) or 0) for name in LAYERS}
     except (TypeError, ValueError):
         return draft.fail("plan.layers 不是整数")
-    if sum(layer_counts.values()) != target:
+    # 没有计划就不核对"自报的分配"：真正要保证的是数据本身达标（下面按实测分层判），
+    # 让模型填一张表再抽查它对不对，只会把合法的题判死。
+    if layers and sum(layer_counts.values()) != target:
         return draft.fail(f"plan.layers 之和 {sum(layer_counts.values())} ≠ target_count {target}")
 
     sample_map = {input_hash(item.get("input")): normalize_output(item.get("output")) for item in samples}
@@ -382,8 +382,10 @@ def check_dataset(
         layer = _text(row.get("layer"))
         claimed_size = _text(row.get("size_class"))
         data = normalize_input(row.get("input"))
+        # 期望输出现在由代码答案执行得出，D2 可以不给；旧版提示词给了也照收，
+        # 仅用于"与样例输入撞车时"的一致性检查，不再作为必填项。
         expected = normalize_output(row.get("expected_output"))
-        derive = _text(row.get("derive"))
+        derive = _text(row.get("derive")) or _text(row.get("why"))
         confidence = _text(row.get("confidence")) or "medium"
 
         if layer not in LAYERS:
@@ -392,14 +394,14 @@ def check_dataset(
         if not data or len(data) > MAX_INPUT_CHARS:
             draft.warnings.append(f"第 {index} 条输入为空或超过 {MAX_INPUT_CHARS} 字符，已丢弃")
             continue
-        if not expected or len(expected) > MAX_OUTPUT_CHARS:
-            draft.warnings.append(f"第 {index} 条期望输出为空或过长，已丢弃")
+        if data.count("\n") + 1 > config.MAX_INPUT_LINES:
+            draft.warnings.append(f"第 {index} 条输入超过 {config.MAX_INPUT_LINES} 行，已丢弃")
+            continue
+        if len(expected) > MAX_OUTPUT_CHARS:
+            draft.warnings.append(f"第 {index} 条期望输出过长，已丢弃")
             continue
         if len(derive) > MAX_DERIVE_CHARS:
             derive = derive[:MAX_DERIVE_CHARS]
-        if _derive_bad(derive):
-            draft.warnings.append(f"第 {index} 条没有给出有效推导（derive），已丢弃")
-            continue
         if confidence not in CONFIDENCES:
             confidence = "medium"
         # 规模以实测为准：模型自报的 size_class 只用来提示它标错了
@@ -418,7 +420,7 @@ def check_dataset(
             continue
         seen.add(key)
 
-        if key in sample_map:
+        if expected and key in sample_map:
             ok, _ = compare_output(judge_type, sample_map[key], expected, tolerance)
             if not ok:
                 draft.warnings.append(f"第 {index} 条与题面样例输入相同但输出矛盾，已丢弃")
@@ -439,49 +441,44 @@ def check_dataset(
     if len(kept) < min_cases:
         return draft.fail(f"清洗后只剩 {len(kept)} 条，少于下限 {min_cases}")
 
-    actual_layers = {name: sum(1 for item in kept if item["layer"] == name) for name in LAYERS}
+    _coverage_warnings(kept, draft)
+    draft.items = kept
+    return draft
+
+
+def _coverage_warnings(kept: List[Dict[str, Any]], draft: Draft) -> None:
+    """覆盖度只出提示，不判失败：合法数据先入库，缺的那层下一轮还能补。"""
+    actual = {name: sum(1 for item in kept if item["layer"] == name) for name in LAYERS}
     layer_cn = {"boundary": "边界", "typical": "典型", "stress": "压力", "trap": "陷阱"}
     missing = [
-        f"{layer_cn[name]}层 {actual_layers[name]}/{floor}"
+        f"{layer_cn[name]}层 {actual[name]}/{floor}"
         for name, floor in LAYER_FLOORS.items()
-        if actual_layers[name] < floor
+        if actual[name] < floor
     ]
     if missing:
-        # 用中文层名 + 补足办法：这句话既回喂给模型，也会原样显示在任务失败条上，
-        # 学生看不懂 "stress 0/1" 是什么，也不知道下一步该干什么
-        return draft.fail(
-            "分层覆盖未达标：" + "、".join(missing)
-            + "。压力层要写到本批最大规模，边界层需 tiny/small；补足缺失层后可重新生成"
+        draft.warnings.append(
+            "分层覆盖不足：" + "、".join(missing)
+            + "。压力层要写到本批最大规模，边界层需 tiny/small"
         )
-
-    # 压力层的判定改成「本批最大规模」，不再要求绝对的 medium/large。
-    # 绝对档位对「输入元素数固定」的题（如一行三个整数求和）永远不可满足——
-    # 3 个数只能是 tiny，想凑到 101 个就必须违反输入格式。旧规则因此在
-    # 这类题上必然整单失败，还把老实标 tiny 的数据判死、把谎报 large 的放过去。
     others = [SIZE_RANK[item["size_class"]] for item in kept if item["layer"] != "stress"]
     stress = [SIZE_RANK[item["size_class"]] for item in kept if item["layer"] == "stress"]
     if others and stress and max(stress) < max(others):
         rank_cn = {0: "tiny", 1: "small", 2: "medium", 3: "large"}
-        return draft.fail(
+        draft.warnings.append(
             f"压力层规模不够：其它层已到 {rank_cn[max(others)]}，压力层只到 {rank_cn[max(stress)]}"
-            "；压力层必须是本批最大规模"
+            "；压力层应当是本批最大规模"
         )
-    max_rank = max((SIZE_RANK[item["size_class"]] for item in kept), default=0)
-    if max_rank == 0:
-        # 不判失败：固定元数的题本来就写不大。把事实记下来，界面上能看见
+    if max((SIZE_RANK[item["size_class"]] for item in kept), default=0) == 0:
         draft.warnings.append("本批最大规模只有 tiny（≤10 个元素），无法用规模构成压力")
-
-    top = Counter(item["expected_output"] for item in kept).most_common(1)[0][1]
-    if top * 2 > len(kept):
-        return draft.fail(f"单一输出出现 {top}/{len(kept)} 次（超过一半），这批数据没有区分度")
-
+    outputs = [str(item.get("expected_output") or "") for item in kept]  # 执行后才有
+    if all(outputs):
+        top = Counter(outputs).most_common(1)[0][1]
+        if top * 2 > len(kept):
+            draft.warnings.append(f"单一输出出现 {top}/{len(kept)} 次（超过一半），区分度偏低")
     tiny = sum(1 for item in kept if item["size_class"] == "tiny")
     if tiny * 10 > len(kept) * 8:
         draft.warnings.append(f"tiny 占 {tiny}/{len(kept)}，规模偏小")
-
-    draft.items = kept
-    draft.payload["layers_actual"] = actual_layers
-    return draft
+    draft.payload["layers_actual"] = actual
 
 
 # ── D3 复核 ─────────────────────────────────────────────────────────────────
@@ -592,7 +589,7 @@ def check_adversarial(
         if not data or len(data) > max_input_chars:
             draft.warnings.append(f"第 {index} 条输入为空或过长，已丢弃")
             continue
-        if not expected or len(expected) > MAX_OUTPUT_CHARS:
+        if not expected or len(expected) > MAX_ADVERSARIAL_OUTPUT_CHARS:
             draft.warnings.append(f"第 {index} 条期望输出为空或过长，已丢弃")
             continue
         weak_derive = _derive_bad(derive)

@@ -26,7 +26,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-from .layout_repair import drop_page_artifacts, sanitize_sample
+from .layout_repair import PROSE_MARKERS, drop_page_artifacts, sanitize_sample
 
 from ..store.db import Database, get_db
 
@@ -44,8 +44,32 @@ _PROBLEM_HEAD_RE = re.compile(r"^##\s+(?P<title>[^（(]+?)\s*[（(]\s*(?P<slug>[
 _MD_HEAD_RE = re.compile(r"^\s*#{1,6}\s")
 # 任意【...】小节标题（题目描述/输入格式/样例解释/子任务……）；`#` 可有可无（实测两种都有）
 _SECTION_HEAD_RE = re.compile(r"^\s*#{0,6}\s*【[^】]*】\s*$")
-_SAMPLE_HEAD_RE = re.compile(
-    r"^\s*#{0,6}\s*【\s*样例\s*(?P<idx>\d+)?\s*(?P<kind>输入|输出|解释)?\s*】\s*$"
+#: 样例小节标签：整行只是"标签"，数据在后续行，或紧跟在冒号/括号之后。
+#:
+#: 只认 CSP 的 `【样例输入】` 是不够的：实测同一道题换个来源就成了
+#: `样例输入：`（洛谷/PTA）、`示例 1 输入：`（牛客）、`Sample Input`（英文题面），
+#: 一律解析出 0 组样例。而样例是后面"标程锚定"的唯一依据，解析不到就等于
+#: 这道题永远生成不出数据——所以标签识别必须按"写法"而不是按"来源"来做。
+_LABEL_WORDS = (
+    r"样例输入|样例输出|输入样例|输出样例|示例输入|示例输出|输入示例|输出示例"
+    r"|样例|示例|sampleinput|sampleoutput|input|output|输入|输出"
+)
+_LABEL_RE = re.compile(
+    r"^(?P<word>" + _LABEL_WORDS + r")"
+    r"(?P<mark>[#第]?)(?P<num>\d{1,3})?"
+    r"(?P<kind>输入|输出|解释)?$"
+)
+#: 括号形态：`【样例输入】`、`[样例 1 输出]`、`（样例输入）`
+_BRACKET_RE = re.compile(r"^([【\[（(])([^】\]）)]*)([】\]）)])")
+#: 样例数据后面紧跟的小节标题：`提示：`、`说明`、`数据范围`……
+#: 不在这里截断，最后一组样例的输出会把整段提示吞进去（实测 LeetCode 风格题面
+#: 第 3 组输出变成 `[0,1]\n提示：\n2 <= nums.length <= 104…`，标程锚定直接失败）。
+_TAIL_HEAD_RE = re.compile(
+    r"^\s*#{0,6}\s*[【\[]?\s*"
+    r"(?:提示|说明|注意|数据范围|约束|输入格式|输出格式|输入描述|输出描述|样例解释|子任务|进阶"
+    r"|hint|note|constraints?|follow[- ]?up)"
+    r"\s*[】\]]?\s*[：:]?\s*$",
+    re.IGNORECASE,
 )
 _LINE_NO_RE = re.compile(r"^\s*(\d+)[ \t]+(\S.*)$")
 # 样例框里混入的说明文字（PDF 排版把"以下是示例图……"排进了样例框）
@@ -293,40 +317,116 @@ def split_problems(text: str, *, cert_no: str) -> List[ProblemSection]:
     return sections
 
 
+def parse_sample_label(line: str) -> Optional[Tuple[str, int, str]]:
+    """这一行是不是样例标签；是则返回 `(类型, 编号, 同一行的内联数据)`。
+
+    类型：`输入` / `输出` / `解释` / `""`（只有"样例 1"这种块标题，本身不带数据）。
+    编号：没写编号返回 0，由调用方沿用上一处编号。
+
+    识别范围（不同来源写法互不相同，只认一种就等于只支持一种来源）：
+    `【样例输入】`、`样例输入：`、`输出样例 1`、`示例 1 输入：`、`输入示例`、
+    `Sample Input`、`输入：3`（数据写在标签后）。
+
+    刻意不认 `输入格式` / `输出描述` / `输入说明`：这些是小节标题，不是样例标签。
+    单独一个 `输入`（没有"样例/示例"字样）只在**不带 `#` 标号**时才认——`## 输入`
+    在小节标题里很常见，认错了会把小节正文当成样例数据。
+    """
+    raw = str(line or "").strip()
+    if not raw:
+        return None
+    heading = bool(_MD_HEAD_RE.match(raw))
+    text = re.sub(r"^#{1,6}\s*", "", raw).strip()
+
+    inline = ""
+    bracket = _BRACKET_RE.match(text)
+    if bracket:
+        rest = text[bracket.end():] or ""
+        text = bracket.group(2).strip()
+        inline = rest.strip().lstrip("：:").strip()
+    else:
+        parts = re.split(r"[：:]", text, maxsplit=1)
+        text, inline = parts[0].strip(), (parts[1].strip() if len(parts) > 1 else "")
+
+    compact = re.sub(r"\s+", "", text).lower()
+    match = _LABEL_RE.match(compact)
+    if not match:
+        return None
+    word = match.group("word")
+    index = int(match.group("num") or 0)
+    kind = (match.group("kind") or "").strip()
+    bare = word in ("输入", "输出", "input", "output")
+    if bare and heading:
+        return None  # `## 输入` 是小节标题，不是样例
+    if not kind:
+        if "输入" in word or word in ("input", "sampleinput"):
+            kind = "输入"
+        elif "输出" in word or word in ("output", "sampleoutput"):
+            kind = "输出"
+        else:
+            kind = ""
+    if kind == "解释":
+        return ("解释", index, "")
+    return (kind, index, inline)
+
+
 def _collect_sample_blocks(
     lines: Sequence[str],
 ) -> Tuple[List[Tuple[int, str, List[str]]], int, List[str]]:
-    """第一遍：把 `【样例…】` 小节切成 (序号, 类型, 正文行) 块；顺带统计外链样例。"""
+    """第一遍：把样例小节切成 (序号, 类型, 正文行) 块；顺带统计外链样例。
+
+    编号缺省时沿用最近一次出现的编号（`样例 1 输入` + 紧跟的 `输出` 属于同一组）；
+    同一编号出现第二组"输入"时自动顺延，避免后一组把前一组覆盖掉。
+    """
     blocks: List[Tuple[int, str, List[str]]] = []
     warnings: List[str] = []
     external = 0
     cursor = 0
     total = len(lines)
+    current = 1
+    seen_input: set = set()
     while cursor < total:
-        match = _SAMPLE_HEAD_RE.match(lines[cursor])
-        if not match:
+        label = parse_sample_label(lines[cursor])
+        if label is None:
             cursor += 1
             continue
-        kind = (match.group("kind") or "").strip()
-        index = int(match.group("idx") or 1)
+        kind, index, inline = label
         body_start = cursor + 1
         body_end = body_start
         while body_end < total:
             candidate = lines[body_end]
+            if parse_sample_label(candidate) is not None:
+                break
             if _SECTION_HEAD_RE.match(candidate) or _MD_HEAD_RE.match(candidate):
+                break
+            if _TAIL_HEAD_RE.match(candidate):
                 break
             body_end += 1
         body = [line for line in lines[body_start:body_end] if not _FENCE_RE.match(line)]
+        if inline:
+            body.insert(0, inline)
         cursor = body_end
         if kind == "解释":
             continue
         if kind == "":
+            index = index or current
+            current = index
             joined = "\n".join(body)
-            if _EXTERNAL_SAMPLE_RE.search(joined) or not joined.strip():
+            if _EXTERNAL_SAMPLE_RE.search(joined):
                 external += 1
+            elif not joined.strip():
+                # 只有"样例 1"这样的块标题、数据由后面的输入/输出标签给出：不算外链
+                continue
             else:
-                warnings.append(f"【样例 {index}】无输入/输出标记，已忽略")
+                warnings.append(f"样例 {index} 无输入/输出标记，已忽略")
             continue
+        index = index or current
+        current = index
+        if kind == "输入":
+            # 同一编号的第二组输入：说明题面在重复用"输入/输出"而不编号
+            while index in seen_input:
+                index += 1
+            seen_input.add(index)
+            current = index
         blocks.append((index, kind, body))
     return blocks, external, warnings
 
@@ -455,7 +555,8 @@ def _trim_prose(lines: Sequence[str]) -> Tuple[List[str], bool]:
         item = line.strip()
         if _is_page_artifact(item):
             continue
-        if len(_CJK_RE.findall(line)) >= PROSE_CJK_THRESHOLD:
+        # 长中文说明按字数；短标签（"解释：…" 只有 2 个汉字）按行首标记，见 PROSE_MARKERS
+        if item.startswith(PROSE_MARKERS) or len(_CJK_RE.findall(line)) >= PROSE_CJK_THRESHOLD:
             return list(lines[:index]), True
     return list(lines), False
 

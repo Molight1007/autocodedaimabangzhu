@@ -115,6 +115,16 @@ def _dataset_payload() -> Dict[str, Any]:
         ("trap", "tiny", _arr([-1, -1, -1]), "-1\n", "全负且相同，最大 -1"),
     ]
     return {
+        # 契约：题面写的是"第一行 n，第二行 n 个整数"
+        "io": {
+            "input": [
+                {"name": "n", "type": "int", "min": 1, "max": 10000},
+                {"name": "a", "type": "int[]", "len": "n"},
+            ],
+            "output": {"type": "int", "order": "fixed"},
+        },
+        "judge_type": "token",
+        "samples": [{"input": "3\n1 2 3\n", "output": "3\n"}],
         "analysis": {
             "input_model": "第一行 n，第二行 n 个整数",
             "answer_model": "一个整数：最大值",
@@ -169,7 +179,7 @@ def main() -> int:
     from .dataset import run_dataset
     from .db import get_db
     from .llm_stage import StageRunner
-    from .validators import check_dataset, check_dataset_review, code_hash, compare_output
+    from .validators import code_hash
 
     global _OPEN_DB
     db = get_db(_DB)
@@ -252,10 +262,11 @@ def main() -> int:
     check("llm_calls 有记录", db.query_scalar("SELECT COUNT(*) FROM llm_calls WHERE problem_id=?", (pid,), 0) >= 2)
     quality = json.loads(str(db.query_one("SELECT quality_json FROM problems WHERE id=?", (pid,))[0]))
     run_check = quality.get("run_verification") or {}
-    check("参考解复算已生效", bool(run_check.get("engaged")), str(run_check))
+    check("代码答案已执行", bool(run_check.get("engaged")), str(run_check))
     check("样例全部通过", str(run_check.get("samples")) == "1/1", str(run_check))
-    check("复算结论为一致",
-          int((run_check.get("verdicts") or {}).get("agree", 0)) >= 12, str(run_check))
+    check("样例锚定生效", bool(run_check.get("anchored")), str(run_check))
+    check("执行覆盖面达标",
+          int((run_check.get("verdicts") or {}).get("executed", 0)) >= 12, str(run_check))
 
     print("== 3. D4/D5 对抗流水线 ==")
     with db.transaction() as conn:
@@ -277,6 +288,19 @@ def main() -> int:
     check("运行判定 WA", bool(adv_rows) and adv_rows[0]["run_verdict"] == "WA")
     check("错误原因已落库", bool(adv_rows) and "初始化" in str(adv_rows[0]["failure_reason"]),
           adv_rows[0]["failure_reason"] if adv_rows else "none")
+
+    _check_validators(d2)
+
+    print("")
+    print(f"通过 {_PASS} 项，失败 {len(_FAIL)} 项")
+    for item in _FAIL:
+        print("  - " + item)
+    return 0 if not _FAIL else 1
+
+
+def _check_validators(d2: Dict[str, Any]) -> None:
+    """校验器边界：判定方式、浮点容差、同批重复、空推导。"""
+    from .validators import check_dataset, check_dataset_review, compare_output
 
     print("== 4. 校验器边界 ==")
     ok, _ = compare_output("token", "3\n", "3 \n")
@@ -300,12 +324,6 @@ def main() -> int:
         [{"index": 0, "expected_output": "3\n"}], "token", "",
     )
     check("空推导不算通过", rev.ok and rev.items[0]["verdict"] == "uncertain", str(rev.items))
-
-    print("")
-    print(f"通过 {_PASS} 项，失败 {len(_FAIL)} 项")
-    for item in _FAIL:
-        print("  - " + item)
-    return 0 if not _FAIL else 1
 
 
 if __name__ == "__main__":

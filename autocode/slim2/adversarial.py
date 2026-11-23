@@ -244,7 +244,7 @@ def run_adversarial(
 
         draft = check_adversarial(
             payload, limit=limit, existing_hashes=known_hashes,
-            max_input_chars=config.MAX_INPUT_CHARS,
+            max_input_chars=config.MAX_ADVERSARIAL_INPUT_CHARS,
         )
         if not draft.ok:
             raise StageFailure("adversarial", "；".join(draft.fatal))

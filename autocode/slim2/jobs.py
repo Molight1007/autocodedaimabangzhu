@@ -91,6 +91,27 @@ def _drop_proc(kind: str, problem_id: int) -> None:
         RUNNING.pop((kind, int(problem_id)), None)
 
 
+def _reap(kind: str, problem_id: int) -> None:
+    """poll 已退出的子进程并销号。
+
+    worker 写完终态就自己退出，父进程不去 wait 就会留下僵尸（每跑一题一个，
+    直到服务重启）。查询任务状态时顺手回收，成本接近零。
+    """
+    proc = RUNNING.get((kind, int(problem_id)))
+    if proc is None:
+        return
+    if proc.poll() is not None:
+        _drop_proc(kind, problem_id)
+
+
+def reap_all() -> None:
+    """把所有已经退出的子进程回收掉（起新任务前清一次）。"""
+    with _LOCK:
+        keys = list(RUNNING)
+    for key in keys:
+        _reap(*key)
+
+
 def running_count(kind: str) -> int:
     with _LOCK:
         alive = 0
@@ -123,6 +144,7 @@ def start(
     user: str = "",
 ) -> Dict[str, Any]:
     problem_id = int(problem_id)
+    reap_all()
     if _has_running(db, kind, problem_id):
         return {"error": "该题已有同类任务在运行", "code": "JOB_RUNNING"}
     if running_count(kind) >= max(1, int(limit)):
@@ -235,6 +257,22 @@ def cancel(db: Any, problem_id: int, kind: str = "") -> Dict[str, Any]:
     return {"ok": True, "job_id": int(row["id"])}
 
 
+def mark_orphans(db: Any, reason: str = "服务重启，任务被中断（可重新生成）") -> int:
+    """启动时对账：上个进程留下的 running 任务，进程已经不在就标为中断。
+
+    为什么单独做一步：重启会连坐杀掉 worker，但数据库要等到有人来查状态才更新。
+    那之前界面一直显示「生成中」，更新时给的理由又是「进程异常」，
+    用户会以为程序崩了。pid 仍存活的不动，避免误伤手工拉起的进程。
+    """
+    count = 0
+    for row in db.query_all("SELECT id, os_pid FROM jobs WHERE status='running'"):
+        if process_alive(row["os_pid"]):
+            continue
+        finish(db, int(row["id"]), "failed", reason, "interrupted")
+        count += 1
+    return count
+
+
 def _stale(started_at: Any) -> bool:
     started = parse_ts(started_at)
     if started is None:
@@ -301,6 +339,7 @@ def elapsed_seconds(row: Any) -> int:
 
 
 def _serialize(db: Any, row: Any) -> Dict[str, Any]:
+    _reap(str(row["kind"]), int(row["problem_id"]))
     row = reconcile(db, row)
     result = None
     if row["result_json"]:

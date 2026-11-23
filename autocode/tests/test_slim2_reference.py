@@ -1,12 +1,12 @@
-"""D2R 参考解复算门的契约测试。
+"""D1R 代码答案门的契约测试。
 
 测的是"证据链"本身，不是模型好坏：
-- 标程过不了题面样例 → 门必须作废，不能拿它去改任何数据；
-- 标程过了样例且与期望一致 → `agree`；
-- 标程过了样例但与期望不同 → `corrected`，交给三方裁决；
-- 三方裁决在"执行 vs 两次口算"分歧时必须丢弃，不做多数决。
+- 题面有样例时，代码必须全过才算 `anchored`；
+- 题面没有样例时，代码照样执行，只是 `anchored=False`；
+- 裁决只在"执行结果"与"独立复核"之间做：一致 → cross_verified，
+  复核不准 → reference_only，复核自信算出不同结果且无样例锚定 → 丢弃。
 
-这里用真实 Python 子进程跑标程（不 mock 执行器）：门的意义就是"真跑"，
+这里用真实 Python 子进程跑代码（不 mock 执行器）：门的意义就是"真跑"，
 若把执行也 mock 掉，这组测试就证明不了任何事。
 """
 
@@ -78,15 +78,27 @@ class TestVerifyByRun(unittest.TestCase):
         self.assertEqual(result.status_of(1).output.strip(), "14")
 
     def test_gate_void_when_samples_fail(self) -> None:
-        """标程连样例都过不了 → 整道题的门作废，一条数据都不许改。"""
+        """有样例却过不了 → 代码不可信，整道题不拿它算答案。"""
         result = reference.verify_by_run(
             _runner(SAMPLE_ONLY_CODE + "\n"), "<题目/>",
             samples=[{"index": 1, "input": "5 5\n", "output": "10\n"}],
             items=_items(), judge_type="token",
         )
         self.assertFalse(result.engaged)
+        self.assertFalse(result.anchored)
         self.assertIn("样例", result.reason)
         self.assertEqual(result.verdicts, {})
+
+    def test_no_samples_still_executes(self) -> None:
+        """没有样例不是作废理由：代码照跑，只是没有锚。"""
+        result = reference.verify_by_run(
+            _runner(GOOD_CODE), "<题目/>",
+            samples=[], items=_items(), judge_type="token",
+        )
+        self.assertTrue(result.engaged, result.reason)
+        self.assertFalse(result.anchored)
+        self.assertEqual(result.status_of(0).status, reference.AGREE)
+        self.assertEqual(result.status_of(1).status, reference.CORRECTED)
 
     def test_gate_void_when_solution_crashes(self) -> None:
         result = reference.verify_by_run(
@@ -107,74 +119,61 @@ class TestVerifyByRun(unittest.TestCase):
 
 
 class TestDecideCases(unittest.TestCase):
-    """三方裁决：执行结果是硬证据，但不做多数决 —— 分歧就丢。"""
+    """两方裁决：执行结果是答案来源，复核是第二证据；无锚定时分歧就丢。"""
 
-    def _decide(self, status: str, run_output: str, d3: str,
-                d3_output: str | None = None, expected: str = "6\n"):
-        ref = reference.ReferenceResult(engaged=True)
-        ref.verdicts[0] = reference.RunVerdict(0, status, run_output)
+    def _decide(self, d3: str, *, anchored: bool = False,
+                expected: str = "6\n", d3_output: str | None = None):
+        ref = reference.ReferenceResult(engaged=True, anchored=anchored)
         items = [{"index": 0, "input": "10 4\n", "expected_output": expected,
                   "layer": "typical", "size_class": "small", "input_hash": "h"}]
         verdicts = {0: {"verdict": d3, "recomputed_output": d3_output, "reason": ""}}
         accepted, rejected, decisions = reference.decide_cases(
             items, verdicts, ref, "token", ""
         )
-        return accepted, rejected, decisions[0]
+        return accepted, rejected, decisions[0], ref
 
-    def test_agree_keeps_expected(self) -> None:
-        accepted, rejected, decision = self._decide(reference.AGREE, "6\n", "pass", "6\n")
+    def test_review_agrees_is_cross_verified(self) -> None:
+        accepted, rejected, decision, _ref = self._decide("pass", d3_output="6\n")
         self.assertEqual(decision["action"], "keep")
         self.assertEqual(decision["output"], "6\n")
         self.assertEqual(decision["trust"], "cross_verified")
         self.assertEqual((len(accepted), len(rejected)), (1, 0))
 
-    def test_agree_without_d3_is_reference_only(self) -> None:
-        """D3 算不准但执行对上 → 数据可用，但信任等级必须降为 reference_only。"""
-        _accepted, _rejected, decision = self._decide(reference.AGREE, "6\n", "uncertain")
+    def test_review_uncertain_is_reference_only(self) -> None:
+        """复核算不准，但代码真跑过 → 数据可用，信任等级降为 reference_only。"""
+        _accepted, _rejected, decision, _ref = self._decide("uncertain")
         self.assertEqual(decision["action"], "keep")
         self.assertEqual(decision["trust"], "reference_only")
 
-    def test_d3_backs_run_then_fix(self) -> None:
-        accepted, _rejected, decision = self._decide(
-            reference.CORRECTED, "14\n", "mismatch", "14\n"
-        )
-        self.assertEqual(decision["action"], "fix")
-        self.assertEqual(decision["output"], "14\n")
-        # 修正后的期望输出必须同步到可入库条目，否则入库还是旧值
-        self.assertEqual(accepted[0]["expected_output"], "14\n")
-
-    def test_d3_uncertain_trusts_run(self) -> None:
-        _accepted, _rejected, decision = self._decide(
-            reference.CORRECTED, "14\n", "uncertain"
-        )
-        self.assertEqual(decision["action"], "fix")
-        self.assertEqual(decision["trust"], "reference_only")
-
-    def test_d3_pass_vs_run_is_conflict(self) -> None:
-        """D3 认同口算、执行结果却不同 → 不赌，丢弃。"""
-        accepted, rejected, decision = self._decide(
-            reference.CORRECTED, "14\n", "pass", "6\n"
+    def test_confident_mismatch_without_anchor_is_rejected(self) -> None:
+        """代码与复核各自算出一个数、又没有样例可裁决 → 丢弃，不猜。"""
+        accepted, rejected, decision, _ref = self._decide(
+            "mismatch", anchored=False, d3_output="5\n"
         )
         self.assertEqual(decision["action"], "reject")
-        self.assertIn("都不同", decision["note"])
+        self.assertIn("没有样例", decision["note"])
         self.assertEqual((len(accepted), len(rejected)), (0, 1))
 
+    def test_confident_mismatch_with_anchor_keeps_execution(self) -> None:
+        """代码已过全部题面样例时，以执行结果为准，但不再标成双证据。"""
+        accepted, _rejected, decision, ref = self._decide(
+            "mismatch", anchored=True, expected="6\n", d3_output="5\n"
+        )
+        self.assertEqual(decision["action"], "keep")
+        self.assertEqual(decision["trust"], "reference_only")
+        self.assertEqual(accepted[0]["expected_output"], "6\n")
+        self.assertEqual(ref.conflicts_kept, 1)
+
     def test_invalid_is_rejected_even_if_run_agrees(self) -> None:
-        accepted, _rejected, decision = self._decide(reference.AGREE, "6\n", "invalid")
+        accepted, _rejected, decision, _ref = self._decide("invalid", anchored=True)
         self.assertEqual(decision["action"], "reject")
         self.assertEqual(len(accepted), 0)
 
-    def test_unverified_falls_back_to_d3(self) -> None:
-        _accepted, _rejected, decision = self._decide(reference.UNVERIFIED, "", "pass")
-        self.assertEqual(decision["action"], "keep")
-        self.assertIn("未经执行", decision["note"])
-
-    def test_absent_verdict_falls_back(self) -> None:
-        """整道题的门作废时，退回纯 D3 口径，不能凭空放行。"""
-        empty = reference.ReferenceResult(engaged=False)
+    def test_absent_verdict_is_rejected(self) -> None:
+        ref = reference.ReferenceResult(engaged=True)
         items = [{"index": 0, "input": "1 1\n", "expected_output": "2\n"}]
         accepted, rejected, decisions = reference.decide_cases(
-            items, {0: {"verdict": "uncertain", "recomputed_output": None}}, empty, "token", ""
+            items, {0: {"verdict": "", "recomputed_output": None}}, ref, "token", ""
         )
         self.assertEqual(decisions[0]["action"], "reject")
         self.assertEqual((len(accepted), len(rejected)), (0, 1))

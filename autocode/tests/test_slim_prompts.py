@@ -78,6 +78,8 @@ class TestSchemaContract(unittest.TestCase):
                 "multi_testcase", "constraints", "sample_count", "confidence", "note",
                 # 2026-11-22：排版分块只给类型与相对行号，正文仍由程序切片
                 "blocks",
+                # 题面内部夹着的界面文字/代码区：只能整行删，删了哪几行要留痕
+                "skip_lines",
             },
         )
         # 块只允许「类型 + 行号」，出现任何正文字段就说明模型开始转述题面了
@@ -85,21 +87,26 @@ class TestSchemaContract(unittest.TestCase):
         self.assertEqual(set(block), {"kind", "from", "to"})
 
     def test_dataset_schema(self) -> None:
-        first = _json_blocks(loader.load(loader.SLIM_DATASET))[0]
-        # 2026-11-21：去掉 plan 与 size_class。计划只用于模型自己思考，
-        # 程序不按它判失败；规模由服务端按输入实测，模型自报的标签没有意义。
-        self.assertEqual(set(first), {"analysis", "cases"})
+        # 提示词里还有契约的正例/反例片段；schema 是唯一同时含 io 与 cases 的那个块。
+        blocks = _json_blocks(loader.load(loader.SLIM_DATASET))
+        first = next(item for item in blocks if "cases" in item and "io" in item)
+        # v6：契约（io）与按契约重写的样例（samples）是必填项；
+        # cases 只出输入，期望输出由代码答案执行得出（不再让 LLM 口算）。
+        self.assertEqual(
+            set(first), {"io", "judge_type", "samples", "analysis", "plan", "cases"}
+        )
+        self.assertEqual(set(first["io"]), {"input", "output"})
+        self.assertIn("type", first["io"]["input"][0])
+        self.assertEqual(set(first["samples"][0]), {"input", "output"})
         self.assertEqual(
             set(first["analysis"]),
-            {"input_model", "answer_model", "constraint_dims", "risk_points", "unsupported_reason"},
+            {"input_model", "contract_note", "unsupported_reason"},
         )
         self.assertEqual(
             set(first["cases"][0]),
-            {"layer", "input", "derive", "expected_output", "confidence"},
+            {"layer", "size_class", "input", "why"},
         )
-        # 顺序即生成顺序：derive 必须排在 expected_output 前面
-        keys = list(first["cases"][0])
-        self.assertLess(keys.index("derive"), keys.index("expected_output"))
+        self.assertNotIn("expected_output", first["cases"][0])
 
     def test_dataset_review_schema(self) -> None:
         first = _json_blocks(loader.load(loader.SLIM_DATASET_REVIEW))[0]
@@ -156,10 +163,11 @@ class TestEnumsAndBlindReview(unittest.TestCase):
         text = loader.load(loader.SLIM_DATASET)
         for token in ("boundary", "typical", "stress", "trap"):
             self.assertIn(token, text)
-        # 不再有规模档与条数公式：那些是没有 ground truth 的配额
-        self.assertIn("没有配额", text)
+        # 契约是必填；答案由代码算，提示词必须把这条分工写死
+        for token in ('"io"', '"samples"', "unordered", "stdout 就是标准答案"):
+            self.assertIn(token, text, f"v6 契约口径缺 {token}")
         self.assertIn("unsupported_reason", text)
-        self.assertIn("必须**重新计算并改正**", text)
+        self.assertIn("为了\"答案好算\"而缩小规模", text)
 
     def test_dataset_review_is_blind(self) -> None:
         text = loader.load(loader.SLIM_DATASET_REVIEW)
@@ -208,7 +216,8 @@ class TestStageConfig(unittest.TestCase):
     def test_token_budget_covers_batch(self) -> None:
         from autocode.slim2 import stages
 
-        self.assertGreaterEqual(stages.DATASET.max_tokens, 8192, "40 条数据 4096 会被截断")
+        # 单批输入上限 60 KB 后，D2 要把这些输入原样写进 JSON，16k 会截断
+        self.assertGreaterEqual(stages.DATASET.max_tokens, 32768, "输入放宽后预算要跟上")
 
 
 if __name__ == "__main__":

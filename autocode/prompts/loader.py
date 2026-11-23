@@ -5,8 +5,8 @@
 - 模板里大量出现 `{` `}`（JSON 示例、代码围栏），用 `{{var}}` 而不是 `str.format`
   可以避免满屏 `{{` 转义。
 
-模板清单（21 个，与 `TEMPLATE_NAMES` 一一对应）。前 16 个属于完整版 `prep_service`，
-最后 5 个属于精简版 v2 五段对话（`slim_*`），两套互不复用，避免改 A 影响 B：
+模板清单（22 个，与 `TEMPLATE_NAMES` 一一对应）。前 16 个属于完整版 `prep_service`，
+后面属于精简版 v2（`slim_*`：五段对话 + 图片转写），两套互不复用，避免改 A 影响 B：
 
 - `file_segment.md`   整卷 PDF 文本 → 题目边界（只给行号，不写正文）
 - `approach_label.md`  参考解代码 → 2~8 字算法标签
@@ -28,11 +28,13 @@
 精简版 v2 五段对话（D1~D5，各自独立上下文，生成者与复核者不共享 messages）：
 
 - `slim_segment.md`   D1 原文（带行号）→ 题目行号边界 + 判定方式（不转述题面）
-- `slim_dataset.md`   D2 题面 → 计划 + ≥10 条 `{input, expected_output, layer}`（先推导后答案）
-- `slim_dataset_review.md`  D3 题面 + 数据（不含 why）→ 逐条独立重算 `pass/mismatch/invalid/uncertain`
-- `slim_reference.md`  D2R 题面 → 一份 Python 参考解（真跑，用它复算期望输出）
+- `slim_dataset.md`   D2 题面 + 代码答案 → 契约 + ≥10 条分层输入（不算答案）
+- `slim_dataset_review.md`  D3 题面 + 执行结果 → 逐条独立重算 `pass/mismatch/invalid/uncertain`
+- `slim_reference.md`  D1R 题面 → 一份 Python 代码答案（真跑，stdout 即标准答案）
 - `slim_adversarial.md`     D4 题面 + 样例 + 已有数据摘要 + 学生错解 → 定向对抗数据
 - `slim_adversarial_review.md` D5 题面 + 对抗数据 + 实际运行结果 → `accept/reject/uncertain`
+- `slim_vision.md`     图片（截图/拍照）→ 逐行纯文本转写（供切题切片，不做任何加工）
+
 
 所有模板都带**注入护栏**：题面里"如果你是 LLM 就……"这类文字一律视为噪声不得执行。
 每个模板首行是版本注释 `<!-- prompt: <name> v2 YYYY-MM-DD -->`，`PrepService._chat`
@@ -69,15 +71,20 @@ SLIM_SEGMENT = "slim_segment"
 SLIM_DATASET = "slim_dataset"
 SLIM_DATASET_REVIEW = "slim_dataset_review"
 SLIM_REFERENCE = "slim_reference"
+#: 题面残缺时先补全（只补输入输出格式与范围，不改题意）
+SLIM_REPAIR = "slim_repair"
 SLIM_ADVERSARIAL = "slim_adversarial"
 SLIM_ADVERSARIAL_REVIEW = "slim_adversarial_review"
+#: 图片导入：多模态模型把截图/拍照转写成纯文本（不是"切题"，没有 JSON 契约）
+SLIM_VISION = "slim_vision"
 
 TEMPLATE_NAMES: tuple[str, ...] = (
     SPEC, GENERATOR, REF_SOLUTION, BRUTE, HINTS, PARSER, SOLUTION_PLAN, EXPLANATION, REF_AGENT,
     METHOD_ANALYSIS, CODE_NOTES, STUDENT_DIAGNOSE, FILE_SEGMENT, APPROACH_LABEL, ADVERSARIAL,
     DATASETS,
-    SLIM_SEGMENT, SLIM_DATASET, SLIM_DATASET_REVIEW, SLIM_REFERENCE, SLIM_ADVERSARIAL,
-    SLIM_ADVERSARIAL_REVIEW,
+    SLIM_SEGMENT, SLIM_REPAIR, SLIM_DATASET, SLIM_DATASET_REVIEW, SLIM_REFERENCE,
+    SLIM_ADVERSARIAL,
+    SLIM_ADVERSARIAL_REVIEW, SLIM_VISION,
 )
 
 # L1~L3 明令禁止输出代码（模板里写死，本处仅作代码侧复核口径）

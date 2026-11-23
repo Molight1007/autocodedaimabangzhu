@@ -41,11 +41,32 @@ CREATE TABLE IF NOT EXISTS import_segments (
 CREATE INDEX IF NOT EXISTS ix_segments_batch ON import_segments(batch_id, idx);
 
 -- ── 题库 ────────────────────────────────────────────────────────────────────
+-- 一个库一组题目。两类：
+--   temp      —— 默认题库：所有账号可增删，最多 MAX_PROBLEMS_TOTAL 道；
+--   permanent —— 永久库：只有管理员可增删，不限数量，任何操作都不自动删题。
+-- 判定只在服务端做（见 banks.can_manage），前端按钮置灰只是提示。
+CREATE TABLE IF NOT EXISTS banks (
+  id INTEGER PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE,
+  kind TEXT NOT NULL DEFAULT 'temp',                      -- temp / permanent
+  created_by TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL
+);
+
+-- 默认题库必须存在：老库的题在迁移时全部回填 bank_id=1。
+-- ON CONFLICT 不带目标：id 或 name 撞上都不报错（幂等，每次启动都会执行）。
+INSERT INTO banks(id, name, kind, created_by, created_at)
+VALUES(1, '默认题库', 'temp', '', strftime('%Y-%m-%dT%H:%M:%S+00:00','now'))
+ON CONFLICT DO NOTHING;
+
 CREATE TABLE IF NOT EXISTS problems (
   id INTEGER PRIMARY KEY,
+  bank_id INTEGER NOT NULL DEFAULT 1,                     -- 所属题库；1 = 默认题库
   title TEXT NOT NULL,
   statement_md TEXT NOT NULL,
-  statement_hash TEXT NOT NULL UNIQUE,
+  -- 唯一性按"库内"算：同一道题可以在默认题库和永久库各存一份。
+  -- 全局唯一会让永久库在收录已有题时被静默判重、少一道。
+  statement_hash TEXT NOT NULL,
   samples_json TEXT NOT NULL DEFAULT '[]',
   constraints_json TEXT NOT NULL DEFAULT '[]',
   judge_type TEXT NOT NULL DEFAULT 'token',               -- token / line / exact / float / special / interactive
@@ -55,9 +76,15 @@ CREATE TABLE IF NOT EXISTS problems (
   dataset_version INTEGER NOT NULL DEFAULT 0,
   quality_json TEXT,
   layout_json TEXT NOT NULL DEFAULT '[]',                 -- 排版分块（相对行号，1=题面首行）
+  exec_spec_json TEXT NOT NULL DEFAULT '',                -- 自动生成的执行规格（stdin 协议 + 转换后样例）
+  statement_original TEXT NOT NULL DEFAULT '',            -- 题面被模型补全前的原文（未补全时为空）
+  statement_repaired INTEGER NOT NULL DEFAULT 0,          -- 1 = 当前 statement_md 是模型补全的
   created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL
+  updated_at TEXT NOT NULL,
+  UNIQUE(bank_id, statement_hash)
 );
+
+CREATE INDEX IF NOT EXISTS ix_problems_bank ON problems(bank_id, id DESC);
 
 -- 题目插图：PDF 切题时按几何位置归属，确认入库后从原 PDF 裁剪落盘
 CREATE TABLE IF NOT EXISTS problem_figures (

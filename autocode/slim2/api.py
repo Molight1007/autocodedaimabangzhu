@@ -11,46 +11,19 @@ import io
 import json
 import time
 from dataclasses import replace
-from datetime import datetime, timezone
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from ..llm.client import LlmClient, LlmConfig, LlmError
-from . import config, files, jobs, segment, user_llm
+from . import banks, config, files, jobs, problem_purge, segment, user_llm
+from .api_common import _int, _loads, _now, _page_limit
 from .llm_stage import StageRunner
 from .validators import code_hash, judge_supported
 
 
-def _now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
-
-def _loads(raw: Any, default: Any) -> Any:
-    try:
-        return json.loads(str(raw)) if raw else default
-    except (TypeError, ValueError):
-        return default
-
-
-def _int(value: Any, default: int = 0) -> int:
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return default
-
-
-def _page_limit(value: Any, default: int = 50, cap: int = 200) -> int:
-    """归一化分页条数。
-
-    SQLite 里 `LIMIT -1` 表示"不限"，把负数直接透传会把整表读进内存；
-    而 `max(1, ...)` 又会把 -3 变成"只返回 1 条"。两种都不对，非正数一律按默认值。
-    """
-    number = _int(value, default)
-    if number <= 0:
-        return default
-    return min(cap, number)
-
-
 # ── 导入 ────────────────────────────────────────────────────────────────────
-def import_text(db: Any, runner: StageRunner, payload: Dict[str, Any]) -> Dict[str, Any]:
+def import_text(
+    db: Any, runner: StageRunner, payload: Dict[str, Any], role: str = "student"
+) -> Dict[str, Any]:
     text = str(payload.get("text") or "")
     if not text.strip():
         return {"error": "文本为空", "code": "INVALID_INPUT"}
@@ -67,6 +40,8 @@ def import_text(db: Any, runner: StageRunner, payload: Dict[str, Any]) -> Dict[s
         figures=figures if isinstance(figures, list) else None,
         page_ranges=ranges if isinstance(ranges, list) else None,
         pdf_key=str(payload.get("pdf_key") or ""),
+        bank_id=_int(payload.get("bank_id"), banks.DEFAULT_ID),
+        role=role,
     )
 
 
@@ -90,18 +65,60 @@ def cache_pdf(raw: bytes) -> str:
     return key
 
 
-def import_extract(db: Any, payload: Dict[str, Any]) -> Dict[str, Any]:
-    """上传文件（PDF / DOCX / TXT / MD）→ 只抽文本，不切题。
+def import_extract(
+    db: Any, payload: Dict[str, Any], runner: Optional[StageRunner] = None
+) -> Dict[str, Any]:
+    """上传文件（PDF / Word / 图片 / TXT / MD）→ 只抽文本，不切题。
 
     刻意不在这里顺手切题：PDF 抽出来的文字常有页眉、页码、公式乱码，
     必须让人先看一眼、必要时改两笔，再点"开始切题"。否则错文本会被固化进库。
 
+    图片没有文字层：交给多模态模型转写（`vision.transcribe`），需要调用者的 Key，
+    所以 `runner` 为 None 时直接拒绝——绝不复用别人的额度。
+
     PDF 额外回传图块清单与页-行映射（都很小：16 张图约 1KB）。
     图片本身不走前端，确认入库时由服务端按 bbox 从缓存的 PDF 裁剪。
     """
+    figures: List[Dict[str, Any]] = []
+    page_ranges: List[List[int]] = []
+    pdf_key = ""
     try:
         name, raw = files.decode_upload(payload)
-        text = files.extract_text(name, raw)
+        kind = files.sniff_kind(name, raw)
+        bundle = files.extract_pdf_bundle(raw) if kind == files.KIND_PDF else None
+        if kind == files.KIND_IMAGE:
+            if runner is None:
+                raise files.FileError(
+                    "识别图片要用到你自己的模型 Key：请先在右上角「模型设置」里配置后再上传",
+                    "NO_KEY",
+                )
+            from . import vision
+
+            text = vision.transcribe(runner, name, raw)
+        elif bundle is not None:
+            # PDF 的文本**只用 bundle 这一份**：它已删掉页眉页脚与图内文字，
+            # 行号、页映射、图锚点都按它编号。另起一份文本会让行号错位，
+            # 图归属会静默失效（实测：两者只差 38 行，4 张图全部丢失）。
+            cleaned = str(bundle.get("text") or "")
+            if len(cleaned.strip()) >= 50:
+                text = cleaned
+                figures = list(bundle["figures"])
+                page_ranges = list(bundle["page_ranges"])
+                pdf_key = cache_pdf(raw)
+            else:
+                # 扫描件/拍照导出的 PDF：没有文字层，但页面本身就是图片。
+                # 渲染成图走同一条视觉通道，而不是让用户自己截图重传。
+                if runner is None:
+                    raise files.FileError(
+                        "这份 PDF 没有文字层（扫描件或拍照导出），需要多模态模型识别页面。"
+                        "请先在右上角「模型设置」里配置 Key 后再上传",
+                        "NO_KEY",
+                    )
+                from . import vision
+
+                text = vision.transcribe_pages(runner, name, files.render_pdf_pages(raw))
+        else:
+            text = files.extract_text(name, raw)
     except files.FileError as exc:
         return {"error": str(exc), "code": exc.code}
 
@@ -111,16 +128,6 @@ def import_extract(db: Any, payload: Dict[str, Any]) -> Dict[str, Any]:
             "code": "TOO_LARGE",
         }
 
-    figures: List[Dict[str, Any]] = []
-    page_ranges: List[List[int]] = []
-    pdf_key = ""
-    if name.lower().endswith(".pdf"):
-        bundle = files.extract_pdf_bundle(raw)
-        # 只在这份文本与抽取原文一致时启用图归属：用户改过文本，行号就对不上了
-        if bundle and str(bundle["text"]).strip() == text.strip():
-            figures = list(bundle["figures"])
-            page_ranges = list(bundle["page_ranges"])
-            pdf_key = cache_pdf(raw)
     return {
         "ok": True,
         "filename": name,
@@ -133,13 +140,15 @@ def import_extract(db: Any, payload: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def import_file(db: Any, runner: StageRunner, payload: Dict[str, Any]) -> Dict[str, Any]:
+def import_file(
+    db: Any, runner: StageRunner, payload: Dict[str, Any], role: str = "student"
+) -> Dict[str, Any]:
     """上传文件 → 抽文本 → 直接切题。
 
     切题本来就是模型干的活，不该让人先当校对员。抽取的原文随结果回传一份，
     只在"切出来的题不对"时展开看，不挡在正常流程里。
     """
-    prepared = import_extract(db, payload)
+    prepared = import_extract(db, payload, runner)
     if prepared.get("error"):
         return prepared
     text = str(prepared["text"])
@@ -152,6 +161,8 @@ def import_file(db: Any, runner: StageRunner, payload: Dict[str, Any]) -> Dict[s
         figures=prepared.get("figures") or [],
         page_ranges=prepared.get("page_ranges") or [],
         pdf_key=str(prepared.get("pdf_key") or ""),
+        bank_id=_int(payload.get("bank_id"), banks.DEFAULT_ID),
+        role=role,
     )
     if isinstance(result, dict) and result.get("ok"):
         result["source"] = {
@@ -229,173 +240,44 @@ def probe_llm(db: Any, payload: Dict[str, Any], user: str = "") -> Dict[str, Any
     }
 
 
-def confirm_import(db: Any, batch_id: int, payload: Dict[str, Any]) -> Dict[str, Any]:
+def confirm_import(
+    db: Any, batch_id: int, payload: Dict[str, Any], role: str = "student"
+) -> Dict[str, Any]:
     raw = payload.get("indices")
     indices = [int(item) for item in raw] if isinstance(raw, list) else []
-    return segment.confirm_import(db, int(batch_id), indices)
+    return segment.confirm_import(
+        db,
+        int(batch_id),
+        indices,
+        bank_id=_int(payload.get("bank_id"), banks.DEFAULT_ID),
+        role=role,
+    )
 
 
 # ── 题库 ────────────────────────────────────────────────────────────────────
-def list_problems(
-    db: Any, *, q: str = "", status: str = "", offset: int = 0, limit: int = 50
-) -> Dict[str, Any]:
-    where = ["1=1"]
-    params: List[Any] = []
-    if q.strip():
-        where.append("title LIKE ?")
-        params.append(f"%{q.strip()}%")
-    if status.strip():
-        where.append("status=?")
-        params.append(status.strip())
-    clause = " AND ".join(where)
-    total = db.query_scalar(f"SELECT COUNT(*) FROM problems WHERE {clause}", tuple(params), 0)
-    rows = db.query_all(
-        f"SELECT id, title, status, dataset_version, samples_json, created_at"
-        f" FROM problems WHERE {clause} ORDER BY id DESC LIMIT ? OFFSET ?",
-        tuple(params + [_page_limit(limit), max(0, int(offset))]),
-    )
-    items = []
-    for row in rows:
-        pid = int(row["id"])
-        items.append(
-            {
-                "id": pid,
-                "title": str(row["title"]),
-                "status": str(row["status"]),
-                "version": int(row["dataset_version"] or 0),
-                "samples": len(_loads(row["samples_json"], [])),
-                # 只统计当前版本：历史版本仍留在库里（便于回溯），但界面上的
-                # "数据 N 条"必须等于详情页看到的条数，否则会以为数据凭空变多
-                "cases": int(db.query_scalar(
-                    "SELECT COUNT(*) FROM test_cases"
-                    " WHERE problem_id=? AND version=? AND status='active'",
-                    (pid, int(row["dataset_version"] or 0)), 0,
-                )),
-                "adversarial": int(db.query_scalar(
-                    "SELECT COUNT(*) FROM adversarial_cases WHERE problem_id=? AND status='active'",
-                    (pid,), 0,
-                )),
-                "created_at": str(row["created_at"] or ""),
-            }
-        )
-    return {"ok": True, "total": int(total or 0), "items": items}
+def list_banks(db: Any, role: str = "student") -> Dict[str, Any]:
+    return {"ok": True, "banks": banks.list_banks(db, role)}
 
 
-def _problem_figures(db: Any, problem_id: int) -> List[Dict[str, Any]]:
-    """题目插图（老库没有该表时返回空，不让详情页炸掉）。"""
-    try:
-        rows = db.query_all(
-            "SELECT label, page, bbox_json, path, width, height, after_line"
-            " FROM problem_figures WHERE problem_id=? ORDER BY ordinal, id",
-            (int(problem_id),),
-        )
-    except Exception:  # noqa: BLE001
-        return []
-    return [
-        {
-            "label": str(item["label"]),
-            "page": int(item["page"] or 0),
-            "bbox": _loads(item["bbox_json"], []),
-            "url": str(item["path"] or ""),
-            "width": float(item["width"] or 0),
-            "height": float(item["height"] or 0),
-            "after_line": int(item["after_line"] or 1),
-        }
-        for item in rows
-    ]
+def create_bank(db: Any, payload: Dict[str, Any], role: str, user: str = "") -> Dict[str, Any]:
+    """新建永久库：只有管理员能建，建出来的库一律是 permanent。"""
+    if str(role or "") != "admin":
+        return {"error": "只有管理员可以新建永久库", "code": "FORBIDDEN"}
+    return banks.create(db, payload.get("name"), user)
 
 
-def problem_detail(db: Any, problem_id: int) -> Dict[str, Any]:
-    row = db.query_one("SELECT * FROM problems WHERE id=?", (int(problem_id),))
-    if row is None:
-        raise KeyError(problem_id)
-    pid = int(row["id"])
-    version = int(row["dataset_version"] or 0)
-    layers = {
-        str(item["layer"]): int(item["c"])
-        for item in db.query_all(
-            "SELECT layer, COUNT(*) AS c FROM test_cases"
-            " WHERE problem_id=? AND version=? AND status='active' GROUP BY layer",
-            (pid, version),
-        )
-    }
-    trusts = {
-        str(item["trust"]): int(item["c"])
-        for item in db.query_all(
-            "SELECT trust, COUNT(*) AS c FROM test_cases"
-            " WHERE problem_id=? AND version=? AND status='active' GROUP BY trust",
-            (pid, version),
-        )
-    }
-    return {
-        "ok": True,
-        "id": pid,
-        "title": str(row["title"]),
-        "statement": str(row["statement_md"]),
-        "figures": _problem_figures(db, pid),
-        # 排版分块：模型只给行号与类型，位置由前端按块拼；空数组表示用自动排版
-        "layout": _loads(row["layout_json"], []),
-        "samples": _loads(row["samples_json"], []),
-        "constraints": _loads(row["constraints_json"], []),
-        "judge_type": str(row["judge_type"]),
-        "tolerance": str(row["tolerance"] or ""),
-        "multi_testcase": bool(row["multi_testcase"]),
-        "status": str(row["status"]),
-        "version": version,
-        "quality": _loads(row["quality_json"], {}),
-        "layers": layers,
-        "trusts": trusts,
-        "total_cases": sum(layers.values()),
-        "jobs": {
-            "dataset": jobs.status(db, pid, "dataset"),
-            "adversarial": jobs.status(db, pid, "adversarial"),
-        },
-        "created_at": str(row["created_at"] or ""),
-    }
+def bank_write_error(db: Any, bank_id: Any, role: str) -> Optional[Dict[str, Any]]:
+    """入库前的第一道检查：库在不在、这个角色能不能往里加题。
 
-
-def list_cases(
-    db: Any,
-    problem_id: int,
-    *,
-    layer: str = "",
-    offset: int = 0,
-    limit: int = 50,
-) -> Dict[str, Any]:
-    row = db.query_one("SELECT dataset_version FROM problems WHERE id=?", (int(problem_id),))
-    if row is None:
-        raise KeyError(problem_id)
-    version = int(row["dataset_version"] or 0)
-    where = ["problem_id=?", "version=?", "status='active'"]
-    params: List[Any] = [int(problem_id), version]
-    if layer.strip():
-        where.append("layer=?")
-        params.append(layer.strip())
-    clause = " AND ".join(where)
-    total = db.query_scalar(f"SELECT COUNT(*) FROM test_cases WHERE {clause}", tuple(params), 0)
-    rows = db.query_all(
-        f"SELECT id, layer, size_class, input_data, expected_output, trust, source, ordinal"
-        f" FROM test_cases WHERE {clause} ORDER BY ordinal, id LIMIT ? OFFSET ?",
-        tuple(params + [_page_limit(limit), max(0, int(offset))]),
-    )
-    return {
-        "ok": True,
-        "version": version,
-        "total": int(total or 0),
-        "items": [
-            {
-                "id": int(item["id"]),
-                "layer": str(item["layer"]),
-                "size_class": str(item["size_class"] or ""),
-                "input": str(item["input_data"]),
-                "expected_output": str(item["expected_output"]),
-                "trust": str(item["trust"] or ""),
-                "source": str(item["source"] or ""),
-                "ordinal": int(item["ordinal"] or 0),
-            }
-            for item in rows
-        ],
-    }
+    放在服务器入口而不是只放在 `segment_text` 里，是为了让"学生选了永久库"
+    直接得到明确的拒绝，而不是先被"没配 Key"挡住——那句提示会把人带偏。
+    """
+    bank = banks.get(db, _int(bank_id, banks.DEFAULT_ID))
+    if bank is None:
+        return {"error": "题库不存在", "code": "NOT_FOUND"}
+    if not banks.can_manage(bank, role):
+        return {"error": banks.DENY_ADD, "code": "FORBIDDEN"}
+    return None
 
 
 # ── 生成任务 ────────────────────────────────────────────────────────────────
@@ -409,7 +291,9 @@ def start_dataset(db: Any, payload: Dict[str, Any], user: str = "") -> Dict[str,
             "error": f"判定方式 {row['judge_type']} 本版本不支持（没有自定义 checker）",
             "code": "INVALID_INPUT",
         }
-    if not _loads(row["samples_json"], []):
+    # 老题的样例是导入那一刻算的：先按当前规则补算一次，再判断能不能生成
+    samples = _loads(row["samples_json"], []) or segment.refresh_samples(db, row)
+    if config.require_samples() and not samples:
         return {"error": "这道题没有解析出样例，无法校准期望输出", "code": "NEED_SAMPLES"}
     budget = max(2, min(10, _int(payload.get("budget"), config.DEFAULT_BUDGET_CALLS)))
     result = jobs.start(
@@ -654,13 +538,19 @@ def export_problem(db: Any, problem_id: int, fmt: str = "json") -> Dict[str, Any
     }
 
 
-def delete_problem(db: Any, problem_id: int, confirm_title: str = "") -> Dict[str, Any]:
+def delete_problem(
+    db: Any, problem_id: int, confirm_title: str = "", role: str = "student"
+) -> Dict[str, Any]:
     row = db.query_one(
-        "SELECT id, title, status, dataset_version FROM problems WHERE id=?", (int(problem_id),)
+        "SELECT id, bank_id, title, status, dataset_version FROM problems WHERE id=?",
+        (int(problem_id),),
     )
     if row is None:
         return {"error": "题目不存在", "code": "NOT_FOUND"}
     pid = int(row["id"])
+    bank = banks.get(db, row["bank_id"])
+    if bank is not None and banks.is_permanent(bank) and str(role or "") != "admin":
+        return {"error": banks.DENY_DELETE, "code": "FORBIDDEN"}
     title = str(row["title"])
     cases = int(db.query_scalar(
         "SELECT COUNT(*) FROM test_cases WHERE problem_id=? AND status='active'", (pid,), 0
@@ -678,24 +568,33 @@ def delete_problem(db: Any, problem_id: int, confirm_title: str = "") -> Dict[st
             "cases": cases,
             "adversarial": adversarial,
         }
-    # 连接没开 PRAGMA foreign_keys，ON DELETE CASCADE 不生效，
-    # 必须显式按依赖顺序清干净，否则留下指向空题目的孤儿行
+    # 级联清理与「题库超限自动删题」共用一条路径：漏一张表就会留下孤儿行
+    problem_purge.purge_problem(db, pid)
+    return {"ok": True}
+
+
+def restore_statement(db: Any, problem_id: int) -> Dict[str, Any]:
+    """把模型补全过的题面还原成原文。
+
+    补全是有副作用的写库操作，必须给回退路径：否则用户看到的题一旦被改坏，
+    除了重新导入没有别的办法（而重新导入会被 statement_hash 判成重复题）。
+    """
+    row = db.query_one(
+        "SELECT statement_original, statement_repaired FROM problems WHERE id=?",
+        (int(problem_id),),
+    )
+    if row is None:
+        return {"error": "题目不存在", "code": "NOT_FOUND"}
+    original = str(row["statement_original"] or "")
+    if not int(row["statement_repaired"] or 0) or not original:
+        return {"error": "这道题的题面没有被模型补全过", "code": "NOT_REPAIRED"}
     with db.transaction() as conn:
         conn.execute(
-            "DELETE FROM case_reviews WHERE case_id IN"
-            " (SELECT id FROM test_cases WHERE problem_id=?)", (pid,)
+            "UPDATE problems SET statement_md=?, statement_original='', statement_repaired=0,"
+            " samples_json='[]', exec_spec_json='', updated_at=? WHERE id=?",
+            (original, _now(), int(problem_id)),
         )
-        conn.execute(
-            "DELETE FROM adversarial_reviews WHERE adv_case_id IN"
-            " (SELECT id FROM adversarial_cases WHERE problem_id=?)", (pid,)
-        )
-        conn.execute("DELETE FROM adversarial_cases WHERE problem_id=?", (pid,))
-        conn.execute("DELETE FROM submissions WHERE problem_id=?", (pid,))
-        conn.execute("DELETE FROM test_cases WHERE problem_id=?", (pid,))
-        conn.execute("DELETE FROM dataset_plans WHERE problem_id=?", (pid,))
-        conn.execute("DELETE FROM jobs WHERE problem_id=?", (pid,))
-        conn.execute("DELETE FROM problems WHERE id=?", (pid,))
-    return {"ok": True}
+    return {"ok": True, "statement": original, "problem_id": int(problem_id)}
 
 # 反馈相关函数移到了 api_feedback，这里再导出一次，保持 `api.xxx` 的调用方式不变。
 # 必须放在文件末尾：api_feedback 反过来要用本模块的 _page_limit/_now。
@@ -707,3 +606,6 @@ from .api_feedback import (  # noqa: E402  (晚导入，避免循环依赖)
     list_feedback,
     reply_feedback,
 )
+# 题库读取拆到 api_catalog（api.py 的 800 行硬线）；这里再导出一次，
+# 保持 `api.list_problems / api.problem_detail / api.list_cases` 的调用方式不变。
+from .api_catalog import list_cases, list_problems, problem_detail  # noqa: E402

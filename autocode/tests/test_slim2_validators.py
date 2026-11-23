@@ -99,6 +99,13 @@ class TestSegments(unittest.TestCase):
         self.assertEqual(draft.items[0]["tolerance"], "1e-6")
 
 
+def _clean(obj, **kw):
+    """check_dataset 的最小参数集：本文件只测清洗逻辑，不测条数配额。"""
+    kw.setdefault("min_cases", 1)
+    kw.setdefault("max_cases", 40)
+    return v.check_dataset(obj, **kw)
+
+
 class TestDatasetClean(unittest.TestCase):
     """D2 只做清洗：拆包、逐条去坏、与样例对账。不做任何配额判定。
 
@@ -107,14 +114,14 @@ class TestDatasetClean(unittest.TestCase):
     """
 
     def test_happy_path(self) -> None:
-        draft = v.check_dataset(_payload())
+        draft = _clean(_payload())
         self.assertTrue(draft.ok, draft.fatal)
         self.assertEqual(len(draft.items), 12)
 
     def test_duplicates_are_dropped_not_failed(self) -> None:
         obj = _payload()
         obj["cases"] = [dict(obj["cases"][0]) for _ in range(12)]
-        draft = v.check_dataset(obj)
+        draft = _clean(obj)
         self.assertTrue(draft.ok, draft.fatal)
         self.assertEqual(len(draft.items), 1)
 
@@ -122,28 +129,52 @@ class TestDatasetClean(unittest.TestCase):
         # 与样例同输入不同输出，代码不判——交给 D3 与标程真跑裁决
         obj = _payload()
         obj["cases"][0] = _case("boundary", "3\n1 2 3\n", "999\n")
-        draft = v.check_dataset(obj)
+        draft = _clean(obj)
         self.assertIn("3\n1 2 3\n", [item["input"] for item in draft.items])
+
+    def test_oversize_input_is_dropped(self) -> None:
+        """单条输入上限 20 KB：放宽了，但仍然要有上限。"""
+        data = "1 " * (v.MAX_INPUT_CHARS // 2 + 1)  # 刚好超过当前上限
+        draft = _clean(_payload(cases=[_case("typical", data, "", "覆盖大输入")]))
+        self.assertFalse(draft.ok)
+        self.assertIn(str(v.MAX_INPUT_CHARS), "；".join(draft.warnings + draft.fatal))
+
+    def test_too_many_lines_is_dropped(self) -> None:
+        from autocode.slim2 import config
+
+        data = "1\n" * (config.MAX_INPUT_LINES + 1)  # 行数超、字符数没超
+        draft = _clean(_payload(cases=[_case("typical", data, "", "覆盖多行")]))
+        self.assertFalse(draft.ok)
+        self.assertIn("行", "；".join(draft.warnings + draft.fatal))
+
+    def test_missing_expected_output_is_usable(self) -> None:
+        """v6 起 D2 只出输入；答案由代码执行补上，校验器不能把这种批次判死。"""
+        draft = _clean(_payload(cases=[
+            {"layer": "boundary", "input": "3\n1 2 3\n", "why": "检查最大值"}
+        ]))
+        self.assertTrue(draft.ok, draft.fatal)
+        self.assertEqual(draft.items[0]["expected_output"], "")
+        self.assertEqual(draft.items[0]["input"], "3\n1 2 3\n")
 
     def test_missing_layers_is_still_usable(self) -> None:
         # 只有 typical：以前会被"分层覆盖未达标"判死，现在照常入库
         cases = [_case("typical", f"{i}\n{i}\n", f"{i}\n") for i in range(1, 8)]
-        draft = v.check_dataset(_payload(cases=cases))
+        draft = _clean(_payload(cases=cases))
         self.assertTrue(draft.ok, draft.fatal)
         self.assertEqual(len(draft.items), 7)
 
     def test_constant_output_is_not_a_failure(self) -> None:
         # 有些题答案本来就恒定，这不是数据错
         cases = [_case("boundary", f"{i}\n{i}\n", "0\n") for i in range(1, 8)]
-        draft = v.check_dataset(_payload(cases=cases))
+        draft = _clean(_payload(cases=cases))
         self.assertTrue(draft.ok, draft.fatal)
 
     def test_all_invalid_fails(self) -> None:
         obj = _payload()
         obj["cases"] = [{"layer": "nope", "input": "", "expected_output": ""} for _ in range(3)]
-        draft = v.check_dataset(obj)
+        draft = _clean(obj)
         self.assertFalse(draft.ok)
-        self.assertIn("没法入库", "；".join(draft.fatal))
+        self.assertIn("少于下限", "；".join(draft.fatal))
 
 
 class TestDatasetReview(unittest.TestCase):
@@ -255,7 +286,7 @@ class TestFixedArityDataset(unittest.TestCase):
         ]
 
     def test_tiny_stress_is_accepted_when_input_size_is_fixed(self) -> None:
-        draft = v.check_dataset(_fixed_payload(self._cases()))
+        draft = _clean(_fixed_payload(self._cases()))
         self.assertTrue(draft.ok, draft.fatal)
         stress = [item for item in draft.items if item["layer"] == "stress"]
         self.assertEqual(len(stress), 1)
@@ -265,14 +296,14 @@ class TestFixedArityDataset(unittest.TestCase):
         # 模型就算硬塞一个 size_class 也不会被采信，存的是实测值
         cases = self._cases()
         cases[7]["size_class"] = "large"
-        draft = v.check_dataset(_fixed_payload(cases))
+        draft = _clean(_fixed_payload(cases))
         self.assertTrue(draft.ok, draft.fatal)
         self.assertEqual(draft.items[7]["size_class"], "tiny")
 
     def test_no_layer_quota(self) -> None:
         # 只给 typical 也能入库：覆盖是建议，不是门槛
         cases = [_case("typical", f"{i} 1 1\n", f"{i + 2}\n") for i in range(1, 6)]
-        draft = v.check_dataset(_fixed_payload(cases))
+        draft = _clean(_fixed_payload(cases))
         self.assertTrue(draft.ok, draft.fatal)
 
 

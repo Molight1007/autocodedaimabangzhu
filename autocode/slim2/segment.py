@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from ..app.ingest_csp import parse_samples
-from . import config
+from . import banks, config, problem_purge
 from .llm_stage import StageRunner
 from .stages import SEGMENT
 from .validators import check_segments, judge_supported
@@ -107,6 +107,11 @@ _PAGE_FURNITURE_RE = re.compile(
 )
 
 
+def is_page_furniture(line: str) -> bool:
+    """这行是不是页眉/页脚/页码（整行匹配才算）。"""
+    return bool(_PAGE_FURNITURE_RE.match(str(line).strip()))
+
+
 def strip_page_furniture(lines: Sequence[str]) -> Tuple[List[str], List[str]]:
     """删掉整行的页眉/页脚/页码，返回 (保留行, 删除行)。
 
@@ -115,7 +120,7 @@ def strip_page_furniture(lines: Sequence[str]) -> Tuple[List[str], List[str]]:
     kept: List[str] = []
     removed: List[str] = []
     for line in lines:
-        if _PAGE_FURNITURE_RE.match(line.strip()):
+        if is_page_furniture(line):
             removed.append(line)
         else:
             kept.append(line)
@@ -153,6 +158,27 @@ def extract_samples(statement: str) -> List[Dict[str, Any]]:
     return out
 
 
+def refresh_samples(db: Any, problem: Any) -> List[Dict[str, Any]]:
+    """题面样例为空时，按**当前**解析规则从 statement_md 重算一次并落库。
+
+    为什么必须补这一步：`samples_json` 是导入那一刻算出来存下的。解析规则升级后，
+    老题仍然带着旧结果（0 组）；而重新导入会被 `statement_hash` 判成重复题、
+    只返回旧 problem_id，样例不会更新——用户看到的就是"改完了还是不行"。
+
+    只在为空时触发：已有样例的题不动，避免新规则把人工确认过的结果悄悄改掉。
+    """
+    statement = str(problem["statement_md"] or "")
+    samples = extract_samples(statement)
+    if not samples:
+        return []
+    with db.transaction() as conn:
+        conn.execute(
+            "UPDATE problems SET samples_json=?, updated_at=? WHERE id=?",
+            (_json(samples), _now(), int(problem["id"])),
+        )
+    return samples
+
+
 def attach_figures_by_page(
     rows: List[Dict[str, Any]],
     figures: Sequence[Dict[str, Any]],
@@ -170,7 +196,7 @@ def attach_figures_by_page(
     warnings: List[str] = []
     if not figures or not page_ranges:
         return warnings
-    used: Dict[Tuple[int, int], int] = {}
+    used: Dict[int, int] = {}
     for figure in figures:
         figure_id = str(figure.get("id") or "")
         try:
@@ -195,9 +221,23 @@ def attach_figures_by_page(
             )
             continue
         start = int(best_row["start_line"])
-        key = (start, page)
-        offset = used.get(key, 0)
-        used[key] = offset + 1
+        # 优先用"图上方的文字行"算插入位置：只按页码会把图一律放到页首，
+        # 实测 CSP32 第 6 页的树图画在下半页，按页码得到的是题面第 1 行。
+        anchor = int(figure.get("anchor_line") or 0)
+        total = len(str(best_row.get("statement_md") or "").split("\n"))
+        if anchor > 0:
+            after = anchor - start + 1
+            after = max(1, min(after, max(1, total)))
+        else:
+            # 图在本页最上方（上方只有页眉）：应插在"本页第一行之前"，
+            # 而不是本页第一行之后——后者会把图压到图内文字下面
+            after = max(1, max(start, page_start) - start)
+        key = start
+        # 同一题的多张图必须严格递增，否则前端排序不稳定、图会挤在一起
+        previous = used.get(key, 0)
+        if previous:
+            after = max(after, previous + 1)
+        used[key] = after
         best_row.setdefault("figures", []).append(
             {
                 "id": figure_id,
@@ -205,7 +245,7 @@ def attach_figures_by_page(
                 "bbox": figure.get("bbox") or [],
                 "width": float(figure.get("width") or 0),
                 "height": float(figure.get("height") or 0),
-                "after_line": max(1, max(start, page_start) - start + 1) + offset,
+                "after_line": after,
             }
         )
     return warnings
@@ -260,6 +300,41 @@ def normalize_layout(blocks: List[Dict[str, Any]], lines: Sequence[str]) -> Tupl
     return merged, inserted
 
 
+def _slice_statement(item: Dict[str, Any], lines: Sequence[str]) -> Tuple[List[str], Dict[int, int], int]:
+    """切出题面正文：去掉模型标为"不属于题面"的行与页眉页脚。
+
+    返回 `(正文行, 旧相对行号→新相对行号, 删掉的行数)`。映射给分块用：
+    删行之后块坐标必须跟着挪，否则排版会把正文挂到别的小节下面。
+    """
+    start, end = int(item["start_line"]), int(item["end_line"])
+    skip = set(item.pop("skip_lines", None) or [])
+    body: List[str] = []
+    mapping: Dict[int, int] = {}
+    removed = 0
+    for absolute in range(start, end + 1):
+        text = lines[absolute - 1]
+        if absolute in skip or is_page_furniture(text):
+            removed += 1
+            continue
+        mapping[absolute - start + 1] = len(body) + 1
+        body.append(text)
+    return body, mapping, removed
+
+
+def _remap_blocks(blocks: Any, mapping: Dict[int, int]) -> Optional[List[Dict[str, Any]]]:
+    """把分块坐标换到删行后的题面上；整块都被删掉就丢掉这块。"""
+    out: List[Dict[str, Any]] = []
+    for block in blocks or []:
+        hits = [
+            mapping[number]
+            for number in range(int(block["from"]), int(block["to"]) + 1)
+            if number in mapping
+        ]
+        if hits:
+            out.append({**block, "from": min(hits), "to": max(hits)})
+    return out or None
+
+
 def segment_text(
     db: Any,
     runner: StageRunner,
@@ -270,7 +345,15 @@ def segment_text(
     figures: Optional[Sequence[Dict[str, Any]]] = None,
     page_ranges: Optional[Sequence[Sequence[int]]] = None,
     pdf_key: str = "",
+    bank_id: int = banks.DEFAULT_ID,
+    role: str = "student",
 ) -> Dict[str, Any]:
+    # 先判库和权限，再花模型的钱：学生选了永久库就直接回去，不白烧一次调用。
+    bank = banks.get(db, bank_id)
+    if bank is None:
+        return {"error": "题库不存在", "code": "NOT_FOUND"}
+    if not banks.can_manage(bank, role):
+        return {"error": banks.DENY_ADD, "code": "FORBIDDEN"}
     cleaned = clean_text(text)
     if len(cleaned) < MIN_STATEMENT_CHARS:
         return {"error": f"文本太短（{len(cleaned)} 字符），至少 {MIN_STATEMENT_CHARS} 字符", "code": "INVALID_INPUT"}
@@ -297,12 +380,12 @@ def segment_text(
 
     rows: List[Dict[str, Any]] = []
     for item in draft.items:
-        statement = slice_lines(lines, item["start_line"], item["end_line"])
-        # 兜底：模型边界可能跨过未识别的页眉/页脚，入库前再洗一次
-        kept, dropped = strip_page_furniture(statement.split("\n"))
-        if dropped:
-            statement = clean_text("\n".join(kept))
-            draft.warnings.append(f"《{item['title']}》切片里又发现 {len(dropped)} 行页眉页脚，已去除")
+        # 题面 = 原文切片，减去"不属于题面"的行。
+        # 只能整行删，且删了哪几行会写进告警——不做任何改写，原文仍是唯一来源。
+        body, mapping, removed = _slice_statement(item, lines)
+        statement = clean_text("\n".join(body))
+        if removed:
+            draft.warnings.append(f"《{item['title']}》已剔除 {removed} 行不属于题面的文字")
         # 只挡"行号切出来是空的"这一种必然错误；够不够长、像不像一道题交给模型判断
         if not statement.strip():
             draft.warnings.append(f"《{item['title']}》行号 {item['start_line']}-{item['end_line']} 切出来是空的，已跳过")
@@ -314,8 +397,8 @@ def segment_text(
             draft.warnings.append(
                 f"《{item['title']}》判定方式为 {item['judge_type']}，本版本不支持，生成时会被拒收"
             )
-        # 分块是排版用的"拼图"：结构已在 check_blocks 验过，这里补缝并合并碎块
-        blocks = item.pop("blocks", None)
+        # 分块是排版用的"拼图"：坐标要跟着删行一起重映射，否则排版会错位
+        blocks = _remap_blocks(item.pop("blocks", None), mapping)
         layout: Optional[List[Dict[str, Any]]] = None
         if blocks:
             layout, inserted = normalize_layout(blocks, statement.split("\n"))
@@ -371,6 +454,11 @@ def segment_text(
     return {
         "ok": True,
         "batch_id": batch_id,
+        "bank": banks.view(db, bank, role),
+        "library_total": int(db.query_scalar(
+            "SELECT COUNT(*) FROM problems WHERE bank_id=?", (int(bank["id"]),), 0
+        )),
+        "library_cap": banks.cap_of(bank),
         "segments": [
             {
                 "idx": index,
@@ -452,7 +540,21 @@ def _save_figures(
     return saved
 
 
-def confirm_import(db: Any, batch_id: int, indices: Sequence[int]) -> Dict[str, Any]:
+def confirm_import(
+    db: Any,
+    batch_id: int,
+    indices: Sequence[int],
+    *,
+    bank_id: int = banks.DEFAULT_ID,
+    role: str = "student",
+) -> Dict[str, Any]:
+    bank = banks.get(db, bank_id)
+    if bank is None:
+        return {"error": "题库不存在", "code": "NOT_FOUND"}
+    # 权限在入库这一刻再判一次：切题时可能是管理员，确认时可能是另一个人；
+    # 而且接口是公开的，不能只靠前端把按钮藏起来。
+    if not banks.can_manage(bank, role):
+        return {"error": banks.DENY_ADD, "code": "FORBIDDEN"}
     batch = db.query_one("SELECT * FROM import_batches WHERE id=?", (int(batch_id),))
     if batch is None:
         return {"error": "导入批次不存在", "code": "NOT_FOUND"}
@@ -472,7 +574,11 @@ def confirm_import(db: Any, batch_id: int, indices: Sequence[int]) -> Dict[str, 
             continue
         statement = str(row["statement_md"])
         digest = hashlib.sha256(statement.encode("utf-8")).hexdigest()
-        existed = db.query_one("SELECT id FROM problems WHERE statement_hash=?", (digest,))
+        # 查重按库算：同一道题可以在默认题库和永久库各存一份
+        existed = db.query_one(
+            "SELECT id FROM problems WHERE bank_id=? AND statement_hash=?",
+            (int(bank["id"]), digest),
+        )
         if existed is not None:
             with db.transaction() as conn:
                 conn.execute(
@@ -484,11 +590,12 @@ def confirm_import(db: Any, batch_id: int, indices: Sequence[int]) -> Dict[str, 
         now = _now()
         with db.transaction() as conn:
             cursor = conn.execute(
-                "INSERT INTO problems(title, statement_md, statement_hash, samples_json,"
+                "INSERT INTO problems(bank_id, title, statement_md, statement_hash, samples_json,"
                 " constraints_json, judge_type, tolerance, multi_testcase, layout_json, status,"
                 " dataset_version, created_at, updated_at)"
-                " VALUES(?,?,?,?,?,?,?,?,?, 'draft', 0, ?, ?)",
+                " VALUES(?,?,?,?,?,?,?,?,?,?, 'draft', 0, ?, ?)",
                 (
+                    int(bank["id"]),
                     str(row["title"]),
                     statement,
                     digest,
@@ -519,6 +626,19 @@ def confirm_import(db: Any, batch_id: int, indices: Sequence[int]) -> Dict[str, 
             if count == 0 and batch["pdf_key"]:
                 imported[-1]["figure_warning"] = "插图裁剪失败，可重新导入该 PDF"
 
+    # 临时库每次确认入库都把数量压回上限：超出的删最早入库的，留下的就是最新一批。
+    # 永久库在这一步直接返回 0：不设上限，也不自动删题。
+    trimmed = 0
+    try:
+        trimmed = problem_purge.trim_to_cap(db, bank_id=int(bank["id"]))
+    except Exception as exc:  # noqa: BLE001 - 上限清理是收尾动作，不该判入库失败
+        print(f"题库上限清理失败：{exc}", flush=True)
+    # 单批就超过上限时，刚入库的题也可能被清掉；别让前端去打开一道已经不在的题
+    imported = [
+        item
+        for item in imported
+        if db.query_one("SELECT 1 FROM problems WHERE id=?", (int(item["problem_id"]),))
+    ]
     if imported:
         with db.transaction() as conn:
             conn.execute("UPDATE import_batches SET status='confirmed' WHERE id=?", (int(batch_id),))
@@ -527,6 +647,12 @@ def confirm_import(db: Any, batch_id: int, indices: Sequence[int]) -> Dict[str, 
         "imported": imported,
         "duplicates": duplicates,
         "skipped": skipped,
+        "bank": banks.view(db, bank, role),
+        "library_total": int(db.query_scalar(
+            "SELECT COUNT(*) FROM problems WHERE bank_id=?", (int(bank["id"]),), 0
+        )),
+        "library_cap": banks.cap_of(bank),
+        "library_replaced": trimmed,
     }
 
 

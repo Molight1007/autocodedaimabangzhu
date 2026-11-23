@@ -77,3 +77,6 @@ File/key.txt
 /docs/
 /架构设计.md
 exports/
+
+# 本地运维脚本：含服务器地址，仅本地保留
+隧道-连服务器.bat

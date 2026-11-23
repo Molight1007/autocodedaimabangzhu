@@ -72,6 +72,15 @@ class StageRunner:
             self._clients[key] = LlmClient(config=cfg)
         return self._clients[key]
 
+    @property
+    def vision_supported(self) -> bool:
+        """本 runner 用过的客户端是否接受图片输入。
+
+        `False` 表示服务端报过"这个模型不收图"、客户端已剥图重试：
+        那一次的回复看着成功，其实模型**没看到图**，调用方必须自己拦下来。
+        """
+        return all(client._vision_supported for client in self._clients.values())
+
     # ── 记账 ────────────────────────────────────────────────────────────────
     def _record(
         self,
@@ -116,8 +125,9 @@ class StageRunner:
             raise BudgetExhausted(f"本题预算 {self.budget} 次对话已用完")
         self.calls += 1
 
-    def call_text(self, spec: StageSpec, user_content: str, *, attempt: int = 1) -> str:
-        """要纯文本（参考解是代码块，不是 JSON）；记账口径与 `call` 一致。"""
+    def call_text(self, spec: StageSpec, user_content: Any, *, attempt: int = 1) -> str:
+        """要纯文本（参考解是代码块、图片转写是正文）；`user_content` 也可以是
+        多模态 content 数组（`[{type:text}, {type:image_url}]`）。记账口径与 `call` 一致。"""
         self._budget_guard()
 
         system_text = loader.load(spec.template)

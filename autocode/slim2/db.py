@@ -35,7 +35,16 @@ _COLUMN_MIGRATIONS = {
     "jobs": (("user", "TEXT NOT NULL DEFAULT ''"),),
     "llm_calls": (("user", "TEXT NOT NULL DEFAULT ''"),),
     # 排版分块：模型只给行号，前端按块拼装；空数组表示退回自动排版
-    "problems": (("layout_json", "TEXT NOT NULL DEFAULT '[]'"),),
+    "problems": (
+        ("layout_json", "TEXT NOT NULL DEFAULT '[]'"),
+        # 执行规格：题面无标准输入格式时自动生成（stdin 协议 + 转换后样例），
+        # 空串表示没做过转换，按题面原文处理
+        ("exec_spec_json", "TEXT NOT NULL DEFAULT ''"),
+        # 题面补全：原文留档 + 标记，界面要显式说明"这段是补的"，并能一键还原。
+        # 不能只覆盖 statement_md，否则用户永远不知道自己看的题被动过。
+        ("statement_original", "TEXT NOT NULL DEFAULT ''"),
+        ("statement_repaired", "INTEGER NOT NULL DEFAULT 0"),
+    ),
 }
 
 
@@ -47,10 +56,74 @@ def _ensure_columns(conn: Any) -> None:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
 
 
+def _table_exists(conn: Any, name: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (str(name),)
+    ).fetchone()
+    return row is not None
+
+
+def _columns(conn: Any, table: str) -> set:
+    return {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+
+
+def _rebuild_problems(conn: Any) -> None:
+    """老库升级：`problems` 加 `bank_id`，唯一键改成（bank_id, statement_hash）。
+
+    为什么必须整表重建：SQLite 不能直接删掉或修改 UNIQUE 约束，只能新建表再复制。
+    两个 PRAGMA 是这次迁移的关键：
+    - `foreign_keys=OFF`：否则 DROP 旧表会按 ON DELETE CASCADE 把子表数据一起删掉；
+    - `legacy_alter_table=ON`：否则 SQLite 会把子表外键改写成指向旧表名，
+      新表建好之后外键就全部悬空。
+    复制完立刻跑 `foreign_key_check`，不通过就直接报错，宁可启动失败也不带着坏库跑。
+    """
+    old_columns = _columns(conn, "problems")
+    conn.execute("PRAGMA foreign_keys=OFF")
+    conn.execute("PRAGMA legacy_alter_table=ON")
+    try:
+        conn.execute("ALTER TABLE problems RENAME TO problems_bank_legacy")
+        conn.executescript(config.SCHEMA_FILE.read_text(encoding="utf-8"))
+        new_columns = _columns(conn, "problems")
+        # 只复制两边都有的列：老库可能缺后加的列（让新表默认值生效），
+        # 也可能多出别的版本才有的列（slim2 用不到，不带走）。
+        copy = [name for name in new_columns if name in old_columns and name != "bank_id"]
+        if copy:
+            conn.execute(
+                f"INSERT INTO problems({', '.join(copy + ['bank_id'])})"
+                f" SELECT {', '.join(copy + ['1'])} FROM problems_bank_legacy"
+            )
+        old_total = int(conn.execute("SELECT COUNT(*) FROM problems_bank_legacy").fetchone()[0])
+        new_total = int(conn.execute("SELECT COUNT(*) FROM problems").fetchone()[0])
+        if old_total != new_total:
+            raise RuntimeError(f"题库迁移复制不完整：旧表 {old_total} 行，新表 {new_total} 行")
+        conn.execute("DROP TABLE problems_bank_legacy")
+        bad = conn.execute("PRAGMA foreign_key_check").fetchall()
+        if bad:
+            raise RuntimeError(f"题库迁移后外键检查未通过：{bad[:3]}")
+    finally:
+        conn.execute("PRAGMA legacy_alter_table=OFF")
+        conn.execute("PRAGMA foreign_keys=ON")
+
+
+def _ensure_default_bank(conn: Any) -> None:
+    """默认题库必须有一行：老库迁移后所有题都归到 id=1 这个库里。"""
+    conn.execute(
+        "INSERT INTO banks(id, name, kind, created_by, created_at)"
+        " VALUES(1, '默认题库', 'temp', '', ?) ON CONFLICT DO NOTHING",
+        (_now(),),
+    )
+
+
 def _init(db: Database) -> None:
     conn = db.connect()
-    conn.executescript(config.SCHEMA_FILE.read_text(encoding="utf-8"))
+    # 老库先重建再建表：schema.sql 里的 ix_problems_bank 依赖 bank_id，
+    # 顺序反了会在 ALTER 之前就报 "no such column"。
+    if _table_exists(conn, "problems") and "bank_id" not in _columns(conn, "problems"):
+        _rebuild_problems(conn)
+    else:
+        conn.executescript(config.SCHEMA_FILE.read_text(encoding="utf-8"))
     _ensure_columns(conn)
+    _ensure_default_bank(conn)
     conn.execute(
         "INSERT INTO schema_migrations(version, applied_at) VALUES(?, ?)"
         " ON CONFLICT(version) DO NOTHING",

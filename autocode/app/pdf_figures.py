@@ -328,6 +328,33 @@ def page_line_ranges(doc: Any) -> List[Tuple[int, int]]:
     return line_ranges([page.get_text() for page in doc])
 
 
+def page_text_lines(doc: Any) -> List[List[Tuple[float, float, str]]]:
+    """每页文字行的 `(y0, y1, 文本)`，顺序与 `page.get_text()` 的行一致。
+
+    用途：把图块的顶边对到"它上方最近的一行文字"，算出图该插在哪一行之后。
+    只按页码归属是不够的——一页的图可能画在页面下半部，按页码会算成"页首"。
+    实测 CSP32 第 6 页的树图画在 `下图示意性地说明了…` 之后，按页码得到的却是
+    题面第 1 行（页首），图会跑到标题下面。
+
+    注意 `get_text()` 与 `get_text("dict")` 都会跳过空白行，所以这里只返回有字的行，
+    调用方必须按**文本内容**回查清洗后的行号，不能按索引对齐。
+    """
+    pages: List[List[Tuple[float, float, str]]] = []
+    for page in doc:
+        lines: List[Tuple[float, float, str]] = []
+        for block in page.get_text("dict").get("blocks", []):
+            if int(block.get("type", -1)) != 0:
+                continue
+            for line in block.get("lines", []):
+                text = "".join(span.get("text", "") for span in line.get("spans", []))
+                if not text.strip():
+                    continue
+                bbox = line.get("bbox") or (0.0, 0.0, 0.0, 0.0)
+                lines.append((float(bbox[1]), float(bbox[3]), text))
+        pages.append(lines)
+    return pages
+
+
 def render_page_jpeg(
     doc: Any, page_index: int, *, dpi: int = 150, quality: int = 80
 ) -> bytes:

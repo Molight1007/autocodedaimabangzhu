@@ -100,6 +100,34 @@
     color:var(--faint); margin-bottom:9px;
   }
   .list-title b{font-size:12px; color:var(--muted); letter-spacing:0; font-weight:600}
+  .list-title b.full{color:var(--warn)}
+  .list-title-right{display:flex; align-items:baseline; gap:8px}
+  .bank-add{
+    border:0; background:none; padding:0; font:inherit; font-size:11.5px; font-weight:600;
+    color:var(--accent-ink); cursor:pointer; letter-spacing:0;
+  }
+  .bank-add:hover{text-decoration:underline}
+  .bank-row{display:flex; gap:6px; align-items:center; margin-bottom:9px}
+  .bank-row select{
+    flex:1; min-width:0; width:100%; height:32px; padding:0 28px 0 10px; font-size:12.5px;
+    background:var(--surface-2); border:1px solid var(--line); border-radius:var(--r-sm);
+    font-family:inherit; color:var(--ink); outline:none;
+  }
+  .bank-row select:focus{border-color:var(--accent); box-shadow:0 0 0 3px rgba(79,70,229,.1)}
+  .bank-tag{
+    display:inline-flex; align-items:center; height:20px; padding:0 7px; border-radius:999px;
+    border:1px solid var(--line-strong); color:var(--muted); font-size:11.5px; white-space:nowrap;
+  }
+  .bank-tag.perm{border-color:var(--accent-line); background:var(--accent-soft); color:var(--accent-ink)}
+  .bank-target{display:flex; align-items:center; gap:9px; margin-bottom:12px; flex-wrap:wrap}
+  .bank-target label{font-size:12px; font-weight:500; color:var(--muted); white-space:nowrap}
+  .bank-target select{
+    flex:0 1 280px; height:32px; padding:0 28px 0 10px; font-size:12.5px;
+    border:1px solid var(--line); border-radius:var(--r-sm); background:var(--surface);
+    font-family:inherit; color:var(--ink); outline:none;
+  }
+  .bank-target select:focus{border-color:var(--accent); box-shadow:0 0 0 3px rgba(79,70,229,.1)}
+  .bank-target .muted{font-size:11.5px}
   .search{position:relative}
   .search svg{
     position:absolute; left:10px; top:50%; transform:translateY(-50%);
@@ -757,7 +785,7 @@
     <div class="brand">
       <span class="mark"><svg viewBox="0 0 24 24"><path d="M12 3 3 7.5l9 4.5 9-4.5L12 3Z"/><path d="M3 12.5 12 17l9-4.5"/><path d="M3 17 12 21l9-4"/></svg></span>
       <span class="name">题目数据工坊</span>
-      <span class="ver" id="build-tag" title="部署版本">插图版 11-22</span>
+      <span class="ver" id="build-tag" title="部署版本">题库版 11-23</span>
     </div>
     <nav class="nav">
       <button id="nav-bank" class="active">
@@ -787,7 +815,16 @@
     <div class="view" id="view-bank">
       <aside class="list">
         <div class="list-head">
-          <div class="list-title"><span>题库</span><b id="list-count"></b></div>
+          <div class="list-title">
+            <span>题库</span>
+            <span class="list-title-right">
+              <b id="list-count"></b>
+              <button class="bank-add hidden" id="btn-new-bank" title="新建永久库">+ 永久库</button>
+            </span>
+          </div>
+          <div class="bank-row">
+            <select id="bank-select" aria-label="切换题库"></select>
+          </div>
           <div class="search" id="search-box">
             <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.2-3.2"/></svg>
             <input id="q" placeholder="搜索题目…" autocomplete="off" />
@@ -806,14 +843,20 @@
             <p>上传整卷或粘贴题面。哪几段是题、边界在哪，由模型判断；题面本身由程序按行号从原文切片，模型改不了字。</p>
           </div>
 
+          <div class="bank-target">
+            <label for="import-bank">入库到</label>
+            <select id="import-bank" aria-label="选择题库"></select>
+            <span class="muted" id="import-bank-hint"></span>
+          </div>
+
           <div id="import-form">
             <div class="dropzone" id="dropzone" role="button" tabindex="0" aria-label="选择文件导入">
               <div class="dz-icon">
                 <svg viewBox="0 0 24 24"><path d="M12 16V4m0 0L8 8m4-4 4 4"/><path d="M4 16v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>
               </div>
               <div class="dz-main">把文件拖到这里，或点击选择</div>
-              <div class="dz-sub">PDF / Word(.docx) / TXT / Markdown</div>
-              <input type="file" id="file" accept=".pdf,.docx,.txt,.md,.markdown,.csv" hidden />
+              <div class="dz-sub">任何文件：图片(截图·拍照) / PDF / Word / Excel / PPT / 文本 / 代码<br>也可以直接 Ctrl+V 粘贴截图</div>
+              <input type="file" id="file" hidden />
             </div>
 
             <div class="or">或者直接粘贴题面</div>
@@ -842,7 +885,11 @@
           <ul class="tips" id="import-tips">
             <li><b>识别交给模型</b>：哪几段是题、边界在哪，都由它判断，不需要人工校对。</li>
             <li><b>题面不可篡改</b>：切题只标行号，题面由程序从原文切片。</li>
-            <li><b>支持格式</b>：PDF / Word(.docx) / TXT / Markdown；扫描件请先 OCR。</li>
+            <li><b>入库目标可选</b>：默认题库最多 100 道，超出会移出最早入库的题；
+              永久库不设上限，只有管理员能在里面增删题目。</li>
+            <li><b>支持格式</b>：任何文件都能传。图片(截图/拍照/HEIC)、PDF(含扫描件)、Word、Excel、PPT、文本与代码——
+              服务器按<b>文件内容</b>判断类型，后缀写错也不影响。</li>
+              图片与扫描件会交给多模态模型识别，需要把模型名设成支持图片的型号（如 deepseek-flash）。</li>
           </ul>
 
           <div class="imp-ok hidden" id="imp-ok">
@@ -852,6 +899,8 @@
           </div>
 
           <div id="segments" style="margin-top:14px"></div>
+
+          <div class="notice warn hidden" id="cap-warn"></div>
 
           <div class="import-actions hidden" id="import-actions">
             <span class="muted" id="selected-count"></span>
@@ -885,7 +934,10 @@
       </div>
       <div class="field">
         <label for="st-model">模型</label>
-        <input id="st-model" spellcheck="false" placeholder="deepseek-chat" />
+        <input id="st-model" spellcheck="false" placeholder="deepseek-flash" />
+        <div class="tip">填官网当前的型号名 <b>deepseek-flash</b>（DeepSeek V4.1 Flash，原生支持图片）。
+          一个型号即可覆盖文字 / PDF / Word / 图片；<b>deepseek-chat</b> 是旧名，
+          实测在生成长 JSON 时会把预算烧空、返回空内容，不建议再用。</div>
       </div>
       <div class="row" style="margin-top:14px">
         <button class="btn" id="btn-test">测试连接</button>
@@ -929,6 +981,28 @@
         项目地址：<a href="https://github.com/Molight1007/autocodedaimabangzhu" target="_blank" rel="noopener">github.com/Molight1007/autocodedaimabangzhu</a>
         <span class="muted">（也可以在这上面提 Issue）</span>
       </div>
+    </div>
+  </div>
+</div>
+
+<div class="modal hidden" id="modal-bank">
+  <div class="sheet" style="width:min(430px,96vw)" role="dialog" aria-modal="true" aria-label="新建永久库">
+    <div class="sheet-head">
+      <h2>新建永久库</h2>
+      <div class="spacer"></div>
+      <button class="link" id="close-bank">关闭</button>
+    </div>
+    <div class="sheet-body">
+      <div class="field">
+        <label for="bank-name">库名</label>
+        <input id="bank-name" maxlength="40" autocomplete="off" spellcheck="false"
+               placeholder="例如：CCF-CSP 历届第一题" />
+        <div class="tip">永久库不设题目上限；建好后只有管理员能在里面增加或删除题目。</div>
+      </div>
+    </div>
+    <div class="sheet-foot">
+      <button class="btn" id="btn-bank-cancel">取消</button>
+      <button class="btn primary" id="btn-bank-create" disabled>新建</button>
     </div>
   </div>
 </div>
@@ -980,6 +1054,8 @@ const S = {
   cases: { items: [], total: 0 },
   adv: [], advSubs: [],
   batchId: null, segments: [],
+  libraryTotal: 0, libraryCap: 0,
+  banks: [], bankId: 0, importBankId: 0,
   advCode: '', advLang: 'python',
   timer: null, pollJobId: 0, pollProblemId: 0, pollMisses: 0,
   detailToken: 0, listToken: 0, settingsOpen: false, feedbackOpen: false,
@@ -1002,8 +1078,8 @@ const STMT_MARK = /^\s*【\s*([^】]{1,16}?)\s*】\s*$/;
 const STMT_BULLET = /^\s*[•·▪◆■*]\s*/;
 const STMT_CJK = /[\u3000-\u9fff\uff00-\uffef]/;
 const STMT_SAMPLE = /^样例\s*(\d+)?\s*(输入|输出|解释)?$/;
-//: 模型给的样例标签块，形如 `【样例1 输入】`
-const LAYOUT_SAMPLE_LABEL = /^【?\s*样例\s*(\d+)?\s*(输入|输出)\s*】?$/;
+//: 模型给的样例标签块，形如 `【样例1 输入】` / `样例输入：`（学生粘贴的题面常见后者）
+const LAYOUT_SAMPLE_LABEL = /^【?\s*样例\s*(\d+)?\s*(输入|输出)\s*】?\s*[：:]?\s*$/;
 //: 允许的块类型，与后端 validators.BLOCK_KINDS 一一对应
 const LAYOUT_KINDS = new Set(['heading', 'para', 'list', 'code', 'sample_input', 'sample_output']);
 
@@ -1168,13 +1244,14 @@ function layoutBlocks(layout, total) {
   return blocks;
 }
 
-function renderByLayout(blocks, lines, pushFigures) {
+function renderByLayout(blocks, lines, takeFigures) {
   const out = [];
   const slice = (block) => lines.slice(block.from - 1, block.to).join('\n');
   let cursor = 0;
   let sampleNo = 0;
 
-  const emitFigures = (block) => pushFigures(block.to);
+  const emitFigures = (block) => takeFigures(block.to)
+    .forEach((fig) => out.push(figureHtml(fig)));
 
   while (cursor < blocks.length) {
     const block = blocks[cursor];
@@ -1215,7 +1292,7 @@ function renderByLayout(blocks, lines, pushFigures) {
           + `<td>${output ? `<pre>${esc(output)}</pre>` : '<pre class="empty">（无）</pre>'}</td>`
           + '</tr></tbody></table></div>'
         );
-        pushFigures(end);
+        takeFigures(end).forEach((fig) => out.push(figureHtml(fig)));
         cursor = next;
         continue;
       }
@@ -1231,7 +1308,20 @@ function renderByLayout(blocks, lines, pushFigures) {
     } else if (block.kind === 'code') {
       out.push(`<pre class="stmt-code">${esc(slice(block))}</pre>`);
     } else {
-      out.push(`<p>${esc(stmtJoinLines(slice(block).split('\n')))}</p>`);
+      // 段落内部有图：在图片所属行处切段，避免把图顺延到段尾
+      const picked = takeFigures(block.to);
+      let from = block.from;
+      picked.forEach((fig) => {
+        const at = Math.min(Math.max(from, Number(fig.after_line) || from), block.to);
+        const head = stmtJoinLines(lines.slice(from - 1, at));
+        if (head) out.push(`<p>${esc(head)}</p>`);
+        out.push(figureHtml(fig));
+        from = at + 1;
+      });
+      const rest = stmtJoinLines(lines.slice(from - 1, block.to));
+      if (rest) out.push(`<p>${esc(rest)}</p>`);
+      cursor += 1;
+      continue;
     }
     emitFigures(block);
     cursor += 1;
@@ -1239,6 +1329,15 @@ function renderByLayout(blocks, lines, pushFigures) {
   return out.join('\n');
 }
 
+function figureHtml(fig) {
+  return `<figure class="stmt-fig"><img src="${esc(fig.url)}" `
+    + `alt="${esc(fig.label || '题面插图')}" loading="lazy"></figure>`;
+}
+
+// 一行图插在哪儿：`after_line` 是"插在题面第 N 行之后"。
+// 段落常常横跨几十行，若按"整块之后"顺延，图会被推到段落末尾（实测 CSP32 的
+// 三张图全部堆到题面最后）。这里按行边界把段落切成几段，只在行与行之间断开，
+// 一个字都不改。
 function renderStatement(statement, figures, title, layout) {
   const lines = String(statement || '').replace(/\r\n?/g, '\n').split('\n');
   const figs = (Array.isArray(figures) ? figures : [])
@@ -1246,35 +1345,51 @@ function renderStatement(statement, figures, title, layout) {
     .sort((a, b) => (Number(a.after_line) || 0) - (Number(b.after_line) || 0));
   const out = [];
   let cursor = 0;
-  const pushFigures = (upto) => {
+  const takeFigures = (upto) => {
+    const picked = [];
     while (cursor < figs.length && (Number(figs[cursor].after_line) || 0) <= upto) {
-      const fig = figs[cursor++];
-      out.push(
-        `<figure class="stmt-fig"><img src="${esc(fig.url)}" `
-        + `alt="${esc(fig.label || '题面插图')}" loading="lazy"></figure>`
-      );
+      picked.push(figs[cursor++]);
     }
+    return picked;
   };
 
   // 首选模型给的拼块；块不合法（旧数据/被改坏）就退回自动排版，绝不让正文错位
   const blocks = layoutBlocks(layout, lines.length);
   if (blocks) {
-    const html = renderByLayout(blocks, lines, pushFigures);
-    pushFigures(Number.MAX_SAFE_INTEGER);
-    return html + (out.length ? '\n' + out.join('\n') : '');
+    out.push(renderByLayout(blocks, lines, takeFigures));
+    takeFigures(Number.MAX_SAFE_INTEGER).forEach((fig) => out.push(figureHtml(fig)));
+    return out.join('\n');
   }
 
   const parsed = parseStatementBlocks(statement, title);
   if (!parsed.length) {
-    pushFigures(Number.MAX_SAFE_INTEGER);
-    return out.join('\n') || `<p>${esc(statement || '—')}</p>`;
+    const tail = takeFigures(Number.MAX_SAFE_INTEGER).map(figureHtml).join('\n');
+    return tail || `<p>${esc(statement || '—')}</p>`;
   }
   parsed.forEach((block) => {
-    out.push(renderStatementBlock(block));
-    // 图插在"它所属的整块"之后：宁可落在段落末尾，也不把一段话从中间劈开
-    pushFigures(block.end);
+    const picked = takeFigures(block.end);
+    if (!picked.length) {
+      out.push(renderStatementBlock(block));
+      return;
+    }
+    // 样例、列表、代码块不从中间劈开，图统一排在整块之后
+    if (block.kind !== 'para') {
+      out.push(renderStatementBlock(block));
+      picked.forEach((fig) => out.push(figureHtml(fig)));
+      return;
+    }
+    let from = block.start;
+    picked.forEach((fig) => {
+      const at = Math.min(Math.max(from, Number(fig.after_line) || from), block.end);
+      const text = stmtJoinLines(lines.slice(from - 1, at));
+      if (text) out.push(`<p>${esc(text)}</p>`);
+      out.push(figureHtml(fig));
+      from = at + 1;
+    });
+    const rest = stmtJoinLines(lines.slice(from - 1, block.end));
+    if (rest) out.push(`<p>${esc(rest)}</p>`);
   });
-  pushFigures(Number.MAX_SAFE_INTEGER);
+  takeFigures(Number.MAX_SAFE_INTEGER).forEach((fig) => out.push(figureHtml(fig)));
   return out.join('\n');
 }
 
@@ -1287,19 +1402,25 @@ const POLL_MAX_MISSES = 30;
 const LAYER_TEXT = { sample: '样例', boundary: '边界', typical: '典型', stress: '压力', trap: '陷阱' };
 const JUDGE_TEXT = {
   token: '逐词比较', line: '逐行比较', exact: '完全一致',
-  float: '浮点容差', special: '特殊判题', interactive: '交互',
+  float: '浮点容差', unordered: '无序比较', special: '特殊判题', interactive: '交互',
 };
-const TRUST_TEXT = { cross_verified: '双模型一致', reference_only: '标程实跑', partial: '部分复核', unreviewed: '未复核', sample: '题面样例' };
+const TRUST_TEXT = { cross_verified: '复核一致', reference_only: '代码实跑', partial: '部分复核', unreviewed: '未复核', sample: '题面样例' };
 const STAGE_TEXT = {
-  '数据生成': '正在生成测试数据', '重试生成': '首轮数据不合格，正在重试生成',
-  '数据复核': '正在独立复核', '参考解复算': '正在用标程复算数据',
+  '补全题面': '题面缺输入/输出格式，正在补全（只补格式，不改题意）',
+  '代码答案': '正在写代码答案', '数据生成': '正在设计分层输入',
+  '重试生成': '首轮输入不合格，正在重试生成',
+  '执行代码答案': '正在执行代码答案，算出期望输出',
+  '数据复核': '正在独立复核', '参考解复算': '正在用代码答案复算数据',
+  '规范化题面': '正在把题面转成标准输入格式',
   '编译学生代码': '正在编译错解', '样例基线': '正在跑样例',
   '构造对抗数据': '正在构造对抗数据', '真跑验证': '正在真跑验证', '复核对抗数据': '正在复核对抗数据',
 };
 // 失败时后端给的是内部阶段名（dataset / dataset_review…），界面要讲人话
 const FAIL_STAGE_TEXT = {
-  dataset: '数据生成', dataset_review: '数据复核', adversarial: '构造对抗数据',
-  adversarial_review: '复核对抗数据', process: '进程异常',
+  input: '题面检查', repair: '补全题面', config: '模型配置',
+  reference: '代码答案', dataset: '数据生成', dataset_review: '数据复核',
+  adversarial: '构造对抗数据', adversarial_review: '复核对抗数据', process: '进程异常',
+  interrupted: '服务重启中断',
 };
 const ICONS = {
   check: '<svg viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></svg>',
@@ -1326,7 +1447,16 @@ async function api(path, options) {
   }
   if (response.status === 401) { location.replace('/login'); throw new Error('请先登录'); }
   const data = await response.json().catch(() => ({ error: '服务返回了非 JSON' }));
-  if (!response.ok && data.error) throw new Error(data.error);
+  if (!response.ok && data.error) {
+    const error = new Error(data.error);
+    error.code = data.code || '';
+    // 题目被题库上限顶掉后，任何按 id 发起的请求都会 404：立刻把人送回题库，
+    // 否则页面还停在旧内容上，学生会以为还能继续生成数据。
+    // 只处理"被 404 的正是当前这道题"：旧请求晚到时不能把已经切过去的新题踢掉。
+    const gone = /^\/api\/problems\/(\d+)/.exec(String(path));
+    if (error.code === 'NOT_FOUND' && gone) goneDetail(Number(gone[1]));
+    throw error;
+  }
   return data;
 }
 
@@ -1351,6 +1481,26 @@ function emptyDetail() {
   if (button) button.addEventListener('click', () => switchView('import'));
 }
 
+// 被题库上限顶掉的题：接口一律 404，页面不能继续停在旧内容上。
+// 不写死上限数字，规则变了这里也不用跟着改。
+function goneDetail(problemId) {
+  if (!problemId || Number(S.current) !== Number(problemId)) return;
+  S.current = null;
+  S.detail = null;
+  S.cases = { items: [], total: 0 };
+  S.adv = []; S.advSubs = [];
+  clearInterval(S.timer);
+  $('detail').innerHTML = `
+    <div class="empty">
+      <div class="ico"><svg viewBox="0 0 24 24"><path d="M12 3 3 7.5l9 4.5 9-4.5L12 3Z"/><path d="M3 12.5 12 17l9-4.5"/></svg></div>
+      <h3>这道题已被移出题库</h3>
+      <p>可能是临时题库超出上限被顶掉，也可能是管理员删除了它。
+         这道题已经不能查看，也不能再生成数据。</p>
+    </div>`;
+  loadProblems();
+  toast('这道题已被移出题库');
+}
+
 function skeleton() {
   return `<div class="skel">
     <div class="bar" style="width:34%; height:20px"></div>
@@ -1360,22 +1510,113 @@ function skeleton() {
   </div>`;
 }
 
+// ── 题库切换 ────────────────────────────────────────────────────────────────
+// 永久库只有管理员能增删，判定以服务端为准；这里只负责把不能点的按钮说清楚。
+function bankById(id) {
+  return S.banks.find(item => Number(item.id) === Number(id)) || null;
+}
+
+function bankWritable(bank) {
+  return !!bank && (bank.kind !== 'permanent' || S.role === 'admin');
+}
+
+function bankLabel(bank) {
+  return `${bank.name}${bank.kind === 'permanent' ? ' · 永久' : ''}（${bank.total} 道）`;
+}
+
+// 只改选项文字，不重建 select：重建会打断用户正在选的焦点
+function refreshBankOption(bank) {
+  if (!bank) return;
+  for (const id of ['bank-select', 'import-bank']) {
+    const node = $(id);
+    if (!node) continue;
+    const option = Array.from(node.options).find(item => Number(item.value) === Number(bank.id));
+    if (option) option.textContent = bankLabel(bank);
+  }
+}
+
+function renderBankSelects() {
+  const options = S.banks.map(bank => (
+    `<option value="${bank.id}" ${bankWritable(bank) ? '' : 'disabled'}>${esc(bankLabel(bank))}</option>`
+  )).join('');
+  const side = $('bank-select');
+  if (side) { side.innerHTML = options; side.value = String(S.bankId); }
+  const target = $('import-bank');
+  if (target) { target.innerHTML = options; target.value = String(S.importBankId); }
+  const add = $('btn-new-bank');
+  if (add) add.classList.toggle('hidden', S.role !== 'admin');
+  updateBankHint();
+}
+
+function updateBankHint() {
+  const hint = $('import-bank-hint');
+  const bank = bankById(S.importBankId);
+  if (hint) {
+    hint.textContent = !bank ? ''
+      : (bank.kind === 'permanent'
+        ? '永久库不设上限，只有管理员能增删'
+        : `临时库最多 ${bank.cap} 道，超出会移出最早入库的题`);
+  }
+  updateCapWarn();
+}
+
+async function loadBanks() {
+  let data;
+  try {
+    data = await api('/api/banks');
+  } catch (error) { toast(error.message); return; }
+  S.banks = data.banks || [];
+  const saved = Number(localStorage.getItem('bank-id') || 0);
+  if (!bankById(S.bankId)) {
+    S.bankId = bankById(saved) ? saved : (S.banks[0] ? S.banks[0].id : 0);
+  }
+  if (!bankWritable(bankById(S.importBankId))) {
+    const first = S.banks.find(bankWritable) || S.banks[0];
+    S.importBankId = first ? first.id : 0;
+  }
+  renderBankSelects();
+}
+
+function selectBank(id) {
+  const bank = bankById(id);
+  if (!bank) return;
+  S.bankId = Number(bank.id);
+  localStorage.setItem('bank-id', String(S.bankId));
+  if (bankWritable(bank)) S.importBankId = S.bankId;
+  S.current = null; S.detail = null;
+  S.cases = { items: [], total: 0 };
+  S.adv = []; S.advSubs = [];
+  clearInterval(S.timer);
+  emptyDetail();
+  renderBankSelects();
+  loadProblems();
+}
+
 // ── 题目列表 ────────────────────────────────────────────────────────────────
 async function loadProblems(selectId) {
   const token = ++S.listToken;
   const q = $('q').value.trim();
   let data;
   try {
-    data = await api('/api/problems?limit=100&q=' + encodeURIComponent(q));
+    data = await api(`/api/problems?limit=100&bank_id=${encodeURIComponent(S.bankId)}`
+      + '&q=' + encodeURIComponent(q));
   } catch (error) { toast(error.message); return; }
   if (token !== S.listToken) return;  // 搜索结果乱序返回时只认最后一次
   S.problems = data.items || [];
-  $('list-count').textContent = q ? `${data.total} 条匹配` : `${data.total} 道`;
+  S.libraryTotal = Number(data.total || 0);
+  S.libraryCap = Number(data.cap || 0);
+  const bank = bankById(S.bankId);
+  if (bank) { bank.total = S.libraryTotal; bank.cap = S.libraryCap; refreshBankOption(bank); }
+  $('list-count').textContent = q
+    ? `${data.total} 条匹配`
+    : (data.cap ? `${data.total} / ${data.cap} 道` : `${data.total} 道`);
+  // 满库时把数字标黄：这是"再导入就会顶掉旧题"的唯一常驻信号
+  $('list-count').classList.toggle('full', !q && !!data.cap && data.total >= data.cap);
   if (!S.problems.length) {
     $('problem-list').innerHTML = q
       ? `<div class="empty compact"><h3>没有匹配的题目</h3><p>换个关键词试试</p>
            <button class="btn" id="btn-clear-q">清除搜索</button></div>`
-      : `<div class="empty compact"><h3>题库还是空的</h3><p>导入一份题面，模型会切出题目。</p>
+      : `<div class="empty compact"><h3>这个题库还是空的</h3><p>导入一份题面，模型会切出题目。</p>
            <button class="btn primary" id="btn-empty-import2">去导入</button></div>`;
     const clear = $('btn-clear-q');
     if (clear) clear.addEventListener('click', () => { $('q').value = ''; loadProblems(); });
@@ -1435,6 +1676,8 @@ async function refreshDetail() {
     ]);
   } catch (error) {
     if (token !== S.detailToken) return;
+    // 题被移出题库时 goneDetail 已经把画面换成说明，不要再盖成"加载失败"
+    if (error.code === 'NOT_FOUND') return;
     $('detail').innerHTML = `<div class="empty"><h3>加载失败</h3><p>${esc(error.message)}</p></div>`;
     return;
   }
@@ -1459,6 +1702,8 @@ function renderDetail() {
   const advJobState = d.jobs.adversarial || {};
   // 同一道题同时跑两个任务只会互相抢资源，按钮层面直接挡住
   const busy = datasetJob.status === 'running' || advJobState.status === 'running';
+  // 永久库只有管理员能删；学生看到的是置灰按钮 + 原因，不是"点了才报错"
+  const canDelete = !(d.bank && d.bank.kind === 'permanent') || S.role === 'admin';
   // 代码框活在 DOM 里，切标签时会被连带销毁；先存进状态，渲染时再填回去
   const codeBox = $('adv-code');
   if (codeBox) S.advCode = codeBox.value;
@@ -1470,10 +1715,12 @@ function renderDetail() {
       <div style="min-width:0">
         <h2>${esc(d.title)}</h2>
         <div class="detail-meta">
+          <span class="bank-tag ${d.bank && d.bank.kind === 'permanent' ? 'perm' : ''}">${esc(d.bank ? d.bank.name : '默认题库')}${d.bank && d.bank.kind === 'permanent' ? ' · 永久' : ''}</span><i></i>
           <span>#${d.id}</span><i></i>
           <span title="判题方式：${esc(d.judge_type)}${d.tolerance ? '，容差 ' + esc(d.tolerance) : ''}">
             判题 ${esc(JUDGE_TEXT[d.judge_type] || d.judge_type)}</span><i></i>
           <span title="每次重新生成 +1，旧版本留在库里但不参与判题">数据版本 v${d.version}</span><i></i>
+          <span title="题面里解析出的样例组数。0 组表示代码答案没有锚点，仍会执行，但可信度降低">样例 ${(d.samples || []).length} 组</span><i></i>
           <span>${esc(STATUS_TEXT[d.status] || d.status)}</span>
         </div>
       </div>
@@ -1482,16 +1729,36 @@ function renderDetail() {
           <svg viewBox="0 0 24 24"><path d="M12 3v18M3 12h18"/></svg>
           ${d.version > 0 ? '重新生成' : '生成测试数据'}</button>
         ${busy ? '<button class="btn danger" id="btn-cancel">取消</button>' : ''}
-        <button class="btn danger" id="btn-delete" ${busy ? 'disabled' : ''}>删除</button>
+        <button class="btn danger" id="btn-delete" ${busy || !canDelete ? 'disabled' : ''}
+          title="${canDelete ? '删除这道题' : '永久库的题目只能由管理员删除'}">${canDelete ? '删除' : '仅管理员可删除'}</button>
       </div>
     </div>
     <div id="job-dataset"></div>
     <div id="job-adversarial"></div>
+    ${d.exec_spec && d.exec_spec.summary ? `<div class="notice">
+      <b>I/O 契约（生成数据按它读写）</b>：每条数据都已按这份契约校验过，读不通的不会入库。
+      请核对与你的评测机一致。<br>
+      ${esc(d.exec_spec.summary).replace(/\n/g, '<br>')}
+    </div>` : ''}
+    ${(d.samples || []).length ? '' : `<div class="notice warn">
+      题面没有解析出样例：代码答案照常执行并算出每一条的期望输出，但没有样例可证明代码是对的。
+      这次数据靠「代码执行 + 独立复核」两方对账，可信度低于有样例的题。
+      如果原题确实带样例，检查写法是否为「样例输入 / 输入样例： / 示例 1 输入：」这类整行标签。
+    </div>`}
     <details class="card stmt" ${statementOpen() ? 'open' : ''}>
       <summary>
         <span>题面 · ${d.statement.length} 字${(d.constraints || []).length ? ' · 约束 ' + d.constraints.length + ' 条' : ''}</span>
         <span class="preview">${esc(d.statement.slice(0, 90).replace(/\s+/g, ' '))}</span>
       </summary>
+      ${d.statement_repaired ? `<div class="notice warn" style="margin:0 0 10px">
+        <b>这段题面由模型补全</b>（原文 ${(d.statement_original || '').length} 字，缺输入/输出格式）。
+        补的只是格式、数据范围与样例格式，题意未改；生成时仍要过样例锚定与独立复核。
+        <details style="margin-top:6px">
+          <summary style="cursor:pointer">查看原文</summary>
+          <pre class="mono" style="white-space:pre-wrap;margin:6px 0 0">${esc(d.statement_original || '')}</pre>
+        </details>
+        <button class="btn ghost" id="btn-restore-stmt" style="margin-top:8px">恢复原文</button>
+      </div>` : ''}
       <div class="stmt-body">${renderStatement(d.statement, d.figures || [], d.title, d.layout || [])}</div>
     </details>
     ${qualityPanel(d)}
@@ -1541,7 +1808,7 @@ function jobLine(job, label, kind) {
     return `<div class="job running" id="${id}">
       <span class="spinner"></span>
       <div>${esc(label)}：${esc(text)}…${spent ? `<span class="spent">已 ${spent}</span>` : ''}
-        <span class="wait">写标程与生成并行，通常 3 次模型调用 + 两次真跑核验；单次调用 20~60 秒，超过 ${JOB_TIMEOUT_MIN} 分钟才判超时</span></div>
+        <span class="wait">先写代码答案，再设计输入并逐条执行；通常 3 次模型调用 + 一轮真跑；单次调用 20~60 秒，超过 ${JOB_TIMEOUT_MIN} 分钟才判超时</span></div>
     </div>`;
   }
   if (job.status === 'failed' && job.failed_stage === 'cancelled') {
@@ -1560,15 +1827,22 @@ function jobLine(job, label, kind) {
   const r = job.result || {};
   if (label === '测试数据') {
     const rv = r.run_verification;
-    // 老数据没有 run_verification 字段：不显示"未经标程实跑"，否则会被误读成本次校验失败
+    // 老数据没有 run_verification 字段：不显示"代码未执行"，否则会被误读成本次校验失败
     let extra = '';
     if (rv && rv.engaged) {
       const v = rv.verdicts || {};
-      extra = `；标程实跑 ${v.agree || 0} 条一致`
-        + (v.corrected ? `、修正 ${v.corrected} 条` : '')
-        + (v.conflict ? `、剔除 ${v.conflict} 条冲突` : '');
+      // 老数据的 quality 没有 executed 字段，用旧口径的 agree+corrected 兜底
+      const ran = (rv.executed != null) ? rv.executed : ((v.agree || 0) + (v.corrected || 0));
+      extra = `；代码实跑 ${ran} 条`
+        + (v.failed ? `、运行失败 ${v.failed} 条` : '')
+        // 未锚定 ≠ 没验过：题面无样例时，代码会跑 D2 按契约重写的那组样例
+        + (rv.anchored
+            ? `、样例锚定 ${esc(rv.samples || '')}`
+            : (rv.contract_samples
+                ? `、未锚定（题面无样例，转写样例 ${esc(rv.contract_samples)} 通过）`
+                : '、未锚定'));
     } else if (rv) {
-      extra = `；本次未经标程实跑（${esc(rv.reason || '参考解不可用')}）`;
+      extra = `；代码答案未执行（${esc(rv.reason || '不可用')}）`;
     }
     return `<div class="job done" id="${id}">
       <span class="job-ico">${ICONS.check}</span>
@@ -1604,17 +1878,17 @@ function qualityPanel(d) {
   return `
     <details class="card">
       <summary>
-        <span class="pill ${rv.engaged ? 'ok' : 'warn'} plain">${rv.engaged ? '标程实跑已启用' : '未经标程实跑'}</span>
-        <span>样例 ${esc(rv.samples || '—')}</span>
-        <span>· 一致 ${v.agree || 0}</span>
-        <span>· 修正 ${v.corrected || 0}</span>
-        <span>· 剔除 ${v.conflict || 0}</span>
+        <span class="pill ${rv.engaged ? 'ok' : 'warn'} plain">${rv.engaged ? '代码答案已执行' : '代码答案未执行'}</span>
+        <span>${rv.anchored ? '样例锚定' : '未锚定'} ${esc(rv.anchored ? (rv.samples || '—') : (rv.contract_samples ? `（转写样例 ${rv.contract_samples} 通过）` : (rv.samples || '—')))}</span>
+        <span>· 执行 ${rv.executed != null ? rv.executed : ((v.agree || 0) + (v.corrected || 0))}</span>
+        <span>· 失败 ${v.failed || 0}</span>
+        <span>· 丢弃 ${rv.dropped || 0}</span>
         <span class="spacer"></span>
         <span class="mono">${esc(String(rv.code_hash || '').slice(0, 10))}</span>
       </summary>
       <div class="details-body">
-        ${rv.engaged ? '' : `<div class="notice warn">${esc(rv.reason || '参考解不可用')}</div>`}
-        <div class="muted">参考解代码已存档，不在界面展示；本页只保留核对结果与 code_hash。</div>
+        ${rv.engaged ? '' : `<div class="notice warn">${esc(rv.reason || '代码答案不可用')}</div>`}
+        <div class="muted">代码答案已存档，不在界面展示；本页只保留执行结果与 code_hash。</div>
         ${facts.length ? `<div class="muted">${facts.join(' · ')}</div>` : ''}
       </div>
     </details>`;
@@ -1625,8 +1899,8 @@ function legend() {
     <summary>这些数字怎么看？</summary>
     <dl>
       <dt>数据条数</dt><dd>当前版本可用于判题的用例总数，按样例 / 边界 / 典型 / 压力 / 陷阱分层。</dd>
-      <dt>双模型一致</dt><dd>生成与复核是两段独立对话，两边算出同一个答案。占多数说明这批数据一致性好。</dd>
-      <dt>标程实跑</dt><dd>另写一份参考解在评测机上真跑，用真实输出核对期望值。这类数据可信度最高。</dd>
+      <dt>复核一致</dt><dd>复核员独立算出答案，与代码答案的执行结果相同。两边独立，占多数说明这批数据一致性好。</dd>
+      <dt>代码实跑</dt><dd>代码答案在评测机上逐条运行，stdout 就是期望输出。复核算不准时，这类数据仍然可用。</dd>
       <dt>题面样例</dt><dd>直接取自题面，最可信，但数量少、覆盖不了边界和陷阱。</dd>
     </dl>
   </details>`;
@@ -1636,11 +1910,12 @@ function renderDataTab(d) {
   if (!d.version) {
     return `<div class="panel">
       <h3>这道题还没有测试数据</h3>
-      <div class="hint">点「生成测试数据」后会走三步，每条数据都要过两道独立核算才会入库：</div>
+      <div class="hint">点「生成测试数据」后会走四步，答案由代码算、复核再独立算一遍：</div>
       <ol class="flow" style="margin:0 0 14px; padding-left:18px; color:var(--muted); font-size:12.5px; line-height:1.95">
-        <li><b style="color:var(--ink)">生成</b>　按题面写分层用例（样例 / 边界 / 典型 / 压力 / 陷阱）</li>
-        <li><b style="color:var(--ink)">复核</b>　另一段独立上下文逐条重算期望输出</li>
-        <li><b style="color:var(--ink)">复算</b>　用标程在评测机上真跑，核对最终结果</li>
+        <li><b style="color:var(--ink)">代码答案</b>　按题面写一份能读 stdin 的参考解</li>
+        <li><b style="color:var(--ink)">生成输入</b>　定 I/O 契约，按边界 / 典型 / 压力 / 陷阱分层造输入</li>
+        <li><b style="color:var(--ink)">执行</b>　代码逐条真跑，stdout 就是期望输出</li>
+        <li><b style="color:var(--ink)">复核</b>　另一段独立上下文逐条重算，两边对账</li>
       </ol>
       <button class="btn primary" id="btn-gen-2">生成测试数据</button>
     </div>`;
@@ -1655,8 +1930,8 @@ function renderDataTab(d) {
   const tiles = `
     <div class="tiles">
       <div class="tile accent"><div class="n">${d.total_cases}</div><div class="k">数据条数</div></div>
-      <div class="tile"><div class="n ${d.trusts.cross_verified ? '' : 'zero'}">${d.trusts.cross_verified || 0}</div><div class="k">双模型一致</div></div>
-      <div class="tile"><div class="n ${d.trusts.reference_only ? '' : 'zero'}">${d.trusts.reference_only || 0}</div><div class="k">标程实跑</div></div>
+      <div class="tile"><div class="n ${d.trusts.cross_verified ? '' : 'zero'}">${d.trusts.cross_verified || 0}</div><div class="k">复核一致</div></div>
+      <div class="tile"><div class="n ${d.trusts.reference_only ? '' : 'zero'}">${d.trusts.reference_only || 0}</div><div class="k">代码实跑</div></div>
       <div class="tile"><div class="n ${d.trusts.sample ? '' : 'zero'}">${d.trusts.sample || 0}</div><div class="k">题面样例</div></div>
       ${other ? `<div class="tile warn"><div class="n">${other}</div><div class="k">待复核</div></div>` : ''}
     </div>`;
@@ -1805,6 +2080,8 @@ function bindDetail() {
   if (cancel) cancel.addEventListener('click', cancelJob);
   const del = $('btn-delete');
   if (del) del.addEventListener('click', deleteProblem);
+  const restore = $('btn-restore-stmt');
+  if (restore) restore.addEventListener('click', restoreStatement);
   document.querySelectorAll('.tab').forEach(tab => {
     tab.addEventListener('click', () => { S.tab = tab.dataset.tab; renderDetail(); });
   });
@@ -1864,6 +2141,21 @@ async function startDataset() {
   }
 }
 
+async function restoreStatement() {
+  if (!S.current) return;
+  if (!confirm('把题面还原成导入时的原文？补全的那段会丢弃，样例与契约一并作废，需要重新生成数据。')) return;
+  const button = $('btn-restore-stmt');
+  if (button) { button.disabled = true; button.textContent = '还原中…'; }
+  try {
+    await post('/api/problems/' + S.current + '/restore-statement', {});
+    toast('已还原为原文');
+    await refreshDetail();
+  } catch (error) {
+    toast(error.message);
+    if (button) { button.disabled = false; button.textContent = '恢复原文'; }
+  }
+}
+
 async function startAdversarial() {
   if (!S.current) return;
   const code = $('adv-code').value;
@@ -1904,6 +2196,7 @@ async function downloadExport(fmt) {
     if (response.status === 401) { location.replace('/login'); return; }
     if (!response.ok) {
       const data = await response.json().catch(() => ({}));
+      if (data.code === 'NOT_FOUND') goneDetail(S.current);
       throw new Error(data.error || '导出失败');
     }
     const blob = await response.blob();
@@ -1966,6 +2259,38 @@ async function deleteProblem() {
   if (hasData) { openDeleteModal(d); return; }
   if (!confirm('删除这道还没有数据的题？')) return;
   await performDelete('');
+}
+
+// ── 新建永久库 ──────────────────────────────────────────────────────────────
+function openBankModal() {
+  $('bank-name').value = '';
+  $('btn-bank-create').disabled = true;
+  $('modal-bank').classList.remove('hidden');
+  setTimeout(() => $('bank-name').focus(), 30);
+}
+
+function closeBankModal() {
+  $('modal-bank').classList.add('hidden');
+}
+
+async function createBank() {
+  const name = $('bank-name').value.trim();
+  if (!name) return;
+  const button = $('btn-bank-create');
+  button.disabled = true;
+  try {
+    const data = await post('/api/banks', { name: name });
+    closeBankModal();
+    S.bankId = Number(data.bank.id);
+    S.importBankId = Number(data.bank.id);
+    localStorage.setItem('bank-id', String(S.bankId));
+    await loadBanks();
+    selectBank(S.bankId);
+    toast(`已新建永久库「${data.bank.name}」`);
+  } catch (error) {
+    toast(error.message);
+    button.disabled = false;
+  }
 }
 
 // ── 任务轮询：刷新页面后仍然接管正在跑的任务 ────────────────────────────────
@@ -2063,15 +2388,24 @@ function resetImport() {
   $('imp-ok').classList.add('hidden');
   $('imp-mask').classList.add('hidden');
   $('btn-confirm').disabled = true;
+  if ($('cap-warn')) { $('cap-warn').classList.add('hidden'); $('cap-warn').textContent = ''; }
 }
 
 //: 切题结果统一入口：文件上传与粘贴文本都走这里，避免两套渲染逻辑走岔
 function applySegments(data) {
   S.batchId = data.batch_id;
+  S.libraryTotal = Number(data.library_total || 0);
+  S.libraryCap = Number(data.library_cap || 0);
+  const bank = bankById(S.importBankId);
+  if (bank) { bank.total = S.libraryTotal; bank.cap = S.libraryCap; }
   S.segments = (data.segments || []).map(item => ({ ...item, selected: true }));
   renderSegments();
+  renderBankSelects();
   const warnings = data.warnings || [];
-  $('seg-msg').textContent = `切出 ${S.segments.length} 道题` + (warnings.length ? `，${warnings.length} 条提醒` : '');
+  const lib = data.library_cap
+    ? `（题库 ${data.library_total} / ${data.library_cap}）`
+    : `（${bank ? bank.name : '永久库'}，不设上限）`;
+  $('seg-msg').textContent = `切出 ${S.segments.length} 道题${lib}` + (warnings.length ? `，${warnings.length} 条提醒` : '');
   if (warnings.length) toast(warnings[0]);
   $('import-actions').classList.remove('hidden');
   // 结果出来以后说明块和上传表单都没用了，收成一行摘要，让结果和操作条同屏
@@ -2110,6 +2444,7 @@ async function doSegment() {
     const data = await post('/api/import/text', {
       text: $('raw').value,
       source_name: $('file-name').textContent,
+      bank_id: S.importBankId,
     });
     if (data && data.error) return impFail(data.error, 2);
     const seconds = ((performance.now() - started) / 1000).toFixed(1);
@@ -2157,13 +2492,37 @@ function renderSegments() {
 
 function updateConfirmState() {
   const picked = S.segments.filter(item => item.selected).length;
-  $('btn-confirm').disabled = picked === 0;
+  const writable = bankWritable(bankById(S.importBankId));
+  $('btn-confirm').disabled = picked === 0 || !writable;
   $('selected-count').textContent = S.segments.length
-    ? `已选 ${picked} / ${S.segments.length} 道`
+    ? `已选 ${picked} / ${S.segments.length} 道` + (writable ? '' : ' · 当前题库不可写入')
     : '';
   document.querySelectorAll('#segments .seg').forEach((node, index) => {
     node.classList.toggle('picked', !!(S.segments[index] && S.segments[index].selected));
   });
+  updateCapWarn();
+}
+
+// 题库满了必须在点「确认入库」之前说清楚：会被顶掉几道、学生那边会怎样。
+// 数字随勾选实时变，不让人等到入库后才发现旧题被替换。
+function updateCapWarn() {
+  const box = $('cap-warn');
+  if (!box) return;
+  const bank = bankById(S.importBankId);
+  const cap = Number(bank ? bank.cap : S.libraryCap) || 0;
+  const total = Number(bank ? bank.total : S.libraryTotal) || 0;
+  const picked = S.segments.filter(item => item.selected).length;
+  const over = cap ? Math.max(0, total + picked - cap) : 0;
+  if (!cap || !over) {
+    box.classList.add('hidden');
+    box.textContent = '';
+    return;
+  }
+  box.textContent = picked
+    ? `题库已满（${total} / ${cap}）：本次入库会把最早入库的 ${over} 道题移出题库，`
+      + '学生看不到，也不能再生成数据。'
+    : `题库已有 ${total} 道，超过上限 ${cap} 道：下次确认入库会先移出最早的 ${over} 道题。`;
+  box.classList.remove('hidden');
 }
 
 async function doConfirm() {
@@ -2172,14 +2531,29 @@ async function doConfirm() {
   const button = $('btn-confirm');
   button.disabled = true;
   try {
-    const data = await post('/api/import/' + S.batchId + '/confirm', { indices: indices });
+    const data = await post('/api/import/' + S.batchId + '/confirm', {
+      indices: indices,
+      bank_id: S.importBankId,
+    });
     const imported = data.imported || [];
     const duplicates = data.duplicates || [];
+    const target = data.bank || {};
+    if (target.id) {
+      S.bankId = Number(target.id);
+      localStorage.setItem('bank-id', String(S.bankId));
+    }
     resetImport();
+    await loadBanks();
     switchView('bank');
     await loadProblems();
     if (imported.length) {
-      toast(`已入库 ${imported.length} 道` + (duplicates.length ? `，${duplicates.length} 道重复已跳过` : ''));
+      const replaced = Number(data.library_replaced || 0);
+      const lib = data.library_cap
+        ? ` · 题库 ${data.library_total} / ${data.library_cap}`
+        : ` · ${target.name || '永久库'} ${data.library_total} 道`;
+      toast(`已入库 ${imported.length} 道`
+        + (replaced ? `，最早入库的 ${replaced} 道已移出题库` : '')
+        + lib + (duplicates.length ? `，${duplicates.length} 道重复已跳过` : ''));
       await openProblem(imported[0].problem_id);
     } else {
       toast(duplicates.length ? '这些题已经在题库里了' : '没有入库任何题目');
@@ -2213,6 +2587,29 @@ function toBase64(file) {
     reader.onerror = () => reject(new Error('读取文件失败'));
     reader.readAsDataURL(file);
   });
+}
+
+//: 长边上限：手机直出照片常有 4000px、5MB 以上，原样上传会被服务端体积上限挡掉。
+//: 缩到 2400px 对题面文字仍然清晰（模型侧本来也会缩到约 1300×1300 再推理）。
+const IMAGE_MAX_SIDE = 2400;
+const IMAGE_MAX_BYTES = 2 * 1024 * 1024;
+
+async function toBase64ForUpload(file) {
+  const isImage = String(file.type || '').startsWith('image/');
+  if (!isImage || file.size <= IMAGE_MAX_BYTES) return toBase64(file);
+  try {
+    const bitmap = await createImageBitmap(file);
+    const scale = Math.min(1, IMAGE_MAX_SIDE / Math.max(bitmap.width, bitmap.height));
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.round(bitmap.width * scale);
+    canvas.height = Math.round(bitmap.height * scale);
+    canvas.getContext('2d').drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+    const blob = await new Promise((done) => canvas.toBlob(done, 'image/jpeg', 0.92));
+    if (!blob) return toBase64(file); // 浏览器不支持转码时退回原文件，交给服务端判断
+    return await toBase64(blob);
+  } catch (error) {
+    return toBase64(file); // 解码失败（如 HEIC）就原样上传，由服务端给出明确错误
+  }
 }
 
 // ── 导入进度：进度条只按"阶段真正完成"推进，不用假百分比 ───────────────────
@@ -2274,6 +2671,8 @@ function impFail(message, stepIndex) {
   toast(message);
 }
 async function uploadFile(file) {
+  const isImage = /\.(png|jpe?g|webp|bmp|gif|tiff?|heic|heif)$/i.test(file.name) || String(file.type || '').startsWith('image/');
+  $('imp-s2').querySelector('span').textContent = isImage ? '识别图片文字' : '解析文档';
   $('file-name').textContent = file.name;
   $('segments').innerHTML = '';
   $('import-actions').classList.add('hidden');
@@ -2291,16 +2690,18 @@ async function uploadFile(file) {
 
   let contentB64;
   try {
-    contentB64 = await toBase64(file);
+    contentB64 = await toBase64ForUpload(file);
   } catch (error) {
     return impFail(error.message, 0);
   }
   impStep(0, 'done', sizeText);
   impBar(33);
 
-  // 第一阶段：抽文字 + 图块坐标（这一步是纯本地解析，很快但必须真实完成再往下走）
+  // 第一阶段：抽文字 + 图块坐标（纯本地解析；图片则是一次模型转写）
   impStep(1, 'run');
-  impNote('正在解析文档，抽出文字与插图坐标…');
+  impNote(isImage
+    ? '模型正在把图片里的文字逐行转写，通常十几秒…'
+    : '正在解析文档，抽出文字与插图坐标…');
   let prepared;
   try {
     prepared = await post('/api/import/extract', {
@@ -2328,6 +2729,7 @@ async function uploadFile(file) {
       figures: prepared.figures || [],
       page_ranges: prepared.page_ranges || [],
       pdf_key: prepared.pdf_key || '',
+      bank_id: S.importBankId,
     });
   } catch (error) {
     return impFail(error.message, 2);
@@ -2369,11 +2771,28 @@ $('dropzone').addEventListener('keydown', (event) => {
 $('file').addEventListener('change', (event) => {
   const input = event.target;
   const file = input.files && input.files[0];
+  // 多选只取第一个：静默丢掉其余文件比报错更难发现（切出来少几道题会以为是模型漏了）
+  if (input.files && input.files.length > 1) toast(`一次只导入一个文件，已取「${file.name}」`);
   input.value = '';
   if (file) uploadFile(file);
 });
 
 // 拖拽上传：dragover 必须 preventDefault，否则浏览器会直接打开文件
+// 粘贴截图：学生截完题直接 Ctrl+V 是比"保存文件再选"更常用的动作。
+// 只在剪贴板里确实有图片文件时接管，粘贴文字不受影响。
+document.addEventListener('paste', (event) => {
+  const items = (event.clipboardData && event.clipboardData.items) || [];
+  for (const item of Array.from(items)) {
+    if (item.kind !== 'file' || !String(item.type || '').startsWith('image/')) continue;
+    const blob = item.getAsFile();
+    if (!blob) continue;
+    event.preventDefault();
+    const ext = (String(item.type).split('/')[1] || 'png').replace('jpeg', 'jpg');
+    uploadFile(new File([blob], `粘贴截图-${Date.now()}.${ext}`, { type: item.type }));
+    return;
+  }
+});
+
 ['dragenter', 'dragover'].forEach(name => $('dropzone').addEventListener(name, (event) => {
   event.preventDefault();
   $('dropzone').classList.add('over');
@@ -2384,9 +2803,25 @@ $('file').addEventListener('change', (event) => {
 $('dropzone').addEventListener('drop', (event) => {
   event.preventDefault();
   $('dropzone').classList.remove('over');
-  const file = event.dataTransfer && event.dataTransfer.files && event.dataTransfer.files[0];
+  const dropped = (event.dataTransfer && event.dataTransfer.files) || [];
+  const file = dropped[0];
+  if (dropped.length > 1) toast(`一次只导入一个文件，已取「${file.name}」`);
   if (file) uploadFile(file);
 });
+
+// 拖到虚线框**外面**时，浏览器默认会直接打开文件（整页被图片替换），
+// 看起来就是"传图片没反应"。整页拦住，落在任何位置的文件都走同一条导入路径——
+// 用户不该为了把文件放准，先学会"必须拖进那个虚线框"。
+['dragover', 'drop'].forEach(name => window.addEventListener(name, (event) => {
+  const types = Array.from((event.dataTransfer && event.dataTransfer.types) || []);
+  if (!types.includes('Files')) return;
+  event.preventDefault();
+  if (name === 'dragleave') $('dropzone').classList.remove('over');
+  if (name === 'drop' && !$('dropzone').contains(event.target)) {
+    const file = event.dataTransfer.files && event.dataTransfer.files[0];
+    if (file) uploadFile(file);
+  }
+}));
 
 // ── 问题反馈 ────────────────────────────────────────────────────────────────
 const FB_KIND = { bug: '问题', idea: '建议', other: '其他' };
@@ -2556,6 +2991,25 @@ function settingsPayload(extra) {
   }, extra || {});
 }
 
+$('btn-new-bank').addEventListener('click', openBankModal);
+$('close-bank').addEventListener('click', closeBankModal);
+$('btn-bank-cancel').addEventListener('click', closeBankModal);
+$('modal-bank').addEventListener('click', (event) => {
+  if (event.target === $('modal-bank')) closeBankModal();
+});
+$('bank-name').addEventListener('input', () => {
+  $('btn-bank-create').disabled = !$('bank-name').value.trim();
+});
+$('bank-name').addEventListener('keydown', (event) => {
+  if (event.key === 'Enter' && !$('btn-bank-create').disabled) createBank();
+});
+$('btn-bank-create').addEventListener('click', createBank);
+$('bank-select').addEventListener('change', () => selectBank($('bank-select').value));
+$('import-bank').addEventListener('change', () => {
+  S.importBankId = Number($('import-bank').value);
+  updateBankHint();
+});
+
 $('btn-settings').addEventListener('click', openSettings);
 $('close-settings').addEventListener('click', closeSettings);
 $('modal-settings').addEventListener('click', (event) => {
@@ -2583,6 +3037,7 @@ document.addEventListener('keydown', (event) => {
   if (event.key !== 'Escape') return;
   if (S.settingsOpen) closeSettings();
   if (S.feedbackOpen) closeFeedback();
+  if (!$('modal-bank').classList.contains('hidden')) closeBankModal();
   if (!$('modal-delete').classList.contains('hidden')) closeDeleteModal();
 });
 
@@ -2649,6 +3104,7 @@ $('q').addEventListener('input', () => {
   $('avatar').textContent = String(session.user || '?').slice(0, 1).toUpperCase();
   emptyDetail();
   resetImport();
+  await loadBanks();
   switchView(currentView());
   await loadProblems();
   await refreshFeedbackBadge();

@@ -21,7 +21,12 @@ from ..llm.client import LlmConfig
 from . import secretbox
 
 DEFAULT_BASE = "https://api.deepseek.com/v1"
-DEFAULT_MODEL = "deepseek-chat"
+#: 默认模型。2026-11-22 从 `deepseek-chat` 换成官方当前型号 `deepseek-flash`：
+#: 实测 deepseek-chat 在 D2（生成测试数据）上三次里两次把 16384/32768 预算全烧在
+#: 非正文 token 上、content 返回空，整题失败；同一题面同一提示词换 deepseek-flash，
+#: 12211 tokens（含 9252 reasoning）一次产出 14 条合法数据。它同时原生支持图片，
+#: 图片导入也只认多模态型号，一个型号能把文字/PDF/Word/图片都覆盖。
+DEFAULT_MODEL = "deepseek-flash"
 
 _HINT = "还没有配置你自己的 API Key：点右上角「模型设置」填一个，只有你自己能用。"
 

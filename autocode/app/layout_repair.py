@@ -102,6 +102,14 @@ def restore_merged_lines(text: str) -> Tuple[str, bool]:
     return text, False
 
 
+#: 行首出现这些标记，本行及其后都不是数据（"解释：342 + 465 = 807." 只有 2 个汉字，
+#: 靠字数阈值抓不到；LeetCode 风格题面几乎每条输出后面都跟一行）。
+PROSE_MARKERS = (
+    "解释：", "解释:", "说明：", "说明:", "提示：", "提示:",
+    "示例说明", "Explanation:", "Note:",
+)
+
+
 def sanitize_sample(input_text: str, output_text: str) -> Tuple[str, str, List[str]]:
     """清洗一组样例，返回 (input, output, notes)。"""
     notes: List[str] = []

@@ -16,7 +16,7 @@ from typing import Any, Dict, Optional
 from urllib.parse import parse_qs, unquote, urlsplit
 
 from . import auth
-from . import api, config, user_llm
+from . import api, config, jobs, user_llm
 from .db import get_db
 from .llm_stage import StageError, StageRunner
 
@@ -31,6 +31,7 @@ _CODE_STATUS = {
     "UNSUPPORTED_MEDIA_TYPE": 415,
     "FORBIDDEN_HOST": 403,
     "FORBIDDEN_ORIGIN": 403,
+    "FORBIDDEN": 403,
     "NOT_FOUND": 404,
     "DUPLICATE_PROBLEM": 409,
     "JOB_RUNNING": 409,
@@ -311,6 +312,10 @@ class Handler(BaseHTTPRequestHandler):
     def _api_get(self, path: str, query: Dict[str, list]) -> None:
         if not self._session():
             return self._fail(401, "AUTH_REQUIRED", "请先登录")
+        user = self._user()
+        role = auth.role_of(user)
+        if path == "/api/banks":
+            return self._json(api.list_banks(_db(), role))
         if path == "/api/problems":
             return self._json(api.list_problems(
                 _db(),
@@ -318,6 +323,8 @@ class Handler(BaseHTTPRequestHandler):
                 status=str((query.get("status") or [""])[0]),
                 offset=_int(query, "offset", 0),
                 limit=_int(query, "limit", 50),
+                bank_id=_int(query, "bank_id", 1),
+                role=role,
             ))
         if path == "/api/settings":
             return self._json(api.llm_settings(_db(), self._user()))
@@ -337,7 +344,7 @@ class Handler(BaseHTTPRequestHandler):
         if len(parts) >= 3 and parts[:2] == ["api", "problems"]:
             problem_id = int(parts[2])
             if len(parts) == 3:
-                return self._json(api.problem_detail(_db(), problem_id))
+                return self._json(api.problem_detail(_db(), problem_id, role))
             if len(parts) == 4 and parts[3] == "cases":
                 return self._json(api.list_cases(
                     _db(), problem_id,
@@ -447,7 +454,16 @@ class Handler(BaseHTTPRequestHandler):
         parts = [item for item in path.split("/") if item]
 
         user = self._user()
+        role = auth.role_of(user)
+        if path == "/api/banks":
+            if role != "admin":
+                return self._fail(403, "FORBIDDEN", "只有管理员可以新建永久库")
+            self._audit("create_bank", str(payload.get("name") or "")[:80])
+            return self._result(api.create_bank(_db(), payload, role, user))
         if path == "/api/import/text":
+            denied = api.bank_write_error(_db(), payload.get("bank_id"), role)
+            if denied:
+                return self._result(denied)
             if not self._cap_left(user):
                 return self._cap_exhausted()
             cfg = user_llm.config_for(_db(), user)
@@ -455,14 +471,26 @@ class Handler(BaseHTTPRequestHandler):
                 return self._no_key()
             runner = StageRunner(_db(), budget=2, llm_config=cfg, user=user)
             try:
-                return self._result(api.import_text(_db(), runner, payload))
+                return self._result(api.import_text(_db(), runner, payload, role))
             except StageError as exc:
                 return self._fail(502, exc.code, str(exc))
         if path == "/api/import/extract":
             if not self._cap_left(user):
                 return self._cap_exhausted()
-            return self._result(api.import_extract(_db(), payload))
+            # 任何文件都可能要用模型（图片、扫描版 PDF），所以有 Key 就把 runner 备好；
+            # 没有 Key 也照常往下走——纯文本/Word/带文字层的 PDF 本来就不需要它。
+            # 不按后缀预判：后缀会骗人（截图存成 .dat、docx 改名 .doc），
+            # 真正的分派在 api 层按文件内容做。runner 建出来不调用就不花钱。
+            cfg = user_llm.config_for(_db(), user)
+            runner = StageRunner(_db(), budget=6, llm_config=cfg, user=user) if cfg is not None else None
+            try:
+                return self._result(api.import_extract(_db(), payload, runner))
+            except StageError as exc:
+                return self._fail(502, exc.code, str(exc))
         if path == "/api/import/file":
+            denied = api.bank_write_error(_db(), payload.get("bank_id"), role)
+            if denied:
+                return self._result(denied)
             if not self._cap_left(user):
                 return self._cap_exhausted()
             cfg = user_llm.config_for(_db(), user)
@@ -470,7 +498,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._no_key()
             runner = StageRunner(_db(), budget=2, llm_config=cfg, user=user)
             try:
-                return self._result(api.import_file(_db(), runner, payload))
+                return self._result(api.import_file(_db(), runner, payload, role))
             except StageError as exc:
                 return self._fail(502, exc.code, str(exc))
         if path == "/api/settings":
@@ -493,7 +521,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._result(api.probe_llm(_db(), payload, user))
         if len(parts) == 4 and parts[:2] == ["api", "import"] and parts[3] == "confirm":
             self._audit("confirm_import", str(parts[2]))
-            return self._result(api.confirm_import(_db(), int(parts[2]), payload))
+            return self._result(api.confirm_import(_db(), int(parts[2]), payload, role))
         if len(parts) == 4 and parts[:2] == ["api", "problems"]:
             problem_id = int(parts[2])
             payload = {**payload, "id": problem_id}
@@ -514,8 +542,11 @@ class Handler(BaseHTTPRequestHandler):
             if parts[3] == "delete":
                 self._audit("delete_problem", str(problem_id), str(payload.get("confirm_title") or "")[:120])
                 return self._result(api.delete_problem(
-                    _db(), problem_id, str(payload.get("confirm_title") or "")
+                    _db(), problem_id, str(payload.get("confirm_title") or ""), role
                 ))
+            if parts[3] == "restore-statement":
+                self._audit("restore_statement", str(problem_id))
+                return self._result(api.restore_statement(_db(), problem_id))
             if parts[3] == "cancel":
                 return self._result(api.cancel_job(_db(), payload))
         if len(parts) == 4 and parts[:2] == ["api", "jobs"] and parts[3] == "cancel":
@@ -580,6 +611,12 @@ def serve() -> None:
     port = config.port()
     db = _db()
     auth.purge_expired(db)
+    try:
+        orphans = jobs.mark_orphans(db)
+        if orphans:
+            print(f"上次运行留下的 {orphans} 个任务已标记为中断（服务重启时进程被终止）", flush=True)
+    except Exception as exc:  # noqa: BLE001
+        print(f"对账历史任务失败（不影响启动）：{exc}", flush=True)
     user, _stored, fresh = auth.load_credentials()
     try:
         httpd = _Server((host, port), Handler)

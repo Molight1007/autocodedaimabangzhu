@@ -35,10 +35,38 @@ class TestCheckBlocks(unittest.TestCase):
         self.assertIsNone(blocks)
         self.assertIn("不支持", warnings[0])
 
-    def test_out_of_range_rejected(self) -> None:
+    def test_out_of_range_clamped(self) -> None:
+        """模型把 end_line 多算两行是常事：裁到边界就行，不该整题作废。"""
         blocks, warnings = check_blocks([{"kind": "para", "from": 1, "to": 99}], 10)
-        self.assertIsNone(blocks)
+        self.assertEqual(blocks, [{"kind": "para", "from": 1, "to": 10}])
         self.assertIn("越界", warnings[0])
+
+    def test_block_fully_outside_dropped(self) -> None:
+        blocks, _ = check_blocks(
+            [
+                {"kind": "heading", "from": 1, "to": 1},
+                {"kind": "para", "from": 11, "to": 20},
+            ],
+            10,
+        )
+        self.assertEqual([block["from"] for block in blocks], [1])
+
+    def test_absolute_lines_translated_by_offset(self) -> None:
+        """模型给的是原文绝对行号，校验器负责减 start_line。"""
+        raw = [
+            {"kind": "heading", "from": 162, "to": 162},
+            {"kind": "para", "from": 163, "to": 170},
+        ]
+        blocks, warnings = check_blocks(raw, 141, offset=161)
+        self.assertEqual(warnings, [])
+        self.assertEqual([(b["from"], b["to"]) for b in blocks], [(1, 1), (2, 9)])
+
+    def test_overfragmented_rejected(self) -> None:
+        """每行一个块渲染出来是一堆断句，不如自动排版。"""
+        raw = [{"kind": "para", "from": n, "to": n} for n in range(1, 61)]
+        blocks, warnings = check_blocks(raw, 60)
+        self.assertIsNone(blocks)
+        self.assertIn("过碎", warnings[0])
 
     def test_overlap_rejected(self) -> None:
         raw = [

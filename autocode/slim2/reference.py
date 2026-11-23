@@ -1,23 +1,22 @@
-"""D2R：参考解复算门 —— 把"模型说对"换成"代码跑出来对"。
+"""D1R：代码答案 —— 先写程序，再用它跑出每一条数据的期望输出。
 
-为什么需要这一道：
-D2 生成期望输出，D3 再独立算一遍。两票一致并不等于正确 —— 两轮都是 LLM 在做
-算术，同一类错误（大数、取模、浮点、边界下标）会一起犯，而且很难被对方发现。
-真正的判据只有一条：**同一道题的标程，喂进这条输入，吐出来的就是这个输出**。
+为什么答案要由代码算：
+两轮 LLM 口算一致，并不等于正确 —— 同一类错误（大数、取模、浮点、边界下标）
+会一起犯，而且很难被对方发现。真正的判据只有一条：
+**同一道题的代码答案，喂进这条输入，吐出来的就是这个输出**。
 
 做法：
 1. 让模型写一份 Python 参考解（`slim_reference` 模板，只输出代码块）；
 2. 先过静态安全守卫，再交给评测机（沙箱）编译/运行；
-3. **样例锚定**：题面样例是老师给的原文，可信度最高。参考解必须在**全部**样例上
-   与题面输出一致，否则这份标程不可信，整道题的门作废（不拿它去改任何数据）；
-4. 锚定通过后，逐条跑生成的输入，拿到真实输出；
-5. 与 D2 的期望输出比对，给出 `agree / corrected / conflict / unverified`。
-
-裁决规则（不做多数决，只认执行结果 + 独立计算）：
-- 执行 == D2                       → `agree`     直接采用
-- 执行 != D2 且 执行 == D3          → `corrected` 用执行结果覆盖（两票 vs 一票）
-- 执行 != D2 且 执行 != D3          → `conflict`  丢弃该条（三份结果互不相同）
-- 执行 TLE/RE/MLE（标程自己跑挂）   → `unverified` 不覆盖，交回原流程判断
+3. **样例锚定（可选）**：题面有样例时，代码必须在全部样例上与题面输出一致；
+   没有样例时照常执行，只把 `anchored` 标成 False —— 样例是加分项，不是门槛；
+4. 逐条跑生成的输入，stdout 直接作为期望输出；跑不动的那条丢弃；
+5. D3 独立复核再算一遍：
+   - 复核一致            → `cross_verified`
+   - 复核算不准          → `reference_only`（执行结果为准）
+   - 复核给出不同结果：
+       * 代码已过全部样例 → 仍按执行结果（`reference_only`）
+       * 没有样例可锚定   → 无法证明谁对，丢弃该条
 
 注意：本模块只产出结论，不写库。入库与计数在 `dataset.py`。
 """
@@ -39,9 +38,11 @@ from ..engine.sandbox.agent_guard import check_code_safety
 from . import config
 from .llm_stage import StageError, StageRunner
 from .stages import REFERENCE
-from .validators import compare_output
+from .validators import MAX_OUTPUT_CHARS, compare_output
 
-# 裁决状态
+# 执行状态：`execute_all` 用前两个，`run_items`（事后审计）用后四个
+EXECUTED = "executed"
+FAILED = "failed"
 AGREE = "agree"
 CORRECTED = "corrected"
 CONFLICT = "conflict"
@@ -52,7 +53,7 @@ _FENCE_RE = re.compile(r"```(?:[Pp]ython3?|py)?\s*\n(.*?)```", re.S)
 
 @dataclass
 class RunVerdict:
-    """单条用例的复算结论。`output` 是标程真跑出来的完整 stdout。"""
+    """单条用例的复算结论。`output` 是代码答案真跑出来的完整 stdout。"""
 
     index: int
     status: str
@@ -66,22 +67,36 @@ class RunVerdict:
 
 @dataclass
 class ReferenceResult:
-    """整道题的门结论。`engaged=False` 表示门没生效（本次数据未被执行验证）。"""
+    """整道题的门结论。
+
+    `engaged=False` 表示代码答案不可用（编译失败 / 样例不符 / 安全守卫拦下）。
+    `anchored` 只表示"题面样例全部通过"；没有样例时它必然是 False，
+    但代码仍然可以执行、仍然产出期望输出。
+    """
 
     engaged: bool
+    anchored: bool = False
     reason: str = ""
     code: str = ""
     samples_passed: int = 0
     samples_total: int = 0
+    #: 题面解析不出样例时，D2 会按契约重写一组。代码答案跑通它们也要记下来：
+    #: 这些不是题面原文，不能算 `anchored`，但"完全没验过"也是错的。
+    contract_passed: int = 0
+    contract_total: int = 0
     verdicts: Dict[int, RunVerdict] = field(default_factory=dict)
     calls: int = 0
     tokens: int = 0
+    #: 复核给出不同结果、但代码已过样例而保留的条数（见 `decide_cases`）
+    conflicts_kept: int = 0
 
     def status_of(self, index: int) -> Optional[RunVerdict]:
         return self.verdicts.get(int(index))
 
     def counts(self) -> Dict[str, int]:
-        tally: Dict[str, int] = {AGREE: 0, CORRECTED: 0, CONFLICT: 0, UNVERIFIED: 0}
+        tally: Dict[str, int] = {
+            EXECUTED: 0, FAILED: 0, AGREE: 0, CORRECTED: 0, CONFLICT: 0, UNVERIFIED: 0,
+        }
         for item in self.verdicts.values():
             tally[item.status] = tally.get(item.status, 0) + 1
         return tally
@@ -104,7 +119,7 @@ def _sample_check(
     program: Any, samples: Sequence[Dict[str, Any]], judge: str, tolerance: str,
     timeout_ms: int,
 ) -> Tuple[int, List[str]]:
-    """在题面样例上跑标程，返回 `(通过数, 失败说明)`。"""
+    """在题面样例上跑代码答案，返回 `(通过数, 失败说明)`。"""
     passed = 0
     problems: List[str] = []
     for order, sample in enumerate(samples, start=1):
@@ -122,9 +137,9 @@ def _sample_check(
 
 @dataclass
 class Prepared:
-    """标程已落地并（或）已锚定。`program` 非空时由**调用方**负责 release。
+    """代码答案已落地并（或）已锚定。`program` 非空时由**调用方**负责 release。
 
-    拆成两段是为了并行：写代码只依赖题面，可以先跑；逐条复算要等 D2 出数据。
+    写代码只依赖题面；执行要等 D2 出输入，所以拆成"准备"与"跑数据"两段。
     """
 
     result: ReferenceResult
@@ -139,7 +154,7 @@ def write_and_anchor(
     judge_type: str,
     tolerance: str = "",
 ) -> Prepared:
-    """让模型写标程并做样例锚定。不抛异常：失败一律转成 `engaged=False`。"""
+    """让模型写代码答案并做样例锚定。不抛异常：失败一律转成 `engaged=False`。"""
     try:
         text = runner.call_text(REFERENCE, user_content)
     except StageError as exc:
@@ -190,8 +205,10 @@ def anchor(
         result.reason = "参考解无法运行：" + (program.error or "prepare_failed")
         return Prepared(result, program)
     if not samples:
-        # 没样例就没有锚点：这份标程无从证明自己是对的，门按未生效处理
-        result.reason = "题面没有样例，标程无法锚定"
+        # 没有样例只是没有"锚"，不是没有代码：照常执行，由 D3 独立复核兜底。
+        # 这条是 2026-11-22 改的 —— 旧实现到这里直接判门作废，代码写了却一次没跑。
+        result.engaged = True
+        result.reason = "题面没有样例，代码答案未锚定（照常执行）"
         return Prepared(result, program)
 
     passed, problems = _sample_check(
@@ -199,11 +216,36 @@ def anchor(
     )
     result.samples_passed = passed
     if passed != len(samples):
-        result.reason = "参考解未通过题面样例（" + "；".join(problems[:3]) + "），门作废"
+        result.reason = "代码答案未通过题面样例（" + "；".join(problems[:3]) + "）"
         return Prepared(result, program)
 
     result.engaged = True
+    result.anchored = True
     return Prepared(result, program)
+
+
+def check_samples(
+    prepared: Prepared,
+    samples: Sequence[Dict[str, Any]],
+    judge_type: str,
+    tolerance: str = "",
+) -> List[str]:
+    """契约改写样例后，再确认代码读得动它们。
+
+    契约是 D2 按代码的读入方式描述的；两者一旦走岔，样例就是最早暴露的地方。
+    返回失败说明，空列表表示全部通过（或无样例可查）。
+    """
+    result, program = prepared.result, prepared.program
+    if not samples:
+        return []
+    if not result.engaged or program is None:
+        return ["代码答案不可用，无法校验样例"]
+    passed, problems = _sample_check(
+        program, samples, judge_type, tolerance, int(config.REFERENCE_TIMEOUT_MS)
+    )
+    if passed == len(samples):
+        return []
+    return [f"代码答案读不了按契约改写的样例（{passed}/{len(samples)} 通过）：" + "；".join(problems[:3])]
 
 
 def run_items(
@@ -225,7 +267,7 @@ def run_items(
         if run["verdict"] != VERDICT_AC:
             result.verdicts[index] = RunVerdict(
                 index, UNVERIFIED, "",
-                f"标程运行 {run['verdict']}（{run['elapsed_ms']:.0f} ms）",
+                f"代码答案运行 {run['verdict']}（{run['elapsed_ms']:.0f} ms）",
             )
             continue
         actual = str(run["stdout"])
@@ -238,6 +280,49 @@ def run_items(
     return result
 
 
+def execute_all(
+    prepared: Prepared,
+    items: Sequence[Dict[str, Any]],
+) -> Tuple[List[Dict[str, Any]], List[str]]:
+    """逐条执行代码答案，把 stdout 作为 `expected_output`。
+
+    这是新版流水线的答案来源：LLM 只负责"设计合法、分层的输入"，
+    算术交给同一份代码，避免大数/边界口算错误，也解开了"压力层只能出
+    闭式可算的小数据"这个自我限制。
+
+    返回 `(可用条目, 丢弃说明)`：单条 TLE/RE 只丢这一条，不影响整批。
+    """
+    result, program = prepared.result, prepared.program
+    if not result.engaged or program is None:
+        return [], ["代码答案不可用，无法执行"]
+    timeout_ms = int(config.REFERENCE_TIMEOUT_MS)
+    kept: List[Dict[str, Any]] = []
+    notes: List[str] = []
+    # 按下标（不是 item["index"]）编号：丢弃几条后仍与复核批次一一对应
+    for index, item in enumerate(items):
+        run = run_prepared(program, str(item.get("input", "")), timeout_ms)
+        if run["verdict"] != VERDICT_AC:
+            notes.append(
+                f"第 {index} 条代码运行 {run['verdict']}（{run['elapsed_ms']:.0f} ms），已丢弃"
+            )
+            result.verdicts[index] = RunVerdict(
+                index, FAILED, "", f"{run['verdict']}（{run['elapsed_ms']:.0f} ms）"
+            )
+            continue
+        actual = str(run["stdout"])
+        if len(actual) > MAX_OUTPUT_CHARS:
+            notes.append(
+                f"第 {index} 条输出 {len(actual)} 字符，超过上限 {MAX_OUTPUT_CHARS}，已丢弃"
+            )
+            result.verdicts[index] = RunVerdict(index, FAILED, "", "输出过长")
+            continue
+        result.verdicts[index] = RunVerdict(index, EXECUTED, actual)
+        row = dict(item)
+        row["expected_output"] = actual
+        kept.append(row)
+    return kept, notes
+
+
 def verify_by_run(
     runner: StageRunner,
     user_content: str,
@@ -248,9 +333,9 @@ def verify_by_run(
     tolerance: str = "",
     code: str = "",
 ) -> ReferenceResult:
-    """写标程 → 样例锚定 → 逐条复算（串行版本，保留给自测与事后审计）。
+    """写代码答案 → 样例锚定 → 逐条复算（串行版本，保留给自测与事后审计）。
 
-    `code` 非空时跳过 LLM，直接用给定标程复算 —— 用于事后审计：
+    `code` 非空时跳过 LLM，直接用给定代码答案复算 —— 用于事后审计：
     拿 `quality_json.run_verification.code` 就能把一批数据重新核一遍。
     """
     if code.strip():
@@ -272,10 +357,14 @@ def decide_cases(
     judge_type: str,
     tolerance: str = "",
 ) -> Tuple[List[Dict[str, Any]], List[Tuple[int, Dict[str, Any], Dict[str, Any]]], Dict[int, Dict[str, Any]]]:
-    """三方裁决：执行结果（硬证据）+ D2 口算 + D3 独立重算。
+    """两方裁决：代码执行结果（`items` 里的期望输出）+ D3 独立复核。
 
-    返回 `(可入库条目, 被驳回条目, 每条的决定)`；决定里的 `output` 是最终期望输出，
-    `trust` 是入库信任等级（`cross_verified` = 两方一致，`reference_only` = 仅执行验证）。
+    信任等级的来源必须说清楚：
+    - `cross_verified`：复核自己算出来的结果与执行一致，两条独立证据；
+    - `reference_only`：只有执行这一条证据（复核算不准，或代码已过全部样例
+      但复核算出了别的数）；
+    - 复核明确算出不同结果、又没有样例可锚定 → 无法证明谁对，丢弃该条。
+      "宁可少一条，不可错一条"：错误答案比缺数据更危险。
 
     这是**唯一**的裁决点：调用方不要再自行判断一遍，否则两条规则迟早会走岔。
     """
@@ -286,47 +375,41 @@ def decide_cases(
     for index, item in enumerate(items):
         verdict = verdicts[index]
         d3 = str(verdict.get("verdict") or "")
-        run = ref.status_of(index)
-        run_status = run.status if run is not None else ""
         expected = str(item["expected_output"])
 
         if d3 == "invalid":
-            # 输入本身非法，执行结果再对也没用
             decisions[index] = {"action": "reject", "output": expected,
                                 "trust": "unreviewed", "note": "输入非法"}
             rejected.append((index, item, verdict))
             continue
 
-        if run_status == AGREE:
-            trust = "cross_verified" if d3 == "pass" else "reference_only"
-            decisions[index] = {"action": "keep", "output": expected, "trust": trust,
-                                "note": "标程真跑与期望输出一致"}
-        elif run_status == CORRECTED:
-            d3_backs_run = d3 == "mismatch" and _same(judge_type, run.output,
-                                                      verdict.get("recomputed_output"), tolerance)
-            if d3_backs_run or d3 == "uncertain":
-                # 执行结果与 D3 一致，或 D3 本来就算不准（大数/浮点）——
-                # 标程已过题面全部样例，此时执行结果比口算可信
-                decisions[index] = {"action": "fix", "output": run.output,
-                                    "trust": "reference_only", "note": "按标程执行结果修正"}
+        if d3 == "pass":
+            decisions[index] = {"action": "keep", "output": expected,
+                                "trust": "cross_verified",
+                                "note": "独立复核与代码执行结果一致"}
+        elif d3 == "mismatch":
+            if ref.anchored:
+                decisions[index] = {
+                    "action": "keep", "output": expected, "trust": "reference_only",
+                    "note": "代码答案已过全部题面样例，按执行结果",
+                }
+                ref.conflicts_kept += 1
             else:
-                # D3 认同 D2 的口算、但执行结果不同：两份计算 vs 一份代码，不赌
-                decisions[index] = {"action": "reject", "output": expected,
-                                    "trust": "unreviewed",
-                                    "note": "执行结果与两次独立计算都不同"}
+                decisions[index] = {
+                    "action": "reject", "output": expected, "trust": "unreviewed",
+                    "note": "代码答案与独立复核不一致，且没有样例可锚定",
+                }
                 rejected.append((index, item, verdict))
                 continue
+        elif d3 == "uncertain":
+            decisions[index] = {"action": "keep", "output": expected,
+                                "trust": "reference_only",
+                                "note": "复核算不准，按代码执行结果"}
         else:
-            # 门没覆盖到这条（标程 TLE/RE，或整道题门作废）：退回原逻辑
-            if d3 == "pass":
-                decisions[index] = {"action": "keep", "output": expected,
-                                    "trust": "cross_verified", "note": "未经执行复算"}
-            else:
-                decisions[index] = {"action": "reject", "output": expected,
-                                    "trust": "unreviewed",
-                                    "note": run.note if run is not None else "未复算"}
-                rejected.append((index, item, verdict))
-                continue
+            decisions[index] = {"action": "reject", "output": expected,
+                                "trust": "unreviewed", "note": "复核没有给出有效结论"}
+            rejected.append((index, item, verdict))
+            continue
 
         materialized = dict(item)
         materialized["expected_output"] = decisions[index]["output"]
