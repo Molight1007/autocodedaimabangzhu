@@ -499,7 +499,7 @@ const postJSON=(path,body)=>api(path,{method:'POST',headers:{'Content-Type':'app
 function isErrEnvelope(d){
   if(!d||typeof d!=='object'||Array.isArray(d)) return false;
   /* 生成任务本身就有 error 字段（失败原因），不能当错误信封 */
-  if(d.status==='running'||d.status==='done'||d.status==='failed') return false;
+  if(d.status==='queued'||d.status==='running'||d.status==='done'||d.status==='failed') return false;
   if(d.ok===false) return true;
   if(typeof d.error!=='string'||!d.error) return false;
   return Object.keys(d).every(k=>k==='error'||k==='ok'||k==='status');
@@ -542,6 +542,9 @@ const STAGE_LABEL = {spec:'题面解析失败', generator:'数据生成器未通
   datasets:'分层数据生成失败', hints:'提示生成失败', artifacts:'产物未达新版契约（多解/逐行解析/提示分组/数据量/题解）',
   budget:'调用预算熔断', timeout:'单题超时'};
 function statusPill(p){
+  /* 任务状态优先：排队/在跑的题往往还是 draft/preparing，只看题目状态会显示成「待生成」 */
+  if(p.job_status==='queued') return '<span class="status wait" title="前面的任务结束会自动开始">排队中</span>';
+  if(p.job_status==='running') return '<span class="status wait">生成中…</span>';
   if(p.status==='failed'){
     // 失败题往往还挂着上一版产物：必须同时告诉他「要处理」和「现在看到的是旧内容」，
     // 否则用户会以为改流程没生效（旧版/新版在界面上长得一样）。
@@ -617,7 +620,7 @@ async function saveProblem(){
   try{
     const languages=$$('#view-workbench input[data-lang]:checked').map(x=>x.dataset.lang);
     const r=await api('/api/import',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({title,statement,languages})});
-    status.textContent='已保存，正在启动生成…'; status.className='statusline ok';
+    status.textContent='已保存，正在加入生成队列…'; status.className='statusline ok';
     await api('/api/generate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:r.id,budget:30})});
     location.href=`?problem=${r.id}&generating=1`;
   }catch(e){ status.textContent='保存失败：'+e.message; status.className='statusline bad'; }
@@ -1001,8 +1004,8 @@ function renderDetail(p){
   if(genBtn) genBtn.onclick=async()=>{
     genBtn.disabled=true; genBtn.textContent='生成中…';
     try{
-      await postJSON('/api/generate',{id:p.id,budget:30});
-      toast('已开始生成，状态每 3 秒自动刷新');
+      const started=await postJSON('/api/generate',{id:p.id,budget:30});
+      toast(started&&started.queued?`已加入队列（第 ${started.position} 位），前面的任务结束会自动开始`:'已开始生成，状态每 3 秒自动刷新');
       const r=await api(`/api/problems/${p.id}`); STATE.problem=r; renderDetail(r);
     }catch(e){ genBtn.disabled=false; genBtn.textContent='开始生成'; toast('启动失败：'+cleanErr(e.message)); }
   };
@@ -1675,6 +1678,10 @@ function jobBadgeHtml(job,p){
   if(!job||!job.status) return '';
   const st=String(job.status).toLowerCase();
   if(st==='none'||st==='idle'||st==='') return '';        /* 没有任务记录 */
+  if(st==='queued'){
+    const ahead=Number(job.ahead||0);
+    return `<span class="pill" title="前面的任务结束会自动开始，不用刷新页面">排队中${ahead>0?` · 前面还有 ${ahead} 个`:''}</span>`;
+  }
   if(st==='running') return `<span class="pill amber job-pill"><span class="dot"></span>生成中…${job.started_at?`<span class="hintline" style="color:inherit">${esc(fmtAgo(job.started_at))}开始</span>`:''}</span>`;
   if(st==='failed') return `<span class="pill red">生成失败</span>${job.error?`<span class="job-err">${esc(String(job.error).slice(0,160))}</span>`:''}${job.advice?`<span class="job-err" style="color:var(--amber)">${esc(job.advice)}</span>`:''}`;
   if(st==='done'){
@@ -1709,23 +1716,29 @@ async function watchJob(p){
     }
     const job=r.data, st=String(job.status||'').toLowerCase();
     if(!st||st==='none'||st==='idle'){ prev=st; paintJobBadge(null,p); return 'idle'; }
-    const wasRunning=prev==='running';
+    const wasActive=prev==='running'||prev==='queued';
     prev=st;
-    if(st==='done'&&wasRunning) STATE.jobDone[p.id]=true;   /* 本次会话看着它完成 */
+    if(st==='done'&&wasActive) STATE.jobDone[p.id]=true;   /* 本次会话看着它完成 */
     paintJobBadge(job,p);
-    if(st==='running') return 'running';
-    if(wasRunning){
-      if(st==='done'){ toast('生成完成，数据已刷新'); await refreshDetail(p.id); refreshQuality(STATE.problem||p); }
+    if(st==='running'||st==='queued'){
+      /* 排队/在跑都不能再点「开始生成」，否则只会拿到一条"已有任务"的报错 */
+      const genBtn=$('#gen-btn');
+      if(genBtn){ genBtn.disabled=true; genBtn.textContent=st==='queued'?'排队中…':'生成中…'; }
+      return 'active';
+    }
+    if(wasActive){
+      if(st==='done'){ toast('生成完成，数据已刷新'); refreshQuality(STATE.problem||p); }
       else toast('生成失败：'+(job.error||'未知原因'));
+      await refreshDetail(p.id);   /* 终态要重绘：把「排队中/生成中」的按钮放回可点状态 */
     }
     return 'done';
   };
   const first=await step();
   if(!alive()) return;
-  if(first==='running'){
+  if(first==='active'){
     timer=setInterval(async()=>{
       const s=await step();
-      if(s!=='running') stopTimer();
+      if(s!=='active') stopTimer();
     },3000);
     STATE._jobTimer=timer;
   }

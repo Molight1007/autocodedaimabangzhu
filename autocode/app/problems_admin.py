@@ -40,10 +40,11 @@ def delete_problem(problem_id: int, *, db: Optional[Database] = None) -> Dict[st
         return {"error": "题目正在生成中，先等任务结束（或在任务列表里终止）再删除"}
     removed: Dict[str, int] = {}
     with database.transaction() as conn:
-        # generation_jobs 里若有 running 记录（历史残留），先落 failed，防止对账时复活
+        # generation_jobs 里若有 running/queued 记录（历史残留），先落 failed，防止对账时复活；
+        # 排队中的任务还没起进程，改状态即可，下面整表删除会一并带走
         conn.execute(
             "UPDATE generation_jobs SET status='failed', error='题目已删除',"
-            " finished_at=datetime('now') WHERE problem_id=? AND status='running'",
+            " finished_at=datetime('now') WHERE problem_id=? AND status IN ('running','queued')",
             (problem_id,),
         )
         removed["study_records"] = conn.execute(

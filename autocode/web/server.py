@@ -311,6 +311,11 @@ def serve(port: int = 8765, open_browser: bool = True) -> None:
     import webbrowser
 
     httpd = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    # 端口抢到之后再启动调度线程：同时开两个实例时只有一个能真正跑任务
+    try:
+        api.ensure_job_scheduler()
+    except Exception as exc:  # noqa: BLE001 - 调度器起不来不该挡住题库页面
+        print(f"生成任务调度器启动失败（排队的任务不会自动开始）：{exc}")
     url = f"http://127.0.0.1:{port}/"
     print(f"题库工作台已启动：{url}  (Ctrl+C 退出)")
     if open_browser:

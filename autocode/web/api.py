@@ -57,6 +57,7 @@ __all__ = [
     "import_batch",
     "start_generate",
     "job_status",
+    "ensure_job_scheduler",
     "run_student_code",
     "diagnose_student_code",
     "generate_adversarial",
@@ -138,7 +139,9 @@ def problem_list() -> List[Dict[str, Any]]:
         " (SELECT COUNT(*) FROM test_cases c WHERE c.problem_id=p.id) AS cases,"
         " (SELECT COUNT(*) FROM reference_solutions s WHERE s.problem_id=p.id) AS sols,"
         " (SELECT GROUP_CONCAT(DISTINCT lang) FROM reference_solutions s"
-        "  WHERE s.problem_id=p.id AND verified=1) AS langs"
+        "  WHERE s.problem_id=p.id AND verified=1) AS langs,"
+        " (SELECT j.status FROM generation_jobs j WHERE j.problem_id=p.id"
+        "  ORDER BY j.id DESC LIMIT 1) AS job_status"
         " FROM problems p ORDER BY p.id"
     )
     out: List[Dict[str, Any]] = []
@@ -160,6 +163,7 @@ def problem_list() -> List[Dict[str, Any]]:
                 "cases": row["cases"],
                 "solutions": row["sols"],
                 "langs": [x for x in (row["langs"] or "").split(",") if x],
+                "job_status": row["job_status"] or "",
                 "tags": algo,
                 "injection": bool(tags.get("injection_tokens")),
             }
@@ -564,6 +568,14 @@ def job_status(pid: int) -> Dict[str, Any]:
         if advice:
             data["advice"] = advice
     return data
+
+
+def ensure_job_scheduler() -> None:
+    """服务启动时调一次：先把上次留下的排队任务接上，再起常驻调度线程。"""
+    root = Path(__file__).resolve().parents[2]
+    db = get_db()
+    jobs.dispatch(db, root=root, log_dir=_debug_log_dir())
+    jobs.ensure_scheduler(db, root=root, log_dir=_debug_log_dir())
 
 
 def delete_problem(pid: int) -> Dict[str, Any]:

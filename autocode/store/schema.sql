@@ -226,14 +226,17 @@ CREATE INDEX IF NOT EXISTS idx_export_problem ON export_history(problem_id, id D
 CREATE TABLE IF NOT EXISTS generation_jobs (
   id INTEGER PRIMARY KEY,
   problem_id INTEGER NOT NULL,
-  status TEXT NOT NULL,           -- running | done | failed
+  status TEXT NOT NULL,           -- queued | running | done | failed
   budget INTEGER NOT NULL DEFAULT 30,
   os_pid INTEGER,
   error TEXT,
+  queued_at TEXT NOT NULL DEFAULT '',   -- 入队时间；started_at 只记真正开跑时间
   started_at TEXT NOT NULL,
   finished_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_jobs_problem ON generation_jobs(problem_id, id DESC);
+-- 队列取队头 / 算位次都按 (status, id) 走
+CREATE INDEX IF NOT EXISTS idx_jobs_queue ON generation_jobs(status, id);
 
 CREATE INDEX IF NOT EXISTS idx_cases_problem_layer ON test_cases(problem_id, layer);
 CREATE INDEX IF NOT EXISTS idx_solutions_problem_lang ON reference_solutions(problem_id, lang);

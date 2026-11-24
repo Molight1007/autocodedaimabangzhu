@@ -531,8 +531,12 @@ class LlmClient:
                 "删掉注释与空行，但不要省略关键逻辑。"
             )
             return hint, budget_tokens
-        at_cap = budget_tokens >= MAX_TOKENS_CAP
-        new_budget = min(MAX_TOKENS_CAP, max(budget_tokens * 2, 16384))
+        # 顶棚取「客户端上限」与「本次实际预算」的较大者：阶段预算可能本来就高于
+        # MAX_TOKENS_CAP（如 D2 的 131072）。旧写法直接用 MAX_TOKENS_CAP 封顶，
+        # 会把 131072 压回 32768——重试比第一次还小，必然再截断（题 63 现值计算）。
+        ceiling = max(MAX_TOKENS_CAP, int(budget_tokens))
+        at_cap = budget_tokens >= ceiling
+        new_budget = min(ceiling, max(budget_tokens * 2, 16384))
         hint = (
             "上一次输出因长度上限被截断。预算已到顶，请只输出核心实现，"
             "删除注释/空行/冗余分支，不要续写上次内容。"

@@ -26,7 +26,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-from .layout_repair import PROSE_MARKERS, drop_page_artifacts, sanitize_sample
+from .layout_repair import (
+    PROSE_MARKERS,
+    drop_page_artifacts,
+    sanitize_sample,
+    strip_line_numbers,
+)
 
 from ..store.db import Database, get_db
 
@@ -71,7 +76,6 @@ _TAIL_HEAD_RE = re.compile(
     r"\s*[】\]]?\s*[：:]?\s*$",
     re.IGNORECASE,
 )
-_LINE_NO_RE = re.compile(r"^\s*(\d+)[ \t]+(\S.*)$")
 # 样例框里混入的说明文字（PDF 排版把"以下是示例图……"排进了样例框）
 _CJK_RE = re.compile(r"[\u4e00-\u9fff]")
 PROSE_CJK_THRESHOLD = 3
@@ -219,30 +223,6 @@ def clean_lines(text: str) -> List[str]:
     while kept and not kept[-1]:
         kept.pop()
     return kept
-
-
-def strip_line_numbers(lines: Sequence[str], *, force_single: bool = False) -> Tuple[List[str], bool]:
-    """剥离样例框左侧的行号列。
-
-    判定条件（同时满足才剥）：
-    - 每行都是 `<序号><空白><正文>`；
-    - 序号恰好是 1..k 连续；
-    - 至少 2 行；**单行块**只有在 `force_single=True`（文档级确认所有样例框都带行号）时才剥，
-      否则无法区分"真数据首列恰好是 1"与"行号 1"。
-    """
-    nonempty = [line for line in lines if line.strip()]
-    if not nonempty:
-        return list(lines), False
-    if len(nonempty) == 1 and not force_single:
-        return list(lines), False
-    matches = [_LINE_NO_RE.match(line) for line in nonempty]
-    if any(m is None for m in matches):
-        return list(lines), False
-    for expect, match in enumerate(matches, start=1):
-        assert match is not None
-        if int(match.group(1)) != expect:
-            return list(lines), False
-    return [match.group(2).strip() for match in matches if match], True
 
 
 def detect_injection(text: str) -> List[str]:
@@ -511,10 +491,19 @@ def parse_samples(
         warnings = [f"{section_title}: {item}" for item in warnings]
     numbering = _detect_numbering(blocks)
     by_index: Dict[int, Sample] = {}
-    for index, kind, body in blocks:
-        # 顺序很重要：先砍掉混入的中文说明，再做行号判定（否则说明行会打断 1..k 连续序列）
-        trimmed, prose_trimmed = _trim_prose(body)
-        stripped, did_strip = strip_line_numbers(trimmed, force_single=numbering)
+    # 顺序很重要：先砍掉混入的中文说明，再做行号判定（否则说明行会打断 1..k 连续序列）
+    trimmed_blocks = [(index, kind, *_trim_prose(body)) for index, kind, body in blocks]
+    # 行号列是排版属性：只有同组**输入**确认带行号，才允许剥输出块。否则「1 1 / 2 2」
+    # 这种多列答案会被当成行号列，剥完再被「首行是 1」的兜底规则砍掉一行（题 71）。
+    numbered = {
+        index for index, kind, trimmed, _ in trimmed_blocks
+        if kind == "输入" and strip_line_numbers(trimmed, force_single=numbering)[1]
+    }
+    for index, kind, trimmed, prose_trimmed in trimmed_blocks:
+        if kind == "输入" or index in numbered:
+            stripped, did_strip = strip_line_numbers(trimmed, force_single=numbering)
+        else:
+            stripped, did_strip = list(trimmed), False
         text_value = _join_block(stripped)
         sample = by_index.setdefault(index, Sample(index=index))
         if did_strip:

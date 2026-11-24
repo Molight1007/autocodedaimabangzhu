@@ -65,6 +65,35 @@ def strip_number_column(lines: Sequence[str]) -> Tuple[List[str], bool]:
     return items, False
 
 
+_LINE_NO_RE = re.compile(r"^\s*(\d+)[ \t]+(\S.*)$")
+
+
+def strip_line_numbers(
+    lines: Sequence[str], *, force_single: bool = False
+) -> Tuple[List[str], bool]:
+    """剥离样例框左侧的行号列。
+
+    判定条件（同时满足才剥）：
+    - 每行都是 `<序号><空白><正文>`；
+    - 序号恰好是 1..k 连续；
+    - 至少 2 行；**单行块**只有在 `force_single=True`（文档级确认所有样例框都带行号）时才剥，
+      否则无法区分"真数据首列恰好是 1"与"行号 1"。
+    """
+    nonempty = [line for line in lines if line.strip()]
+    if not nonempty:
+        return list(lines), False
+    if len(nonempty) == 1 and not force_single:
+        return list(lines), False
+    matches = [_LINE_NO_RE.match(line) for line in nonempty]
+    if any(m is None for m in matches):
+        return list(lines), False
+    for expect, match in enumerate(matches, start=1):
+        assert match is not None
+        if int(match.group(1)) != expect:
+            return list(lines), False
+    return [match.group(2).strip() for match in matches if match], True
+
+
 def restore_merged_lines(text: str) -> Tuple[str, bool]:
     """还原"行号与数据压成一行"的三种常见形态（只删 1/2/3 号行号，删后必须更短）。
 

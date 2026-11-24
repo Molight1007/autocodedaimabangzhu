@@ -101,6 +101,8 @@ def main() -> int:
     if not STATIC.exists():
         print(f"找不到前端页面：{STATIC}", file=sys.stderr)
         return 1
+    # 桌面版没有 HTTP 服务，调度线程要在这里起：否则第一题跑完后，排队的第二题不会自动开始
+    api.ensure_job_scheduler()
     webview.create_window(
         "autoCode · 出题工作台",
         # 用 file:// URI 而不是裸路径：裸路径会被 pywebview 的内建 HTTP 服务器接管，

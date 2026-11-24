@@ -21,9 +21,10 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence
 
 #: 结构版本：v2=test_cases.source，v3=llm_calls.prompt_hash，v4=hints.approach，
-#: v5=problems.artifact_version（产物流程版本，见 `_COLUMN_MIGRATIONS` 注释）。
+#: v5=problems.artifact_version（产物流程版本，见 `_COLUMN_MIGRATIONS` 注释），
+#: v6=generation_jobs.queued_at（生成任务改成排队执行）。
 #: 迁移全部幂等；版本号只用于记录升级历史，不参与业务判断。
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 PRAGMA_BUSY_TIMEOUT_MS = 5000
 
 _SCHEMA_FILE = Path(__file__).resolve().parent / "schema.sql"
@@ -131,6 +132,10 @@ class Database:
         # v4：提示按解法分组（空串=旧数据，UI 归到“基础解法”）
         "hints": (
             ("approach", "TEXT NOT NULL DEFAULT ''"),
+        ),
+        # v6：生成任务排队执行，老库补入队时间（空串=当时提交即开跑）
+        "generation_jobs": (
+            ("queued_at", "TEXT NOT NULL DEFAULT ''"),
         ),
     }
 
