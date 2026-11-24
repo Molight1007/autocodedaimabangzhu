@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+import re
 from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Sequence, Tuple
@@ -126,9 +127,37 @@ def parse_tolerance(raw: Any) -> float:
 #: 本版本**能执行**的判定方式（`JUDGE_TYPES` 的子集）。`unordered` 用于答案顺序不限的题。
 SUPPORTED_JUDGES = ("token", "line", "exact", "float", "unordered")
 
+#: `float(1e-6)`、`float（1e-6）`、`float(eps=1e-6)`：模型很爱这么写。
+_JUDGE_ARG_RE = re.compile(
+    r"^([a-z_]+)\s*[\(\（]\s*(?:eps\s*=\s*)?([0-9]+(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?)\s*[\)\）]$"
+)
+
+
+def normalize_judge(raw: Any) -> Tuple[str, str]:
+    """把判定方式拆成 `(基础判定, 容差)`。
+
+    模型经常写 `float(1e-6)`，旧版按精确匹配判成「不支持」：轻则整批数据被拒收，
+    重则被降级成 token 比对——浮点答案末位差一点就判错，正确数据被当成错误丢掉。
+    这里统一收口成 `float` + `1e-6` 两段，调用方各取所需。
+
+    返回的容差为空串表示原文没写；不认识的基础判定也原样返回，由 `judge_supported` 拒绝。
+    """
+    text = _text(raw).lower()
+    if not text:
+        return "token", ""
+    matched = _JUDGE_ARG_RE.match(text)
+    if matched:
+        return matched.group(1), matched.group(2)
+    # `float 1e-6` 这种空格写法：只有基础判定本身可用时才当成带参形式
+    parts = text.split()
+    if len(parts) == 2 and parts[0] in SUPPORTED_JUDGES:
+        return parts[0], parts[1]
+    return text, ""
+
 
 def judge_supported(judge_type: str) -> bool:
-    return _text(judge_type) in SUPPORTED_JUDGES
+    base, _tolerance = normalize_judge(judge_type)
+    return base in SUPPORTED_JUDGES
 
 
 def loose_tokens(value: Any) -> List[str]:
@@ -144,15 +173,21 @@ def loose_tokens(value: Any) -> List[str]:
 def compare_output(
     judge_type: str, expected: Any, actual: Any, tolerance: Any = ""
 ) -> Tuple[bool, str]:
-    """返回 `(是否一致, 差异说明)`；未知判定方式抛 ValueError（配置错误必须响）。"""
-    mode = _text(judge_type) or "token"
+    """返回 `(是否一致, 差异说明)`；未知判定方式抛 ValueError（配置错误必须响）。
+
+    `judge_type` 里自带的容差（`float(1e-6)`）在调用方没显式给 `tolerance` 时生效；
+    显式给了就按显式值走——调用方比字符串更清楚这道题要什么精度。
+    """
+    mode, inline_tolerance = normalize_judge(judge_type)
+    mode = mode or "token"
+    eps = _text(tolerance) or inline_tolerance
     exp = norm_text(expected)
     act = norm_text(actual)
     if mode == "exact":
         ok = exp.rstrip() == act.rstrip()
         return ok, "" if ok else "exact_mismatch"
     if mode == "float":
-        result = compare("float_eps", exp, act, float_eps=parse_tolerance(tolerance))
+        result = compare("float_eps", exp, act, float_eps=parse_tolerance(eps))
         return bool(result.ok), "" if result.ok else str(result.reason or "float_mismatch")
     if mode == "line":
         result = compare("line_trim", exp, act)
@@ -263,11 +298,12 @@ def check_segments(obj: Any, total_lines: int, max_problems: int) -> Draft:
         if start < 1 or end < start or end > total_lines:
             draft.warnings.append(f"《{title}》行号越界 {start}-{end}，已丢弃")
             continue
-        judge = _text(row.get("judge_type")) or "token"
+        judge, inline_tolerance = normalize_judge(row.get("judge_type"))
         if judge not in JUDGE_TYPES:
             draft.warnings.append(f"《{title}》判定方式 {judge!r} 非法，按 token 处理")
             judge = "token"
-        tolerance = _text(row.get("tolerance"))
+            inline_tolerance = ""
+        tolerance = _text(row.get("tolerance")) or inline_tolerance
         if judge == "float" and not tolerance:
             draft.warnings.append(f"《{title}》浮点题未给容差，按 1e-6 处理")
             tolerance = "1e-6"

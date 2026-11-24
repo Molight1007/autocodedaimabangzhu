@@ -252,5 +252,35 @@ class TestUsage(unittest.TestCase):
         self.assertEqual(ChatUsage().to_dict()["total_tokens"], 0)
 
 
+class TestTruncateBudget(unittest.TestCase):
+    """截断重试的预算不能越调越小。
+
+    实测事故（题 63 现值计算）：D2 的 stage 预算是 131072，第一次截断后旧代码
+    用 MAX_TOKENS_CAP(32768) 封顶，重试预算反而降到 1/4，必然再截断，整题白烧。
+    """
+
+    def setUp(self) -> None:
+        self.client = LlmClient(LlmConfig(api_key="test-key"))
+
+    def test_budget_above_cap_is_not_shrunk(self) -> None:
+        hint, budget = self.client._truncate_retry(
+            json_mode=True, on_truncate="grow", budget_tokens=131072
+        )
+        self.assertEqual(budget, 131072)
+        self.assertIn("截断", hint)
+
+    def test_budget_below_cap_grows(self) -> None:
+        _hint, budget = self.client._truncate_retry(
+            json_mode=False, on_truncate="grow", budget_tokens=8192
+        )
+        self.assertEqual(budget, 16384)
+
+    def test_shrink_mode_keeps_budget(self) -> None:
+        _hint, budget = self.client._truncate_retry(
+            json_mode=True, on_truncate="shrink", budget_tokens=65536
+        )
+        self.assertEqual(budget, 65536)
+
+
 if __name__ == "__main__":
     unittest.main()

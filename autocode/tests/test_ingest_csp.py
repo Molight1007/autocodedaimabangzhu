@@ -309,5 +309,37 @@ CCF CSP 计算机软件能力认证 第 99 次认证 示例题（demo）
         self.assertTrue(any("缺输入或输出" in w for w in warnings))
 
 
+class TestOutputLineNumberGuard(unittest.TestCase):
+    """输出块不能单凭"首列是 1、2 连续"就当成行号列。
+
+    真实事故（CSP202312-1 移动）：样例输出是
+        1 1
+        2 2
+    每行首列恰好 1、2，旧逻辑剥成 `1 / 2`，再被"首行是 1"的兜底规则砍掉一行，
+    最终样例输出只剩 `2` —— 参考解再对也过不了，整题白烧两次调用。
+    行号列是排版属性：同组输入没有行号时，输出也不该有。
+    """
+
+    def test_two_column_output_is_kept(self) -> None:
+        text = (
+            "样例输入 1\n3 2\n1 1 ffrrbbll\n3 3 frbl\n"
+            "样例输出 1\n1 1\n2 2\n"
+        )
+        samples, _, _ = parse_samples(text.splitlines())
+        self.assertEqual(len(samples), 1)
+        self.assertEqual(samples[0].input_text, "3 2\n1 1 ffrrbbll\n3 3 frbl\n")
+        self.assertEqual(samples[0].output_text, "1 1\n2 2\n")
+
+    def test_output_numbers_still_stripped_with_input_evidence(self) -> None:
+        text = (
+            "样例输入\n1\n4\n2\n1 2 3 4\n"
+            "样例输出\n1\n10\n"
+        )
+        samples, _, _ = parse_samples(text.splitlines())
+        self.assertEqual(len(samples), 1)
+        self.assertEqual(samples[0].input_text, "4\n1 2 3 4\n")
+        self.assertEqual(samples[0].output_text, "10\n")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -32,7 +32,12 @@ _COLUMN_MIGRATIONS = {
     ),
     "import_batches": (("pdf_key", "TEXT NOT NULL DEFAULT ''"),),
     # 2026-11-22：Key 改成一人一份，调用与任务都要记"是谁"的，才能各算各的额度
-    "jobs": (("user", "TEXT NOT NULL DEFAULT ''"),),
+    # 2026-11-23：任务改成排队执行，补入队时间与 worker 参数（重启后排队任务照常能开跑）
+    "jobs": (
+        ("user", "TEXT NOT NULL DEFAULT ''"),
+        ("args_json", "TEXT NOT NULL DEFAULT '[]'"),
+        ("queued_at", "TEXT NOT NULL DEFAULT ''"),
+    ),
     "llm_calls": (("user", "TEXT NOT NULL DEFAULT ''"),),
     # 排版分块：模型只给行号，前端按块拼装；空数组表示退回自动排版
     "problems": (
@@ -44,6 +49,9 @@ _COLUMN_MIGRATIONS = {
         # 不能只覆盖 statement_md，否则用户永远不知道自己看的题被动过。
         ("statement_original", "TEXT NOT NULL DEFAULT ''"),
         ("statement_repaired", "INTEGER NOT NULL DEFAULT 0"),
+        # 导入人：默认题库里非管理员只能删自己导入的题，防止一个学生手滑删掉别人的。
+        # 老题回填为空串，按"公共题"处理，不追溯。
+        ("created_by", "TEXT NOT NULL DEFAULT ''"),
     ),
 }
 

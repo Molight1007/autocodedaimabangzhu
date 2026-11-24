@@ -241,7 +241,7 @@ def probe_llm(db: Any, payload: Dict[str, Any], user: str = "") -> Dict[str, Any
 
 
 def confirm_import(
-    db: Any, batch_id: int, payload: Dict[str, Any], role: str = "student"
+    db: Any, batch_id: int, payload: Dict[str, Any], role: str = "student", user: str = ""
 ) -> Dict[str, Any]:
     raw = payload.get("indices")
     indices = [int(item) for item in raw] if isinstance(raw, list) else []
@@ -251,6 +251,7 @@ def confirm_import(
         indices,
         bank_id=_int(payload.get("bank_id"), banks.DEFAULT_ID),
         role=role,
+        user=user,
     )
 
 
@@ -297,8 +298,7 @@ def start_dataset(db: Any, payload: Dict[str, Any], user: str = "") -> Dict[str,
         return {"error": "这道题没有解析出样例，无法校准期望输出", "code": "NEED_SAMPLES"}
     budget = max(2, min(10, _int(payload.get("budget"), config.DEFAULT_BUDGET_CALLS)))
     result = jobs.start(
-        db, kind="dataset", problem_id=pid, args=[], budget=budget,
-        limit=config.MAX_DATASET_JOBS, user=user,
+        db, kind="dataset", problem_id=pid, args=[], budget=budget, user=user,
     )
     if not result.get("ok"):
         return result
@@ -309,6 +309,9 @@ def start_dataset(db: Any, payload: Dict[str, Any], user: str = "") -> Dict[str,
         "job_id": int(result["job_id"]),
         "problem_id": pid,
         "budget": budget,
+        # 有空位就是直接开跑；没空位则排队，position 是"排第几"
+        "queued": bool(result.get("queued")),
+        "position": int(result.get("position") or 0),
     }
 
 
@@ -351,8 +354,7 @@ def start_adversarial(db: Any, payload: Dict[str, Any], user: str = "") -> Dict[
     result = jobs.start(
         db, kind="adversarial", problem_id=pid,
         args=["--submission-id", str(submission_id)],
-        budget=config.DEFAULT_BUDGET_CALLS, limit=config.MAX_ADVERSARIAL_JOBS,
-        user=user,
+        budget=config.DEFAULT_BUDGET_CALLS, user=user,
     )
     if not result.get("ok"):
         return result
@@ -361,6 +363,8 @@ def start_adversarial(db: Any, payload: Dict[str, Any], user: str = "") -> Dict[
         "job_id": int(result["job_id"]),
         "submission_id": submission_id,
         "problem_id": pid,
+        "queued": bool(result.get("queued")),
+        "position": int(result.get("position") or 0),
     }
 
 
@@ -539,10 +543,10 @@ def export_problem(db: Any, problem_id: int, fmt: str = "json") -> Dict[str, Any
 
 
 def delete_problem(
-    db: Any, problem_id: int, confirm_title: str = "", role: str = "student"
+    db: Any, problem_id: int, confirm_title: str = "", role: str = "student", user: str = ""
 ) -> Dict[str, Any]:
     row = db.query_one(
-        "SELECT id, bank_id, title, status, dataset_version FROM problems WHERE id=?",
+        "SELECT id, bank_id, title, status, dataset_version, created_by FROM problems WHERE id=?",
         (int(problem_id),),
     )
     if row is None:
@@ -551,6 +555,15 @@ def delete_problem(
     bank = banks.get(db, row["bank_id"])
     if bank is not None and banks.is_permanent(bank) and str(role or "") != "admin":
         return {"error": banks.DENY_DELETE, "code": "FORBIDDEN"}
+    # 默认题库是所有人共用的：175 个学生都能加题，若谁都能删，一个人手滑就会把
+    # 别人正在生成数据的题连测试数据一起清掉。改成只有管理员、或这道题的导入人能删。
+    # 升级前的老题 created_by 为空，按"公共题"处理，不追溯限制。
+    owner = str(row["created_by"] or "")
+    if str(role or "") != "admin" and owner and owner != str(user or ""):
+        return {
+            "error": "这道题是别的同学导入的，只有管理员能删除；需要移除请提交反馈说明原因",
+            "code": "FORBIDDEN_DELETE",
+        }
     title = str(row["title"])
     cases = int(db.query_scalar(
         "SELECT COUNT(*) FROM test_cases WHERE problem_id=? AND status='active'", (pid,), 0

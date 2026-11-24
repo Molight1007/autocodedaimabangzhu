@@ -75,8 +75,13 @@ REQUIRE_SAMPLES = False
 DAILY_LLM_CALL_CAP = 3000
 
 JOB_TIMEOUT_MIN = 30
-MAX_DATASET_JOBS = 2
-MAX_ADVERSARIAL_JOBS = 2
+#: 所有生成任务共用一个队列，最多同时跑 3 个（测试数据、对抗数据都算）。
+#: 依据：主机 4 核，服务 CPUQuota 调到 300%；实测单题 2.7~6.4 分钟，
+#: 模型等待占大头，3 个并发时校验阶段的 CPU 峰值仍在配额内。
+#: 再往上会互相拖慢，且 2G 内存没有单次运行限额。
+JOB_SLOTS = 3
+#: 调度器检查间隔（秒）：只影响"上一题结束后下一题多久开始"，不影响正在跑的任务。
+JOB_TICK_SEC = 1.0
 DEFAULT_BUDGET_CALLS = 10
 RUN_TIMEOUT_MS = 2_000
 #: 代码答案的单次运行上限。输入放宽到 64 KB（约 2 万个整数）后，

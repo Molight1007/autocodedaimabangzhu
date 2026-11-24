@@ -79,6 +79,7 @@ CREATE TABLE IF NOT EXISTS problems (
   exec_spec_json TEXT NOT NULL DEFAULT '',                -- 自动生成的执行规格（stdin 协议 + 转换后样例）
   statement_original TEXT NOT NULL DEFAULT '',            -- 题面被模型补全前的原文（未补全时为空）
   statement_repaired INTEGER NOT NULL DEFAULT 0,          -- 1 = 当前 statement_md 是模型补全的
+  created_by TEXT NOT NULL DEFAULT '',                    -- 导入人（学号）；空 = 升级前的老题，视为公共
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   UNIQUE(bank_id, statement_hash)
@@ -221,24 +222,32 @@ CREATE TABLE IF NOT EXISTS llm_calls (
 );
 
 CREATE INDEX IF NOT EXISTS ix_llm_problem ON llm_calls(problem_id, stage);
+-- 每人每日额度检查走 `WHERE user=? AND created_at>=?`：没有这条索引会全表扫，
+-- 175 人各跑几十题后表会到几万行，每次开任务都扫一遍
+CREATE INDEX IF NOT EXISTS ix_llm_user_time ON llm_calls(user, created_at);
 
 CREATE TABLE IF NOT EXISTS jobs (
   id INTEGER PRIMARY KEY,
   user TEXT NOT NULL DEFAULT '',                           -- 发起人：worker 据此加载他自己的 Key
   problem_id INTEGER NOT NULL,
   kind TEXT NOT NULL,                                     -- dataset / adversarial
-  status TEXT NOT NULL,                                   -- running / done / failed
+  status TEXT NOT NULL,                                   -- queued / running / done / failed
   stage TEXT NOT NULL DEFAULT '',
   budget INTEGER NOT NULL DEFAULT 0,
   os_pid INTEGER,
   error TEXT NOT NULL DEFAULT '',
   failed_stage TEXT NOT NULL DEFAULT '',
   result_json TEXT,
+  args_json TEXT NOT NULL DEFAULT '[]',                   -- worker 参数（对抗任务的 submission-id）：排队期间也要留档
+  queued_at TEXT NOT NULL DEFAULT '',                     -- 入队时间；started_at 只记真正开跑时间
   started_at TEXT NOT NULL,
   finished_at TEXT
 );
 
 CREATE INDEX IF NOT EXISTS ix_jobs_problem ON jobs(problem_id, id DESC);
+
+-- 队列取"同一类里最早的一条"，这条索引让取队头和算位次都不用扫全表
+CREATE INDEX IF NOT EXISTS ix_jobs_queue ON jobs(status, kind, id);
 
 CREATE TABLE IF NOT EXISTS sessions (
   token_hash TEXT PRIMARY KEY,

@@ -167,5 +167,43 @@ class TestDelete(Base):
         self.assertTrue(api.delete_problem(self.db, self.pid)["ok"])
 
 
+class TestDeleteOwnership(Base):
+    """默认题库共用：只有管理员和导入人自己能删，别人删不掉。
+
+    175 个学生一人一号、共用题库，一个学生手滑就能把别人正在生成数据的题
+    连测试数据一起清掉。老题 created_by 为空，按公共题处理，保持可删。
+    """
+
+    def _set_owner(self, user: str) -> None:
+        with self.db.transaction() as conn:
+            conn.execute("UPDATE problems SET created_by=? WHERE id=?", (user, self.pid))
+
+    def test_student_cannot_delete_others_problem(self) -> None:
+        self._set_owner("202608060137")
+        denied = api.delete_problem(
+            self.db, self.pid, "两数之和", "student", "202608060999"
+        )
+        self.assertEqual(denied["code"], "FORBIDDEN_DELETE")
+        self.assertEqual(self._count("problems", "id=?", (self.pid,)), 1)
+
+    def test_owner_can_delete_own_problem(self) -> None:
+        self._set_owner("202608060137")
+        self.assertTrue(
+            api.delete_problem(self.db, self.pid, "两数之和", "student", "202608060137")["ok"]
+        )
+
+    def test_admin_can_delete_others_problem(self) -> None:
+        self._set_owner("202608060137")
+        self.assertTrue(
+            api.delete_problem(self.db, self.pid, "两数之和", "admin", "autocode")["ok"]
+        )
+
+    def test_legacy_problem_without_owner_stays_deletable(self) -> None:
+        # 升级前入库的题 created_by 为空：不追溯限制，否则老师没法清理历史题
+        self.assertTrue(
+            api.delete_problem(self.db, self.pid, "两数之和", "student", "202608060999")["ok"]
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

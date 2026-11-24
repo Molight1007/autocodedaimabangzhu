@@ -1,5 +1,5 @@
 [Unit]
-Description=autoCode Slim 每日数据库备份
+Description=autoCode Slim 数据库备份（每 4 小时）
 Documentation=file:/opt/autocode/deploy/backup.sh
 After=autocode-slim.service
 

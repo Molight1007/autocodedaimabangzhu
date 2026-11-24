@@ -1,8 +1,10 @@
 [Unit]
-Description=autoCode Slim 每日备份定时器（03:20，错过则开机后补跑）
+Description=autoCode Slim 备份定时器（每 4 小时，错过则开机后补跑）
 
 [Timer]
-OnCalendar=*-*-* 03:20:00
+; 每天只备一次的话，上午导入的题下午丢了就找不回来。库本身只有几 MB，
+; 每 4 小时一份、保留 14 天（backup.sh 的 KEEP_DAYS）≈ 84 份、200 MB 上下。
+OnCalendar=*-*-* 00/4:20:00
 Persistent=true
 RandomizedDelaySec=300
 Unit=autocode-backup.service

@@ -314,6 +314,19 @@ def judge_of(spec: Dict[str, Any]) -> str:
     return "unordered" if str(out.get("order")) == "any" else "token"
 
 
+def normalize_judge(raw: Any) -> str:
+    """把 `float(1e-6)` 这类写法归一成 `float`。
+
+    提示词为了让模型知道容差，会把判定方式写成 `float(1e-6)`（见
+    `dataset._judge_line`），模型照抄回来时不能当成"未知判定方式"打死：
+    容差本来就存在 `problems.tolerance` 列里，判定方式只需要裸名。
+    """
+    text = _text(raw)
+    # 中英文括号都认：模型有时写全角括号，`float（1e-6）` 之前会原样留成未知判定
+    head = text.split("(", 1)[0].split("（", 1)[0].strip().lower()
+    return head or text
+
+
 # ── 契约整体校验（D2 的产物） ────────────────────────────────────────────────
 
 def check_contract(payload: Any, original_samples: Sequence[Dict[str, Any]]) -> Draft:
@@ -329,7 +342,7 @@ def check_contract(payload: Any, original_samples: Sequence[Dict[str, Any]]) -> 
             draft.fail(item)
         return draft
 
-    judge = _text(draft.payload.get("judge_type")) or judge_of(spec)
+    judge = normalize_judge(draft.payload.get("judge_type")) or judge_of(spec)
     if judge not in SUPPORTED_JUDGES:
         return draft.fail(f"判定方式 {judge!r} 不在支持列表内")
     if judge_of(spec) == "unordered" and judge != "unordered":
@@ -398,7 +411,7 @@ def loads(raw: Any) -> Dict[str, Any]:
         return {}
     return {
         "io": spec,
-        "judge_type": _text(value.get("judge_type")) or judge_of(spec),
+        "judge_type": normalize_judge(value.get("judge_type")) or judge_of(spec),
         "samples": _as_list(value.get("samples")),
         "notes": _text(value.get("notes")),
     }

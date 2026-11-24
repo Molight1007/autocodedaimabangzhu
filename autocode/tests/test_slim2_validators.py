@@ -98,6 +98,19 @@ class TestSegments(unittest.TestCase):
         )
         self.assertEqual(draft.items[0]["tolerance"], "1e-6")
 
+    def test_float_with_inline_tolerance_is_split_on_import(self) -> None:
+        """`float(1e-6)` 入库时要拆成 judge_type=float + tolerance=1e-6，
+        否则这一列永远带着括号，后续判题和展示都拿不到干净的判定方式。"""
+        draft = v.check_segments(
+            {"problems": [{"title": "A", "start_line": 1, "end_line": 10,
+                           "judge_type": "float(1e-6)", "tolerance": ""}]},
+            total_lines=100, max_problems=20,
+        )
+        self.assertEqual(draft.items[0]["judge_type"], "float")
+        self.assertEqual(draft.items[0]["tolerance"], "1e-6")
+        # 不该再报「判定方式非法」的告警
+        self.assertFalse([item for item in draft.warnings if "判定方式" in item])
+
 
 def _clean(obj, **kw):
     """check_dataset 的最小参数集：本文件只测清洗逻辑，不测条数配额。"""
@@ -260,6 +273,24 @@ class TestSupport(unittest.TestCase):
         self.assertTrue(v.judge_supported("token"))
         self.assertFalse(v.judge_supported("special"))
         self.assertFalse(v.judge_supported("interactive"))
+
+    def test_judge_with_inline_tolerance_is_supported(self) -> None:
+        """模型爱写 float(1e-6)。旧版按精确匹配判成不支持：浮点题要么被拒收，
+        要么被降级成 token 比对，末位差一点就把正确数据判错（线上失败过 2 次）。"""
+        self.assertTrue(v.judge_supported("float(1e-6)"))
+        self.assertTrue(v.judge_supported("float（1e-6）"))
+        self.assertTrue(v.judge_supported("Float(eps=1e-6)"))
+        self.assertTrue(v.judge_supported("float 1e-6"))
+        self.assertEqual(v.normalize_judge("float(1e-6)"), ("float", "1e-6"))
+        self.assertEqual(v.normalize_judge("float"), ("float", ""))
+        # 不认识的基础判定不能被括号里的参数蒙混过关
+        self.assertFalse(v.judge_supported("special(1e-6)"))
+
+    def test_inline_tolerance_applies_to_compare(self) -> None:
+        self.assertTrue(v.compare_output("float(1e-6)", "1.000000\n", "1.0000001\n")[0])
+        self.assertFalse(v.compare_output("float(1e-6)", "1.0\n", "1.1\n")[0])
+        # 调用方显式给的容差优先于判定方式里写的
+        self.assertTrue(v.compare_output("float(1e-9)", "1.0\n", "1.001\n", "0.01")[0])
 
 
 class TestFixedArityDataset(unittest.TestCase):

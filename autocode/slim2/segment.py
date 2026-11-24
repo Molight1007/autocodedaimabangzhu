@@ -547,6 +547,7 @@ def confirm_import(
     *,
     bank_id: int = banks.DEFAULT_ID,
     role: str = "student",
+    user: str = "",
 ) -> Dict[str, Any]:
     bank = banks.get(db, bank_id)
     if bank is None:
@@ -592,8 +593,8 @@ def confirm_import(
             cursor = conn.execute(
                 "INSERT INTO problems(bank_id, title, statement_md, statement_hash, samples_json,"
                 " constraints_json, judge_type, tolerance, multi_testcase, layout_json, status,"
-                " dataset_version, created_at, updated_at)"
-                " VALUES(?,?,?,?,?,?,?,?,?,?, 'draft', 0, ?, ?)",
+                " dataset_version, created_by, created_at, updated_at)"
+                " VALUES(?,?,?,?,?,?,?,?,?,?, 'draft', 0, ?, ?, ?)",
                 (
                     int(bank["id"]),
                     str(row["title"]),
@@ -605,6 +606,7 @@ def confirm_import(
                     str(row["tolerance"]),
                     int(row["multi_testcase"]),
                     str(row["layout_json"] or "[]"),
+                    str(user or ""),
                     now,
                     now,
                 ),

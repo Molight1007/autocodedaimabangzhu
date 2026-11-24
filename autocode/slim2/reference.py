@@ -115,6 +115,12 @@ def extract_code(text: str) -> str:
     return "\n".join(lines).strip("\n")
 
 
+def _brief(value: Any, limit: int = 40) -> str:
+    """单行摘要：喂给下一轮模型看的差异，别把整份数据塞进提示词。"""
+    text = " ".join(str(value or "").split())
+    return text if len(text) <= limit else text[:limit] + "…"
+
+
 def _sample_check(
     program: Any, samples: Sequence[Dict[str, Any]], judge: str, tolerance: str,
     timeout_ms: int,
@@ -127,11 +133,16 @@ def _sample_check(
         if run["verdict"] != VERDICT_AC:
             problems.append(f"样例{order} 运行 {run['verdict']}")
             continue
-        ok, _detail = compare_output(judge, sample.get("output", ""), run["stdout"], tolerance)
+        expected = sample.get("output", "")
+        ok, _detail = compare_output(judge, expected, run["stdout"], tolerance)
         if ok:
             passed += 1
         else:
-            problems.append(f"样例{order} 输出不符")
+            # 只说"不符"的话，下一轮重写等于盲改（实测两次都卡在同一处）。
+            # 把期望值与实际输出各带一小段，模型才知道是格式、边界还是题意理解错了。
+            problems.append(
+                f"样例{order} 输出不符（期望 {_brief(expected)!r}，实际 {_brief(run['stdout'])!r}）"
+            )
     return passed, problems
 
 

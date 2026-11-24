@@ -22,8 +22,9 @@ def purge_problem(db: Any, problem_id: int) -> None:
     """删掉一道题及其全部从属数据（测试数据、对抗数据、任务、插图文件）。"""
     pid = int(problem_id)
     # 先停任务：进程还活着的话，它会继续调模型花钱，最后写进一道已经删掉的题。
+    # 排队中的任务也要一起收掉，否则位次会一直挂着一个不存在的题。
     for row in db.query_all(
-        "SELECT id FROM jobs WHERE problem_id=? AND status='running'", (pid,)
+        "SELECT id FROM jobs WHERE problem_id=? AND status IN ('running','queued')", (pid,)
     ):
         jobs.cancel_by_id(db, int(row["id"]))
     with db.transaction() as conn:

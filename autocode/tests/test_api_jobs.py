@@ -221,7 +221,7 @@ class TestJobPersistence(ApiCase):
         self._insert_job(pid)
         RUNNING.pop(pid, None)
         result = start_generate({"id": pid, "budget": 5})
-        self.assertEqual(result.get("error"), "该题已有生成任务在运行")
+        self.assertEqual(result.get("error"), "该题已有生成任务在排队或运行")
 
     def test_stale_job_with_handle_terminates_process(self) -> None:
         """一般项1：落 failed 前必须先杀进程，否则 UI 说失败、进程继续烧 token。"""

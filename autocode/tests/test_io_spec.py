@@ -132,6 +132,18 @@ class TestCheckContract(unittest.TestCase):
         self.assertTrue(draft.ok, draft.fatal)
         self.assertEqual(len(draft.items), 1)
 
+    def test_tolerance_suffix_accepted(self) -> None:
+        """`float(1e-6)` 是提示词自己给出的写法，模型照抄回来不能判死。
+
+        实测事故（CSP202309-1 归一化处理、202206-1 蒙特卡洛）：D2 把判定方式
+        原样回写成 `float(1e-6)`，旧代码只认裸名，整题直接失败。
+        """
+        draft = io_spec.check_contract(
+            self._payload(judge_type="float(1e-6)"), [{"input": "x", "output": "3"}]
+        )
+        self.assertTrue(draft.ok, draft.fatal)
+        self.assertEqual(draft.payload["judge_type"], "float")
+
     def test_sample_count_must_match(self) -> None:
         draft = io_spec.check_contract(
             self._payload(), [{"output": "3"}, {"output": "4"}]
@@ -188,6 +200,25 @@ class TestDescribe(unittest.TestCase):
     def test_loads_bad_json(self) -> None:
         self.assertEqual(io_spec.loads("{oops"), {})
         self.assertEqual(io_spec.loads(""), {})
+
+
+class TestJudgeNormalize(unittest.TestCase):
+    def test_suffix_is_stripped(self) -> None:
+        self.assertEqual(io_spec.normalize_judge("float(1e-6)"), "float")
+        self.assertEqual(io_spec.normalize_judge("  Float ( 1e-6 ) "), "float")
+        self.assertEqual(io_spec.normalize_judge("token"), "token")
+        self.assertEqual(io_spec.normalize_judge(""), "")
+
+    def test_stored_contract_is_normalized(self) -> None:
+        """老契约里存过带容差的判定，读出来也要能用。"""
+        import json
+
+        contract = io_spec.loads(json.dumps({
+            "io": SPEC,
+            "judge_type": "float(1e-6)",
+            "samples": [{"index": 1, "input": "3\n1 2 3\n", "output": "6"}],
+        }))
+        self.assertEqual(contract["judge_type"], "float")
 
 
 if __name__ == "__main__":

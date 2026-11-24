@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import secrets
@@ -163,10 +164,29 @@ class Handler(BaseHTTPRequestHandler):
         self._json(payload, status)
 
     def _html(self, name: str, status: int = 200) -> None:
+        """页面走条件请求：app.html 有 148 KB，175 人一起上课时每次刷新都全量传
+        会顶满带宽。带 ETag 后浏览器只回一个 304（几百字节），内容变了才重传。"""
         path = config.STATIC_DIR / name
         if not path.is_file():
             return self._fail(500, "INTERNAL", f"缺少页面 {name}")
-        self._send(status, path.read_bytes(), "text/html; charset=utf-8")
+        raw = path.read_bytes()
+        etag = f'"{hashlib.sha256(raw).hexdigest()[:16]}"'
+        if str(self.headers.get("If-None-Match") or "").strip() == etag:
+            self.send_response(304)
+            self.send_header("ETag", etag)
+            self.send_header("Cache-Control", "no-cache")
+            self.end_headers()
+            return
+        self.send_response(status)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(raw)))
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("ETag", etag)
+        self.end_headers()
+        self.wfile.write(raw)
 
     def _redirect(self, location: str) -> None:
         self.send_response(302)
@@ -307,7 +327,23 @@ class Handler(BaseHTTPRequestHandler):
             ".jpeg": "image/jpeg",
             ".webp": "image/webp",
         }.get(target.suffix.lower(), "application/octet-stream")
-        return self._send(200, target.read_bytes(), mime)
+        # 插图按内容哈希做条件请求：同一道题来回切时不用重复下载几百 KB 的图
+        raw = target.read_bytes()
+        etag = f'"{hashlib.sha256(raw).hexdigest()[:16]}"'
+        if str(self.headers.get("If-None-Match") or "").strip() == etag:
+            self.send_response(304)
+            self.send_header("ETag", etag)
+            self.send_header("Cache-Control", "no-cache")
+            self.end_headers()
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", mime)
+        self.send_header("Content-Length", str(len(raw)))
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("ETag", etag)
+        self.end_headers()
+        self.wfile.write(raw)
 
     def _api_get(self, path: str, query: Dict[str, list]) -> None:
         if not self._session():
@@ -521,7 +557,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._result(api.probe_llm(_db(), payload, user))
         if len(parts) == 4 and parts[:2] == ["api", "import"] and parts[3] == "confirm":
             self._audit("confirm_import", str(parts[2]))
-            return self._result(api.confirm_import(_db(), int(parts[2]), payload, role))
+            return self._result(api.confirm_import(
+                _db(), int(parts[2]), payload, role, self._user()
+            ))
         if len(parts) == 4 and parts[:2] == ["api", "problems"]:
             problem_id = int(parts[2])
             payload = {**payload, "id": problem_id}
@@ -542,7 +580,7 @@ class Handler(BaseHTTPRequestHandler):
             if parts[3] == "delete":
                 self._audit("delete_problem", str(problem_id), str(payload.get("confirm_title") or "")[:120])
                 return self._result(api.delete_problem(
-                    _db(), problem_id, str(payload.get("confirm_title") or ""), role
+                    _db(), problem_id, str(payload.get("confirm_title") or ""), role, user
                 ))
             if parts[3] == "restore-statement":
                 self._audit("restore_statement", str(problem_id))
@@ -553,8 +591,23 @@ class Handler(BaseHTTPRequestHandler):
             return self._result(api.cancel_job_by_job(_db(), int(parts[2])))
         return self._fail(404, "NOT_FOUND", "接口不存在")
 
+    #: 连接级事件（读超时、客户端中途断开）：HTTP/1.1 长连接下这是**常态**，
+    #: 175 个学生同时挂着页面就是每分钟几百次。这类事件不写日志：
+    #: 以前它们会走 log_error → log_message → self.command（超时时还没赋值）→
+    #: AttributeError，每次刷三十行堆栈，把真正的错误淹掉，还白占磁盘。
+    _QUIET_ERRORS = ("timed out", "Connection reset", "Broken pipe", "Connection aborted")
+
     def log_message(self, fmt: str, *args: Any) -> None:
-        print(f"[slim2] {_client_ip(self)} {self.command} {self.path} - {fmt % args}", flush=True)
+        # 超时路径上 self.command/self.path 可能还没赋值，取不到就记 "-"
+        command = getattr(self, "command", None) or "-"
+        path = getattr(self, "path", None) or "-"
+        print(f"[slim2] {_client_ip(self)} {command} {path} - {fmt % args}", flush=True)
+
+    def log_error(self, fmt: str, *args: Any) -> None:
+        text = fmt % args
+        if any(item in text for item in self._QUIET_ERRORS):
+            return
+        super().log_error(fmt, *args)
 
 
 def _int(query: Dict[str, list], name: str, default: int) -> int:
@@ -611,12 +664,6 @@ def serve() -> None:
     port = config.port()
     db = _db()
     auth.purge_expired(db)
-    try:
-        orphans = jobs.mark_orphans(db)
-        if orphans:
-            print(f"上次运行留下的 {orphans} 个任务已标记为中断（服务重启时进程被终止）", flush=True)
-    except Exception as exc:  # noqa: BLE001
-        print(f"对账历史任务失败（不影响启动）：{exc}", flush=True)
     user, _stored, fresh = auth.load_credentials()
     try:
         httpd = _Server((host, port), Handler)
@@ -624,6 +671,20 @@ def serve() -> None:
         print(f"启动失败：{host}:{port} 无法绑定（{exc}）", flush=True)
         print("多半是已经有一个实例在跑：先关掉那个窗口，或设置 AUTOCODE_SLIM2_PORT 换端口。", flush=True)
         raise SystemExit(1)
+    # 端口抢到了再动任务：否则第二个实例会把同一个队列重复拉起
+    try:
+        orphans = jobs.mark_orphans(db)
+        if orphans:
+            print(f"上次运行留下的 {orphans} 个任务已标记为中断（服务重启时进程被终止）", flush=True)
+    except Exception as exc:  # noqa: BLE001
+        print(f"对账历史任务失败（不影响启动）：{exc}", flush=True)
+    try:
+        resumed = jobs.dispatch(db)
+        jobs.ensure_scheduler(db)
+        if resumed:
+            print(f"已从排队区接着启动 {resumed} 个任务", flush=True)
+    except Exception as exc:  # noqa: BLE001
+        print(f"任务调度器启动失败（正在跑的任务不受影响，但排队的不会自动开始）：{exc}", flush=True)
     print(f"精简版已启动：http://{host}:{port}/  用户：{user}", flush=True)
     if fresh:
         print(f"首次启动，随机密码已写入 {config.initial_password_path()}", flush=True)

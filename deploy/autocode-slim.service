@@ -26,9 +26,17 @@ ProtectKernelModules=yes
 ProtectControlGroups=yes
 RestrictSUIDSGID=yes
 LockPersonality=yes
-MemoryMax=2G
+# 3 个生成任务并发共用这一份额度。正常每个 worker 约 35MB，但学生代码在“跑数据”
+# 阶段没有单次内存上限，一道写崩的解就能吃掉几个 G；2G 会连主进程一起被 OOM 杀掉。
+# 主机 7.7G，给 4G 后仍留约 3.7G 给系统与 Caddy。
+MemoryMax=4G
+# 默认 OOMPolicy=stop：任何一个子进程被 OOM 杀掉，systemd 会把整个服务停掉，
+# 另外两个正在跑的任务一起中断。改成 continue——只死掉肇事那个 worker，
+# 它的任务在下次对账时落 failed(process)，服务和其它任务继续。
+OOMPolicy=continue
 LimitNOFILE=8192
-CPUQuota=180%
+# 3 个生成任务并发：180% 会让校验阶段互相排队；300% 留 1 核给系统与 Caddy
+CPUQuota=300%
 TasksMax=256
 
 [Install]

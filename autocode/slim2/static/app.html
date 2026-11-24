@@ -1700,8 +1700,9 @@ function renderDetail() {
   if (!d) return;
   const datasetJob = d.jobs.dataset || {};
   const advJobState = d.jobs.adversarial || {};
-  // 同一道题同时跑两个任务只会互相抢资源，按钮层面直接挡住
-  const busy = datasetJob.status === 'running' || advJobState.status === 'running';
+  // 同一道题同时跑两个任务只会互相抢资源，按钮层面直接挡住；排队中也算忙
+  const busy = datasetJob.status === 'running' || datasetJob.status === 'queued'
+    || advJobState.status === 'running' || advJobState.status === 'queued';
   // 永久库只有管理员能删；学生看到的是置灰按钮 + 原因，不是"点了才报错"
   const canDelete = !(d.bank && d.bank.kind === 'permanent') || S.role === 'admin';
   // 代码框活在 DOM 里，切标签时会被连带销毁；先存进状态，渲染时再填回去
@@ -1800,6 +1801,15 @@ function jobLine(job, label, kind) {
       <span class="spinner"></span>
       <div>${esc(label)}：连接中断，正在恢复（第 ${job.misses || 1} 次）…
         <span class="wait">任务仍在服务器上执行，网络恢复后会自动接上</span></div>
+    </div>`;
+  }
+  if (job.status === 'queued') {
+    // 排队不等于在跑：不显示计时（elapsed_s 为 0），只告诉用户前面还有几个
+    const ahead = Number(job.ahead || 0);
+    return `<div class="job" id="${id}">
+      <span class="job-ico">${ICONS.info}</span>
+      <div><b>${esc(label)}排队中</b>
+        <span class="wait">${ahead > 0 ? `前面还有 ${ahead} 个任务，` : ''}轮到时自动开始，关闭页面也不影响</span></div>
     </div>`;
   }
   if (job.status === 'running') {
@@ -2132,8 +2142,10 @@ async function startDataset() {
   const buttons = [$('btn-gen'), $('btn-gen-2')].filter(Boolean);
   buttons.forEach(button => { button.disabled = true; });
   try {
-    await post('/api/problems/' + S.current + '/datasets', {});
-    toast('已启动，正在生成测试数据');
+    const data = await post('/api/problems/' + S.current + '/datasets', {});
+    toast(data && data.queued
+      ? `已加入队列（第 ${data.position} 位），轮到时自动开始`
+      : '已启动，正在生成测试数据');
     await refreshDetail();
   } catch (error) {
     toast(error.message);
@@ -2296,13 +2308,14 @@ async function createBank() {
 // ── 任务轮询：刷新页面后仍然接管正在跑的任务 ────────────────────────────────
 function ensurePolling() {
   if (!S.detail) return;
-  for (const kind of ['dataset', 'adversarial']) {
-    const job = (S.detail.jobs || {})[kind] || {};
-    if (job.status === 'running' && job.job_id && job.job_id !== S.pollJobId) {
-      startPolling(Number(job.job_id), S.current, kind);
-      return;
-    }
-  }
+  const active = ['dataset', 'adversarial']
+    .map(kind => ({ kind, job: (S.detail.jobs || {})[kind] || {} }))
+    .filter(item => (item.job.status === 'running' || item.job.status === 'queued')
+      && item.job.job_id && item.job.job_id !== S.pollJobId);
+  if (!active.length) return;
+  // 优先盯正在跑的：排队中的任务状态会一直停在同一格，先盯它没有信息量
+  const target = active.find(item => item.job.status === 'running') || active[0];
+  startPolling(Number(target.job.job_id), S.current, target.kind);
 }
 
 function startPolling(jobId, problemId, kind) {
@@ -2340,11 +2353,11 @@ function startPolling(jobId, problemId, kind) {
       return;
     }
     S.pollMisses = 0;
-    if (job.status === 'running') {
+    if (job.status === 'running' || job.status === 'queued') {
       // 只替换任务条，不整页重绘：整页重绘会把正在输入的对抗代码框焦点冲掉
       if (sameProblem) {
         const box = $('job-' + kind);
-        if (box) box.outerHTML = jobLine({ ...job, status: 'running', job_id: jobId }, label, kind);
+        if (box) box.outerHTML = jobLine(job, label, kind);
       }
       return;
     }

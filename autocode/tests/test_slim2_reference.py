@@ -179,6 +179,25 @@ class TestDecideCases(unittest.TestCase):
         self.assertEqual((len(accepted), len(rejected)), (0, 1))
 
 
+class TestSampleMismatchMessage(unittest.TestCase):
+    """样例没过的说明必须带出"期望 vs 实际"。
+
+    只说"输出不符"，下一轮重写只能盲改（实测题 57/71 两次都卡在同一处）。
+    """
+
+    def test_reason_carries_expected_and_actual(self) -> None:
+        prepared = reference.anchor(
+            "import sys\nprint('wrong')\n", samples=SAMPLES, judge_type="token"
+        )
+        try:
+            self.assertFalse(prepared.result.anchored)
+            self.assertIn("期望", prepared.result.reason)
+            self.assertIn("实际", prepared.result.reason)
+            self.assertIn("wrong", prepared.result.reason)
+        finally:
+            reference.release_program(prepared.program)
+
+
 class TestNoNetworkLeak(unittest.TestCase):
     def test_runner_not_used_when_guard_blocks(self) -> None:
         """守卫拦下后不应再调用执行器；顺带确认 prepare_program 没被调用。"""
