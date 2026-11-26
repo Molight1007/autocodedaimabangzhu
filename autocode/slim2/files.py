@@ -154,6 +154,104 @@ def decode_upload(payload: dict) -> Tuple[str, bytes]:
     return name or "上传文件", raw
 
 
+#: 上标/下标字符表。缺字形的字符（大写字母、g/q/y/z 等）保守回退原样——
+#: 宁可少转一个字符，也不能把 23 转成不存在的记号。
+_SUP_CHARS = {
+    "0": "⁰", "1": "¹", "2": "²", "3": "³", "4": "⁴",
+    "5": "⁵", "6": "⁶", "7": "⁷", "8": "⁸", "9": "⁹",
+    "+": "⁺", "-": "⁻", "−": "⁻", "=": "⁼", "(": "⁽", ")": "⁾",
+    "a": "ᵃ", "b": "ᵇ", "c": "ᶜ", "d": "ᵈ", "e": "ᵉ", "f": "ᶠ", "g": "ᵍ",
+    "h": "ʰ", "i": "ⁱ", "j": "ʲ", "k": "ᵏ", "l": "ˡ", "m": "ᵐ", "n": "ⁿ",
+    "o": "ᵒ", "p": "ᵖ", "r": "ʳ", "s": "ˢ", "t": "ᵗ", "u": "ᵘ", "v": "ᵛ",
+    "w": "ʷ", "x": "ˣ", "y": "ʸ", "z": "ᶻ",
+}
+_SUB_CHARS = {
+    "0": "₀", "1": "₁", "2": "₂", "3": "₃", "4": "₄",
+    "5": "₅", "6": "₆", "7": "₇", "8": "₈", "9": "₉",
+    "+": "₊", "-": "₋", "−": "₋", "=": "₌", "(": "₍", ")": "₎",
+    "a": "ₐ", "e": "ₑ", "h": "ₕ", "i": "ᵢ", "j": "ⱼ", "k": "ₖ", "l": "ₗ",
+    "m": "ₘ", "n": "ₙ", "o": "ₒ", "p": "ₚ", "r": "ᵣ", "s": "ₛ", "t": "ₜ",
+    "u": "ᵤ", "v": "ᵥ", "x": "ₓ",
+}
+_SUP_TRANS = str.maketrans(_SUP_CHARS)
+_SUB_TRANS = str.maketrans(_SUB_CHARS)
+
+
+def _spanwise_text(spans: Sequence[Dict[str, Any]]) -> str:
+    """一行 spans → 文本。比正文字号小一档且基线明显偏移的 span 转上/下标。
+
+    判据是**几何**不是内容：CSP40 实测同一行里 `x²` 的 2（基线抬高 4.4pt）
+    和 `aᵢ` 的 i（基线下沉 1.8pt）都是 8pt 小字，纯文本根本分不出来，
+    span 的 origin.y 一眼定案。
+    """
+    sized = [sp for sp in spans if str(sp.get("text") or "").strip()]
+    if not sized:
+        return "".join(str(sp.get("text") or "") for sp in spans)
+    base_size = max(float(sp.get("size") or 0) for sp in sized)
+    base_y = 0.0
+    for sp in sized:
+        if abs(float(sp.get("size") or 0) - base_size) < 1e-6:
+            origin = sp.get("origin") or (0.0, 0.0)
+            base_y = float(origin[1])
+            break
+    parts: List[str] = []
+    for sp in spans:
+        text = str(sp.get("text") or "")
+        if not text:
+            continue
+        try:
+            size = float(sp.get("size") or 0)
+            origin = sp.get("origin") or (0.0, 0.0)
+            offset = float(origin[1]) - base_y
+        except (TypeError, ValueError):
+            parts.append(text)
+            continue
+        if (
+            text.strip()
+            and base_size > 0
+            and size < base_size * 0.8
+            and offset <= -1.0
+        ):
+            parts.append(text.translate(_SUP_TRANS))
+        elif (
+            text.strip()
+            and base_size > 0
+            and size < base_size * 0.8
+            and offset >= 1.0
+        ):
+            parts.append(text.translate(_SUB_TRANS))
+        else:
+            parts.append(text)
+    return "".join(parts)
+
+
+def page_spanwise_lines(page: Any) -> List[Tuple[float, float, str]]:
+    """单页逐行 `(y0, y1, 文本)`，行序与 `get_text("dict")` 一致。
+
+    文本经 `_spanwise_text` 处理：上/下标在抽取时就位。调用方要用它同时产出
+    行文本和行坐标（`extract_pdf_bundle`），两边同源才不会像 get_text()/dict
+    那样需要对齐校验。
+    """
+    try:
+        data = page.get_text("dict")
+    except Exception:  # noqa: BLE001 - 拿不到 dict 就退化成无转换
+        return []
+    out: List[Tuple[float, float, str]] = []
+    for block in data.get("blocks", []):
+        if int(block.get("type", -1)) != 0:
+            continue
+        for line in block.get("lines", []):
+            spans = [sp for sp in line.get("spans", []) if str(sp.get("text") or "")]
+            if not spans:
+                continue
+            text = _spanwise_text(spans)
+            if not text.strip():
+                continue
+            bbox = line.get("bbox") or (0.0, 0.0, 0.0, 0.0)
+            out.append((float(bbox[1]), float(bbox[3]), text))
+    return out
+
+
 def _from_pdf(raw: bytes) -> str:
     try:
         import pymupdf  # type: ignore
@@ -167,6 +265,10 @@ def _from_pdf(raw: bytes) -> str:
             if doc.needs_pass:
                 raise FileError("这份 PDF 有打开密码，请先解除密码再上传", "ENCRYPTED_PDF")
             pages = [page.get_text() for page in doc]
+            span_pages: List[str] = []
+            for page in doc:
+                lines = page_spanwise_lines(page)
+                span_pages.append("\n".join(text for _, _, text in lines))
     except FileError:
         raise
     except Exception as exc:  # noqa: BLE001 - pymupdf 的异常类型很杂
@@ -177,7 +279,9 @@ def _from_pdf(raw: bytes) -> str:
             "请先用阅读器确认能正常打开，再重新上传",
             "BAD_PDF",
         ) from exc
-    text = "\n".join(pages).strip()
+    # span 感知版抽得出字就优先用：上标/下标在抽取时就转成对应字符，
+    # `x2 + k2 mod 23` 这类丢失指数的记号不必等导入规则去猜
+    text = "\n".join(span_pages).strip() or "\n".join(pages).strip()
     if len(text) < 50:
         raise FileError(
             "这份 PDF 抽不出文字，可能是扫描件（图片）。"
@@ -335,10 +439,14 @@ def extract_pdf_bundle(raw: bytes) -> Optional[Dict[str, Any]]:
         with pymupdf.open(stream=raw, filetype="pdf") as doc:
             if doc.needs_pass:
                 return None
-            from ..app.pdf_figures import enum_figures, line_ranges, page_text_lines
+            from ..app.pdf_figures import enum_figures, line_ranges
 
-            page_texts = [page.get_text() for page in doc]
-            line_boxes = page_text_lines(doc)
+            # 文本与坐标同源：都从 get_text("dict") 的 span 里来。
+            # 旧写法 get_text() 一份、dict 一份，两边对空行/行序的取舍不一致，
+            # 靠 60% 相似度对齐；同源后天生精确一致，且文本带上/下标转换。
+            span_lines = [page_spanwise_lines(page) for page in doc]
+            page_texts = ["\n".join(text for _, _, text in lines) for lines in span_lines]
+            line_boxes = span_lines
             blocks, warnings = enum_figures(doc)
 
             spans: Dict[int, List[Tuple[float, float]]] = {}

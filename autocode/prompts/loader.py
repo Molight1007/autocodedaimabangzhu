@@ -77,6 +77,13 @@ SLIM_ADVERSARIAL = "slim_adversarial"
 SLIM_ADVERSARIAL_REVIEW = "slim_adversarial_review"
 #: 图片导入：多模态模型把截图/拍照转写成纯文本（不是"切题"，没有 JSON 契约）
 SLIM_VISION = "slim_vision"
+# 教学层（探针 + 五步提示）：与数据链完全独立，不进 STAGES 预算表
+SLIM_PROBE = "slim_probe"
+SLIM_LADDER = "slim_ladder"
+SLIM_LADDER_L4 = "slim_ladder_L4"
+SLIM_EXPLAIN_CHECK = "slim_explain_check"
+SLIM_REACT = "slim_react"
+SLIM_JUDGE = "slim_judge"
 
 TEMPLATE_NAMES: tuple[str, ...] = (
     SPEC, GENERATOR, REF_SOLUTION, BRUTE, HINTS, PARSER, SOLUTION_PLAN, EXPLANATION, REF_AGENT,
@@ -85,6 +92,7 @@ TEMPLATE_NAMES: tuple[str, ...] = (
     SLIM_SEGMENT, SLIM_REPAIR, SLIM_DATASET, SLIM_DATASET_REVIEW, SLIM_REFERENCE,
     SLIM_ADVERSARIAL,
     SLIM_ADVERSARIAL_REVIEW, SLIM_VISION,
+    SLIM_PROBE, SLIM_LADDER, SLIM_LADDER_L4, SLIM_EXPLAIN_CHECK, SLIM_REACT, SLIM_JUDGE,
 )
 
 # L1~L3 明令禁止输出代码（模板里写死，本处仅作代码侧复核口径）

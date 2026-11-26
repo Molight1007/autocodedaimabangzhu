@@ -76,6 +76,7 @@ CREATE TABLE IF NOT EXISTS problems (
   dataset_version INTEGER NOT NULL DEFAULT 0,
   quality_json TEXT,
   layout_json TEXT NOT NULL DEFAULT '[]',                 -- 排版分块（相对行号，1=题面首行）
+  difficulty TEXT NOT NULL DEFAULT '',                    -- 导入时规则评估：easy / medium / hard，空=老题未评估
   exec_spec_json TEXT NOT NULL DEFAULT '',                -- 自动生成的执行规格（stdin 协议 + 转换后样例）
   statement_original TEXT NOT NULL DEFAULT '',            -- 题面被模型补全前的原文（未补全时为空）
   statement_repaired INTEGER NOT NULL DEFAULT 0,          -- 1 = 当前 statement_md 是模型补全的
@@ -335,6 +336,137 @@ CREATE TABLE IF NOT EXISTS feedback_replies (
 );
 
 CREATE INDEX IF NOT EXISTS ix_feedback_replies ON feedback_replies(feedback_id, id);
+
+-- ── 教学层：建模探针（2026-11-25 新增）──────────────────────────────────────
+-- 四栏表探针：助手先做题建出 ①②③④ 正确表，再为每层各出一个埋错变体。
+-- 一道题一份探针包（probe_packs），学生逐层找错，进度在 probe_progress。
+CREATE TABLE IF NOT EXISTS probe_packs (
+  id INTEGER PRIMARY KEY,
+  problem_id INTEGER NOT NULL,
+  state_type TEXT NOT NULL DEFAULT '',                    -- 积累/演化/匹配/搜索/维护
+  state_type_note TEXT NOT NULL DEFAULT '',
+  table_json TEXT NOT NULL DEFAULT '{}',                  -- 正确四栏表 {"1":…, "2":…, "3":…, "4":…}
+  probes_json TEXT NOT NULL DEFAULT '[]',                 -- 四层探针（planted/error_type/correct/should_find/followups/explain）
+  model TEXT NOT NULL DEFAULT '',
+  prompt_version TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  UNIQUE(problem_id),
+  FOREIGN KEY(problem_id) REFERENCES problems(id) ON DELETE CASCADE
+);
+
+-- 学生 × 题目的探针进度。一次只激活一层（active_layer），一层通过再开下一层。
+-- tier 是档位（detail=详查 / exempt=免检），纯查表规则维护，无训练数据。
+CREATE TABLE IF NOT EXISTS probe_progress (
+  id INTEGER PRIMARY KEY,
+  problem_id INTEGER NOT NULL,
+  user TEXT NOT NULL,
+  active_layer INTEGER NOT NULL DEFAULT 1,                -- 当前要找的层；5 = 全部通过
+  round INTEGER NOT NULL DEFAULT 0,                       -- 当前层已追问轮数（0=刚发问）
+  tier TEXT NOT NULL DEFAULT 'detail',                    -- detail / exempt
+  done INTEGER NOT NULL DEFAULT 0,                        -- 1 = 四层全过（含代填）
+  passed_json TEXT NOT NULL DEFAULT '[]',                 -- [true×4]：每层是"找出"还是"代填"
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(problem_id, user),
+  FOREIGN KEY(problem_id) REFERENCES problems(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS ix_probe_progress_user ON probe_progress(user, updated_at);
+
+-- 层级 × 错因 计数向量：学生档案与班级诊断报告都从这张表聚合。
+CREATE TABLE IF NOT EXISTS probe_records (
+  id INTEGER PRIMARY KEY,
+  problem_id INTEGER NOT NULL,
+  user TEXT NOT NULL,
+  layer INTEGER NOT NULL,                                 -- 1~4
+  error_type TEXT NOT NULL DEFAULT '',                    -- missing / redundant
+  outcome TEXT NOT NULL,                                  -- found（该层通过）/ 代填（reteach）
+  attempts INTEGER NOT NULL DEFAULT 1,                    -- 本层用了几轮
+  tier TEXT NOT NULL DEFAULT 'detail',
+  created_at TEXT NOT NULL,
+  FOREIGN KEY(problem_id) REFERENCES problems(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS ix_probe_records_user ON probe_records(user, layer);
+CREATE INDEX IF NOT EXISTS ix_probe_records_problem ON probe_records(problem_id);
+
+-- 档位浮动的查表依据：每个 (user, layer) 的连续通过计数与当前档位。
+-- 连续两题通过 → exempt；exempt 期间一出错 → detail 并清零。
+CREATE TABLE IF NOT EXISTS probe_tiers (
+  user TEXT NOT NULL,
+  layer INTEGER NOT NULL,
+  streak INTEGER NOT NULL DEFAULT 0,                      -- 连续"找出"次数
+  tier TEXT NOT NULL DEFAULT 'detail',                    -- detail / exempt
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY(user, layer)
+);
+
+-- ── 教学层：五步提示（2026-11-25 新增）──────────────────────────────────────
+-- L0~L3 内容一次生成（hint_packs），运行期由状态机逐级放行；L4 运行期按学生代码现出。
+CREATE TABLE IF NOT EXISTS hint_packs (
+  id INTEGER PRIMARY KEY,
+  problem_id INTEGER NOT NULL,
+  tag TEXT NOT NULL DEFAULT '',                           -- 考点标签（撤除规则用它）
+  attribution TEXT NOT NULL DEFAULT '',                   -- 读题/建模/复杂度/实现/策略
+  pack_json TEXT NOT NULL DEFAULT '{}',                   -- L0~L3 内容（含 check 型 expected、L3 blanks）
+  start_level INTEGER NOT NULL DEFAULT 0,                 -- 生成时的起点级别（同标签第 N 次上移 N-1 级）
+  collapsed INTEGER NOT NULL DEFAULT 0,                   -- 1 = 塌缩梯子：只保留 L1 与 L4（同标签第 3 次起）
+  model TEXT NOT NULL DEFAULT '',
+  prompt_version TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  UNIQUE(problem_id),
+  FOREIGN KEY(problem_id) REFERENCES problems(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS ix_hint_packs_tag ON hint_packs(tag);
+
+-- 学生 × 题目的梯子状态。级别只由这里的状态机推进，模型无权决定给到哪一级。
+CREATE TABLE IF NOT EXISTS hint_states (
+  id INTEGER PRIMARY KEY,
+  problem_id INTEGER NOT NULL,
+  user TEXT NOT NULL,
+  level INTEGER NOT NULL DEFAULT 0,                       -- 当前级别 0~4
+  answered INTEGER NOT NULL DEFAULT 1,                    -- 上一问是否已答；0 = 提示按钮置灰
+  done INTEGER NOT NULL DEFAULT 0,                        -- 1 = 走完梯子（L4 已给或 L3 放行后出代码环节）
+  reaction TEXT NOT NULL DEFAULT '',                      -- 最近一次判断级回答的助教反应文本（AI 生成，不影响判定）；要提示时清空
+  started_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(problem_id, user),
+  FOREIGN KEY(problem_id) REFERENCES problems(id) ON DELETE CASCADE
+);
+
+-- 全程留痕：级别、触发方式、放行与否、五类归因。
+CREATE TABLE IF NOT EXISTS hint_log (
+  id INTEGER PRIMARY KEY,
+  problem_id INTEGER NOT NULL,
+  user TEXT NOT NULL,
+  level INTEGER NOT NULL,                                 -- 0~4
+  trigger TEXT NOT NULL DEFAULT '',                       -- self（学生主动）/ timeout / fail2
+  kind TEXT NOT NULL DEFAULT '',                          -- judgment / check / blanks
+  outcome TEXT NOT NULL DEFAULT '',                       -- passed / held（未放行）/ advanced / l4
+  attribution TEXT NOT NULL DEFAULT '',
+  detail TEXT NOT NULL DEFAULT '',                        -- 学生作答摘要（截断存）
+  created_at TEXT NOT NULL,
+  FOREIGN KEY(problem_id) REFERENCES problems(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS ix_hint_log_user ON hint_log(user, problem_id, id DESC);
+
+-- T4 样例解释反推验证：每题保留最新一次报告（覆盖写）
+CREATE TABLE IF NOT EXISTS explain_checks (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  problem_id INTEGER NOT NULL UNIQUE,
+  user TEXT NOT NULL DEFAULT '',
+  claims_json TEXT NOT NULL DEFAULT '[]',   -- 抽取的可计算断言
+  report_json TEXT NOT NULL DEFAULT '[]',   -- 真跑结果：[{claim, ok, actual}]
+  ok_count INTEGER NOT NULL DEFAULT 0,
+  total INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'checked',   -- checked / no_claims
+  note TEXT NOT NULL DEFAULT '',
+  model TEXT NOT NULL DEFAULT '',
+  prompt_version TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL
+);
 
 CREATE TABLE IF NOT EXISTS schema_migrations (
   version INTEGER PRIMARY KEY,

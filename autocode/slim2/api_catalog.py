@@ -54,7 +54,7 @@ def list_problems(
     clause = " AND ".join(where)
     total = db.query_scalar(f"SELECT COUNT(*) FROM problems WHERE {clause}", tuple(params), 0)
     rows = db.query_all(
-        f"SELECT id, title, status, dataset_version, samples_json, created_at"
+        f"SELECT id, title, status, dataset_version, samples_json, difficulty, created_at"
         f" FROM problems WHERE {clause} ORDER BY id DESC LIMIT ? OFFSET ?",
         tuple(params + [_page_limit(limit), max(0, int(offset))]),
     )
@@ -68,6 +68,7 @@ def list_problems(
                 "status": str(row["status"]),
                 "version": int(row["dataset_version"] or 0),
                 "samples": len(_loads(row["samples_json"], [])),
+                "difficulty": str(row["difficulty"] or ""),
                 # 只统计当前版本：历史版本仍留在库里（便于回溯），但界面上的
                 # "数据 N 条"必须等于详情页看到的条数，否则会以为数据凭空变多
                 "cases": int(db.query_scalar(
@@ -163,6 +164,7 @@ def problem_detail(db: Any, problem_id: int, role: str = "student") -> Dict[str,
         # 空对象表示还没生成过；界面据此提示"这份数据按什么格式喂程序"。
         "exec_spec": _contract_view(row["exec_spec_json"]),
         "constraints": _loads(row["constraints_json"], []),
+        "difficulty": str(row["difficulty"] or ""),
         "judge_type": str(row["judge_type"]),
         "tolerance": str(row["tolerance"] or ""),
         "multi_testcase": bool(row["multi_testcase"]),

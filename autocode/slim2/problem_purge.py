@@ -42,6 +42,14 @@ def purge_problem(db: Any, problem_id: int) -> None:
         conn.execute("DELETE FROM dataset_plans WHERE problem_id=?", (pid,))
         conn.execute("DELETE FROM jobs WHERE problem_id=?", (pid,))
         conn.execute("DELETE FROM problem_figures WHERE problem_id=?", (pid,))
+        # 教学层（探针 + 提示）从属数据：漏一张就会留孤儿行（2026-11-25）
+        conn.execute("DELETE FROM probe_records WHERE problem_id=?", (pid,))
+        conn.execute("DELETE FROM probe_progress WHERE problem_id=?", (pid,))
+        conn.execute("DELETE FROM probe_packs WHERE problem_id=?", (pid,))
+        conn.execute("DELETE FROM hint_log WHERE problem_id=?", (pid,))
+        conn.execute("DELETE FROM hint_states WHERE problem_id=?", (pid,))
+        conn.execute("DELETE FROM hint_packs WHERE problem_id=?", (pid,))
+        conn.execute("DELETE FROM explain_checks WHERE problem_id=?", (pid,))
         conn.execute("DELETE FROM problems WHERE id=?", (pid,))
     # 插图是磁盘文件，删库不会带走；忽略失败：目录不在或正被占用都不该挡住删题
     shutil.rmtree(config.DATA_DIR / "assets" / f"problem_{pid}", ignore_errors=True)

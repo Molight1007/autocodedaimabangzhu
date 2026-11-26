@@ -78,3 +78,28 @@ class TestImportTextForwarding(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestNormalizeMath(unittest.TestCase):
+    """代码风记号 → 课本风记号（2026-11-26：学生反馈 d_i/1<=n<=1e5 不像书上的写法）。"""
+
+    def test_subscript_bare_and_braced(self) -> None:
+        self.assertEqual(
+            segment.normalize_math("距离为 d_i 公里，价格为 v_i 元"),
+            "距离为 dᵢ 公里，价格为 vᵢ 元")
+        self.assertEqual(
+            segment.normalize_math("d_1, d_2, ..., d_{n-1}"),
+            "d₁, d₂, ..., dₙ₋₁")
+
+    def test_inequality_and_scientific(self) -> None:
+        self.assertEqual(
+            segment.normalize_math("1 <= n <= 1e5，1 <= v_i <= 1e4"),
+            "1 ≤ n ≤ 10⁵，1 ≤ vᵢ ≤ 10⁴")
+        self.assertEqual(segment.normalize_math("2e5"), "2×10⁵")
+
+    def test_unmappable_chars_kept_verbatim(self) -> None:
+        # 下标表没有的字母（如 m）回退原写法，宁可保守不错转；
+        # 花括号外裸下标只认常见变量下标字符，其余不动
+        self.assertEqual(segment.normalize_math("x_{m+1}"), "x_{m+1}")
+        self.assertEqual(segment.normalize_math("d_w"), "d_w")
+        self.assertEqual(segment.normalize_math("w_i"), "wᵢ")  # 变量名 w 不需要下标字形

@@ -164,6 +164,11 @@
   .dot.generating{background:#f59e0b; animation:pulse 1.4s ease-in-out infinite}
   .dot.failed{background:#ef4444}
   .dot.draft{background:#cbd5e1}
+  /* 难度徽标（题目列表"待生成"栏）：绿=简单 黄=中等 红=困难 */
+  .diff{font-weight:600; color:var(--ink)}
+  .diff.easy{color:#16a34a}
+  .diff.medium{color:#d97706}
+  .diff.hard{color:#dc2626}
   @keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
 
   /* ── 右侧详情 ───────────────────────────────────────────────────────── */
@@ -245,7 +250,7 @@
          "Hiragino Sans GB","Noto Sans CJK SC","Segoe UI",sans-serif;
     color:#1b2431; letter-spacing:.012em;
   }
-  .stmt-body p{margin:0 0 11px}
+  .stmt-body p{margin:0 0 11px; white-space:pre-line}  /* pre-line: 段内 \n（列表项换行）显示为真换行 */
   .stmt-body p:last-child{margin-bottom:2px}
   .stmt-body h3{
     margin:26px 0 10px; font-size:15.5px; font-weight:700; letter-spacing:0;
@@ -390,6 +395,28 @@
   .pill.ok{background:var(--ok-soft); border-color:var(--ok-line); color:var(--ok)}
   .pill.warn{background:var(--warn-soft); border-color:var(--warn-line); color:#92400e}
   .pill.bad{background:var(--bad-soft); border-color:var(--bad-line); color:var(--bad)}
+  /* ── 做题辅助（探针 / 五步提示）────────────────────────────── */
+  .probe-table{display:flex; flex-direction:column; gap:8px; margin:12px 0}
+  .probe-row{border:1px solid var(--line); border-radius:10px; padding:10px 12px; background:var(--bg)}
+  .probe-row.active{border-color:var(--warn-line); background:var(--warn-soft)}
+  .probe-layer{font-weight:600; font-size:13px; display:flex; gap:8px; align-items:center; margin-bottom:6px}
+  .probe-content{font-size:13.5px; line-height:1.7; color:var(--ink)}
+  .probe-answer{border-top:1px dashed var(--line); padding-top:12px; margin-top:4px}
+  .ladder-bar{display:flex; flex-wrap:wrap; gap:6px; margin:10px 0 14px}
+  .ladder-step{font-size:12px; padding:4px 10px; border-radius:999px; border:1px solid var(--line); color:var(--muted); background:var(--bg)}
+  .ladder-step.open{border-color:var(--ok-line); background:var(--ok-soft); color:var(--ok); font-weight:600}
+  .ladder-q{font-size:15px; font-weight:600; line-height:1.7; margin:6px 0}
+  .ladder-quote{margin:8px 0; padding:8px 12px; border-left:3px solid var(--accent, var(--ok-line)); background:var(--ok-soft); border-radius:0 8px 8px 0; font-size:13.5px; line-height:1.7}
+  .ladder-text{font-size:14px; line-height:1.8; margin:8px 0}
+  .ladder-fact{margin:8px 0}
+  .ladder-fact summary{cursor:pointer; font-weight:600}
+  .ladder-blank{display:flex; gap:8px; align-items:center; margin:8px 0; flex-wrap:wrap}
+  .ladder-blank .idx{font-weight:700; font-size:12.5px; color:var(--muted); min-width:36px}
+  .ladder-blank input{flex:1; min-width:160px; border:1px solid var(--line); border-radius:8px; padding:7px 10px; font-size:13.5px}
+  .ladder-l4{margin-top:10px; padding:10px 12px; border:1px solid var(--bad-line); background:var(--bad-soft); border-radius:10px; font-size:14px; line-height:1.7}
+  .ladder-react{margin-top:10px; padding:9px 12px; border:1px dashed var(--line); border-radius:10px; font-size:13.5px; line-height:1.7; color:var(--fg)}
+  .ladder-react .pill{margin-right:8px}
+  .mvar{font-weight:700}
 
   /* ── 面板 / 表单 ────────────────────────────────────────────────────── */
   .panel{
@@ -1053,6 +1080,8 @@ const S = {
   tab: 'data', layer: '', offset: 0, limit: 30,
   cases: { items: [], total: 0 },
   adv: [], advSubs: [],
+  // 教学层状态（探针 / 五步提示），换题即清
+  probe: null, ladder: null, probeMsg: '', ladderMsg: '', ladderDraft: null, explainCheck: null, explainMsg: '',
   batchId: null, segments: [],
   libraryTotal: 0, libraryCap: 0,
   banks: [], bankId: 0, importBankId: 0,
@@ -1078,8 +1107,10 @@ const STMT_MARK = /^\s*【\s*([^】]{1,16}?)\s*】\s*$/;
 const STMT_BULLET = /^\s*[•·▪◆■*]\s*/;
 const STMT_CJK = /[\u3000-\u9fff\uff00-\uffef]/;
 const STMT_SAMPLE = /^样例\s*(\d+)?\s*(输入|输出|解释)?$/;
-//: 模型给的样例标签块，形如 `【样例1 输入】` / `样例输入：`（学生粘贴的题面常见后者）
-const LAYOUT_SAMPLE_LABEL = /^【?\s*样例\s*(\d+)?\s*(输入|输出)\s*】?\s*[：:]?\s*$/;
+//: 模型给的样例标签块，形如 `【样例1 输入】` / `样例输入：` / `输入样例 1：`
+//: （学生粘贴的题面常见后两种；输入/输出在"样例"前后两种语序都要认，
+//: 否则「输入样例 1：」「输出样例 1：」配对断开，样例会裂成只有输入的示例1和只有输出的示例2）
+const LAYOUT_SAMPLE_LABEL = /^【?\s*(?:样例\s*(\d+)?\s*(?:输入|输出)|(?:输入|输出)\s*样例\s*(\d+)?)\s*】?\s*[：:]?\s*$/;
 //: 允许的块类型，与后端 validators.BLOCK_KINDS 一一对应
 const LAYOUT_KINDS = new Set(['heading', 'para', 'list', 'code', 'sample_input', 'sample_output']);
 
@@ -1089,6 +1120,9 @@ function stmtJoinLines(lines) {
     const line = raw.trim();
     if (!line) return;
     if (!text) { text = line; return; }
+    // 列表项（• 1 u：…）在原 PDF 里各占一行：模型把它标成 para 时也不能并进上一行，
+    // 用换行保住原排版（渲染层 white-space:pre-line 会显示成真换行）
+    if (STMT_BULLET.test(line)) { text += '\n' + line; return; }
     const left = text.slice(-1);
     const right = line.slice(0, 1);
     // 中文硬换行不能补空格，否则段中会冒出多余空白；英文单词之间才需要
@@ -1211,9 +1245,9 @@ function parseStatementBlocks(raw, title) {
 }
 
 function renderStatementBlock(block) {
-  if (block.kind === 'heading') return `<h3>${esc(block.text)}</h3>`;
+  if (block.kind === 'heading') return `<h3>${hlMath(esc(block.text))}</h3>`;
   if (block.kind === 'list') {
-    return `<ul>${block.items.map((item) => `<li>${esc(item)}</li>`).join('')}</ul>`;
+    return `<ul>${block.items.map((item) => `<li>${hlMath(esc(item))}</li>`).join('')}</ul>`;
   }
   if (block.kind === 'sample') {
     const output = block.output
@@ -1223,8 +1257,23 @@ function renderStatementBlock(block) {
       + '<table class="sample-table"><thead><tr><th>Input</th><th>Output</th></tr></thead>'
       + `<tbody><tr><td><pre>${esc(block.input)}</pre></td><td>${output}</td></tr></tbody></table></div>`;
   }
-  return `<p>${esc(block.text)}</p>`;
+  return `<p>${hlMath(esc(block.text))}</p>`;
 }
+
+// ── 题面数学记号加粗 ────────────────────────────────────────────────────────
+// 变量与算式（dᵢ / n / i+1 / 10⁵ / 1 ≤ n ≤ 10⁵ / n-1）在中文正文里不好定位，
+// 统一包成 <span class="mvar"> 加粗。输入是**已转义**文本，替换只产生我们自己的
+// span 标签，不引入注入面；样例数据与代码块不套用（保持逐字符可抄写）。
+// 纯数字（5 个站点、79）不标：数量词全加粗反而吵。
+const MVAR_RE = new RegExp([
+  '\\d+\\s*≤\\s*[^，。；\\n]*',                    // 不等式链（含 10⁵），到标点为止
+  '\\d+×10[⁰¹²³⁴⁵⁶⁷⁸⁹]+',                          // 2×10⁵
+  '10[⁰¹²³⁴⁵⁶⁷⁸⁹]+',                               // 10⁵ / 10⁴
+  '[A-Za-z][₀-₉ᵢⱼₖₙ₋ₐₑₒₓₛₜᵤᵥₚₕᵣₗ]+',              // 带下标的变量 dᵢ / vₙ₋₁
+  '[A-Za-z][+×−-]\\d+',                            // i+1 / n-1
+  '\\b[A-Za-z]\\b',                                // 单字母变量 n / d / i
+].join('|'), 'g');
+const hlMath = (escaped) => escaped.replace(MVAR_RE, (m) => `<span class="mvar">${m}</span>`);
 
 // ── 按模型给的拼块渲染（块=类型+行号；怎么显示由这里决定）────────────────────
 function layoutBlocks(layout, total) {
@@ -1299,12 +1348,12 @@ function renderByLayout(blocks, lines, takeFigures) {
     }
 
     if (block.kind === 'heading') {
-      out.push(`<h3>${esc(text.replace(/^【\s*|\s*】$/g, ''))}</h3>`);
+      out.push(`<h3>${hlMath(esc(text.replace(/^【\s*|\s*】$/g, '')))}</h3>`);
     } else if (block.kind === 'list') {
       const items = slice(block).split('\n')
         .filter((line) => line.trim())
-        .map((line) => `<li>${esc(line.trim().replace(STMT_BULLET, ''))}</li>`);
-      out.push(items.length ? `<ul>${items.join('')}</ul>` : `<p>${esc(text)}</p>`);
+        .map((line) => `<li>${hlMath(esc(line.trim().replace(STMT_BULLET, '')))}</li>`);
+      out.push(items.length ? `<ul>${items.join('')}</ul>` : `<p>${hlMath(esc(text))}</p>`);
     } else if (block.kind === 'code') {
       out.push(`<pre class="stmt-code">${esc(slice(block))}</pre>`);
     } else {
@@ -1314,12 +1363,12 @@ function renderByLayout(blocks, lines, takeFigures) {
       picked.forEach((fig) => {
         const at = Math.min(Math.max(from, Number(fig.after_line) || from), block.to);
         const head = stmtJoinLines(lines.slice(from - 1, at));
-        if (head) out.push(`<p>${esc(head)}</p>`);
+        if (head) out.push(`<p>${hlMath(esc(head))}</p>`);
         out.push(figureHtml(fig));
         from = at + 1;
       });
       const rest = stmtJoinLines(lines.slice(from - 1, block.to));
-      if (rest) out.push(`<p>${esc(rest)}</p>`);
+      if (rest) out.push(`<p>${hlMath(esc(rest))}</p>`);
       cursor += 1;
       continue;
     }
@@ -1343,6 +1392,16 @@ function renderStatement(statement, figures, title, layout) {
   const figs = (Array.isArray(figures) ? figures : [])
     .filter((item) => item && item.url)
     .sort((a, b) => (Number(a.after_line) || 0) - (Number(b.after_line) || 0));
+  // 公式原图（label `math_N`）：第 N 行文字（⊕ᵢ∈S aᵢ 这类竖排公式的单行文本）
+  // 在显示层替换成原 PDF 截图——行数不变，layout 分块与其他插图的行号定位不受影响。
+  const mathHidden = new Set();
+  figs.forEach((f) => {
+    const m = /^math_(\d+)$/.exec(String(f.label || ''));
+    if (m) mathHidden.add(Number(m[1]));
+  });
+  const shown = mathHidden.size
+    ? lines.map((t, i) => (mathHidden.has(i + 1) ? '' : t))
+    : lines;
   const out = [];
   let cursor = 0;
   const takeFigures = (upto) => {
@@ -1356,12 +1415,13 @@ function renderStatement(statement, figures, title, layout) {
   // 首选模型给的拼块；块不合法（旧数据/被改坏）就退回自动排版，绝不让正文错位
   const blocks = layoutBlocks(layout, lines.length);
   if (blocks) {
-    out.push(renderByLayout(blocks, lines, takeFigures));
+    out.push(renderByLayout(blocks, shown, takeFigures));
     takeFigures(Number.MAX_SAFE_INTEGER).forEach((fig) => out.push(figureHtml(fig)));
     return out.join('\n');
   }
 
-  const parsed = parseStatementBlocks(statement, title);
+  const maskedStatement = mathHidden.size ? shown.join('\n') : statement;
+  const parsed = parseStatementBlocks(maskedStatement, title);
   if (!parsed.length) {
     const tail = takeFigures(Number.MAX_SAFE_INTEGER).map(figureHtml).join('\n');
     return tail || `<p>${esc(statement || '—')}</p>`;
@@ -1381,12 +1441,12 @@ function renderStatement(statement, figures, title, layout) {
     let from = block.start;
     picked.forEach((fig) => {
       const at = Math.min(Math.max(from, Number(fig.after_line) || from), block.end);
-      const text = stmtJoinLines(lines.slice(from - 1, at));
+      const text = stmtJoinLines(shown.slice(from - 1, at));
       if (text) out.push(`<p>${esc(text)}</p>`);
       out.push(figureHtml(fig));
       from = at + 1;
     });
-    const rest = stmtJoinLines(lines.slice(from - 1, block.end));
+    const rest = stmtJoinLines(shown.slice(from - 1, block.end));
     if (rest) out.push(`<p>${esc(rest)}</p>`);
   });
   takeFigures(Number.MAX_SAFE_INTEGER).forEach((fig) => out.push(figureHtml(fig)));
@@ -1394,6 +1454,7 @@ function renderStatement(statement, figures, title, layout) {
 }
 
 const STATUS_TEXT = { draft: '待生成', generating: '生成中', ready: '已就绪', failed: '生成失败' };
+const DIFF_TEXT = { easy: '简单', medium: '中等', hard: '困难' };
 //: 与 slim2/config.py 的 JOB_TIMEOUT_MIN 对齐：超过这个时长服务端才判超时。
 const JOB_TIMEOUT_MIN = 30;
 const POLL_MS = 2000;
@@ -1631,6 +1692,8 @@ async function loadProblems(selectId) {
         <div class="meta">
           <span class="dot ${esc(item.status)}"></span>
           <span>${esc(STATUS_TEXT[item.status] || item.status)}</span>
+          ${item.status === 'draft' && DIFF_TEXT[item.difficulty]
+            ? `<i></i><span class="diff ${esc(item.difficulty)}">${DIFF_TEXT[item.difficulty]}</span>` : ''}
           <i></i><span>#${item.id}</span>
           <i></i><span>v${item.version || 0}</span>
           <i></i><span>${item.cases} 条</span>
@@ -1647,6 +1710,8 @@ async function openProblem(id) {
   if (id !== S.current) {
     S.advCode = ''; S.advLang = 'python';  // 换题不带着上题的错解
     S.adv = []; S.advSubs = [];
+    S.probe = null; S.ladder = null; S.probeMsg = ''; S.ladderMsg = ''; S.ladderDraft = null;
+    S.explainCheck = null; S.explainMsg = '';
     const draft = $('adv-code');
     if (draft) draft.value = '';  // renderDetail 会先把 DOM 里的值存回状态，这里必须先清
   }
@@ -1666,13 +1731,17 @@ async function refreshDetail() {
   if (!S.current) return;
   const token = ++S.detailToken;
   const pid = S.current;
-  let detail, cases, adv;
+  let detail, cases, adv, probe, ladder, explain;
   try {
-    [detail, cases, adv] = await Promise.all([
+    [detail, cases, adv, probe, ladder, explain] = await Promise.all([
       api('/api/problems/' + pid),
       api(`/api/problems/${pid}/cases?limit=${S.limit}&offset=${S.offset}`
         + (S.layer ? '&layer=' + encodeURIComponent(S.layer) : '')),
       api(`/api/problems/${pid}/adversarial`),
+      // 教学层状态是纯读接口，不花额度；没有生成过时 started=false
+      api(`/api/problems/${pid}/probe`),
+      api(`/api/problems/${pid}/ladder`),
+      api(`/api/problems/${pid}/explain-check`).catch(() => null),
     ]);
   } catch (error) {
     if (token !== S.detailToken) return;
@@ -1686,6 +1755,8 @@ async function refreshDetail() {
   S.cases = cases;
   S.adv = adv.items || [];
   S.advSubs = adv.submissions || [];
+  S.probe = probe; S.ladder = ladder;
+  S.explainCheck = explain;
   renderDetail();
   ensurePolling();
 }
@@ -1751,15 +1822,6 @@ function renderDetail() {
         <span>题面 · ${d.statement.length} 字${(d.constraints || []).length ? ' · 约束 ' + d.constraints.length + ' 条' : ''}</span>
         <span class="preview">${esc(d.statement.slice(0, 90).replace(/\s+/g, ' '))}</span>
       </summary>
-      ${d.statement_repaired ? `<div class="notice warn" style="margin:0 0 10px">
-        <b>这段题面由模型补全</b>（原文 ${(d.statement_original || '').length} 字，缺输入/输出格式）。
-        补的只是格式、数据范围与样例格式，题意未改；生成时仍要过样例锚定与独立复核。
-        <details style="margin-top:6px">
-          <summary style="cursor:pointer">查看原文</summary>
-          <pre class="mono" style="white-space:pre-wrap;margin:6px 0 0">${esc(d.statement_original || '')}</pre>
-        </details>
-        <button class="btn ghost" id="btn-restore-stmt" style="margin-top:8px">恢复原文</button>
-      </div>` : ''}
       <div class="stmt-body">${renderStatement(d.statement, d.figures || [], d.title, d.layout || [])}</div>
     </details>
     ${qualityPanel(d)}
@@ -1768,13 +1830,16 @@ function renderDetail() {
         测试数据<span class="count">${d.total_cases}</span></button>
       <button class="tab ${S.tab === 'adv' ? 'active' : ''}" data-tab="adv">
         对抗数据<span class="count">${S.adv.length}</span></button>
+      <button class="tab ${S.tab === 'tutor' ? 'active' : ''}" data-tab="tutor">
+        做题辅助</button>
     </div>
     <div id="tab-body"></div>`;
 
   $('job-dataset').outerHTML = jobLine(datasetJob, '测试数据', 'dataset');
   $('job-adversarial').outerHTML = jobLine(advJobState, '对抗数据', 'adversarial');
 
-  $('tab-body').innerHTML = S.tab === 'data' ? renderDataTab(d) : renderAdvTab(busy);
+  $('tab-body').innerHTML = S.tab === 'data' ? renderDataTab(d)
+    : S.tab === 'adv' ? renderAdvTab(busy) : renderTutorTab(d);
   bindDetail();
   if (S.tab === 'data') bindPager();
 }
@@ -2081,6 +2146,368 @@ function renderAdvTab(busy) {
     ${archived || `<div class="empty compact"><h3>还没有对抗数据</h3><p>上面提交一份错解，系统会找出能卡住它的输入。</p></div>`}`;
 }
 
+// ── 做题辅助（建模探针 + 五步提示）──────────────────────────────────────────
+// 控件形态即信息类型（规范第四节）：L0 纯文字问句、L1 文字+引用块、
+// L2 折叠事实卡、L3 挖空填空卡、L4 行号锚定卡。未解锁级别只显示名称与条件。
+
+const TIER_TEXT = { detail: '详查', exempt: '免检' };
+const LADDER_NAMES = ['L0 问一句', 'L1 指位置', 'L2 给事实', 'L3 给步骤', 'L4 指你的错'];
+
+function probeRowStatus(item) {
+  if (item.status === 'passed') return '<span class="pill ok">已放行</span>';
+  if (item.status === 'active') return '<span class="pill warn">找这里埋的错</span>';
+  return '<span class="pill plain" style="opacity:.55">未解锁</span>';
+}
+
+function renderProbePanel() {
+  const p = S.probe;
+  if (!p || !p.started) {
+    return `
+      <div class="panel">
+        <h3>建模探针</h3>
+        <div class="hint">助手先自己把题建好模（①给我什么 · ②要我交什么 · ③怎么算 · ④记住什么），
+          再在填好的表里埋一处错——只埋「缺一项」或「多一项」，判据明确。
+          你把错找出来，一层一层过。生成需要一次模型调用（用你自己的 Key）。</div>
+        ${S.probeMsg ? `<div class="notice warn">${esc(S.probeMsg)}</div>` : ''}
+        <button class="btn primary" id="btn-probe-start">开始探针</button>
+      </div>`;
+  }
+  const probe = p.probe;
+  const rows = probe.rows.map(item => `
+    <div class="probe-row ${item.status === 'active' ? 'active' : ''}" data-layer="${item.layer}">
+      <div class="probe-layer">${esc(item.name)}${probeRowStatus(item)}</div>
+      <div class="probe-content">${hlMath(esc(item.content)).replace(/\n/g, '<br>')}</div>
+      ${item.status === 'active' ? `<div class="muted" style="font-size:12px; margin-top:6px">↑ 点这行可以直接选中本层作答</div>` : ''}
+    </div>`).join('');
+  const passedMap = { found: '找出', reteach: '三轮代填', exempt: '免检放行' };
+  const passed = (probe.passed || []).map(x => `<span class="pill plain">${esc(passedMap[x] || x)}</span>`).join(' ');
+  const tiers = probe.tiers || {};
+  const active = probe.active_layer;
+  const answering = !probe.done && active <= 4 ? `
+    <div class="probe-answer">
+      <b>这张表里埋了一处错，把它找出来：</b>
+      <div class="row" style="margin-top:8px">
+        <select id="probe-layer">
+          <option value="">选层…</option>
+          ${[1,2,3,4].map(i => `<option value="${i}" ${i === S.probeSaidLayer ? 'selected' : ''}>${esc(['① 输入','② 输出','③ 转移','④ 状态'][i-1])}${tiers[i] === 'exempt' ? '（你已免检）' : ''}</option>`).join('')}
+        </select>
+        <select id="probe-type">
+          <option value="">错型…</option>
+          ${(probe.error_types || []).map(t => `<option value="${esc(t.value)}" ${t.value === S.probeSaidType ? 'selected' : ''}>${esc(t.name)}</option>`).join('')}
+        </select>
+        <button class="btn primary" id="btn-probe-answer">指认</button>
+        ${probe.round > 0 ? `<span class="muted">已追问 ${probe.round}/3 轮</span>` : ''}
+        ${probe.tier === 'exempt' && active <= 4 ? `<span class="pill warn">本层免检中</span>` : ''}
+      </div>
+    </div>` : '';
+  const doneNote = probe.done ? `
+    <div class="job done"><span class="job-ico">${ICONS.check}</span>
+      <div>四栏探针全部通过。${passed ? `各层结果：${passed}` : ''}　${esc(probe.state_type)}态：${esc(probe.state_type_note)}</div>
+    </div>` : '';
+  return `
+    <div class="panel">
+      <h3>建模探针 · ${esc(probe.state_type)}态</h3>
+      <div class="muted">${esc(probe.state_type_note)}　本层档位由历史表现浮动（连续两题找出→免检；免检出错→恢复详查）。</div>
+      <div class="probe-table">${rows}</div>
+      ${answering}
+      ${doneNote}
+      ${S.probeMsg ? `<div class="notice" style="margin-top:10px">${esc(S.probeMsg)}</div>` : ''}
+    </div>`;
+}
+
+function ladderLevelsBar() {
+  const l = S.ladder;
+  const collapsed = l && l.collapsed;
+  const unlocked = (i) => {
+    if (!l || !l.started) return i === 0;
+    if (l.done) return true;
+    if (collapsed) return i === 1 || i === 4 || i <= l.level;
+    return i <= l.level;
+  };
+  const cond = (i) => collapsed
+    ? (i === 1 ? '塌缩梯子：直接从 L1 起' : '需先过 L1')
+    : (i === 0 ? '起点' : '需先回答上一问');
+  return LADDER_NAMES.map((name, i) => `
+    <span class="ladder-step ${unlocked(i) ? 'open' : ''}">
+      ${unlocked(i) ? esc(name) : esc(name.split(' ')[0]) + ' · ' + esc(cond(i))}
+    </span>`).join('');
+}
+
+function renderLadderPanel() {
+  const l = S.ladder;
+  if (!l || !l.started) {
+    return `
+      <div class="panel">
+        <h3>五步提示</h3>
+        <div class="hint">提示分五级逐级开放：问一句 → 指位置 → 给事实 → 给步骤 → 指你的错。
+          只给当前一级，不越级、不给答案；每上一级你都要先产出自己的判断。
+          同一考点第二次做到，起始级别上移一级；第三次起只保留 L1 与 L4。生成需要一次模型调用。</div>
+        ${S.ladderMsg ? `<div class="notice warn">${esc(S.ladderMsg)}</div>` : ''}
+        <button class="btn primary" id="btn-ladder-start">生成提示包</button>
+      </div>`;
+  }
+  const levels = ladderLevelsBar();
+  let body = '';
+  if (l.done) {
+    body = `<div class="job done"><span class="job-ico">${ICONS.check}</span>
+      <div>梯子已走完${l.tag ? `（考点：${esc(l.tag)}）` : ''}。下次做到同考点的题，起点会自动上移。</div></div>`;
+  } else if (l.answered === false && l.content) {
+    const c = l.content;
+    if (l.level === 0) {
+      body = `
+        <div class="ladder-q">${hlMath(esc(c.question))}</div>
+        ${c.kind === 'check' ? `<div class="muted">核对型：答案写在题面里，答错不放行，只让你重读。</div>` : `<div class="muted">判断型：说出你的预测/解释/草图都行——答错也放行，错误的预测正是下一级要对的东西。</div>`}
+        <textarea id="ladder-answer" placeholder="把你的判断说出来"></textarea>
+        <div class="row" style="margin-top:8px">
+          <button class="btn primary" id="btn-ladder-answer">回答</button>
+        </div>`;
+    } else if (l.level === 1) {
+      body = `
+        <blockquote class="ladder-quote">${hlMath(esc(c.quote))}</blockquote>
+        <div class="ladder-text">${hlMath(esc(c.content)).replace(/\n/g, '<br>')}</div>
+        <textarea id="ladder-answer" placeholder="说出你从这段题面里看出了什么"></textarea>
+        <div class="row" style="margin-top:8px">
+          <button class="btn primary" id="btn-ladder-answer">回答</button>
+        </div>`;
+    } else if (l.level === 2) {
+      body = `
+        <details class="ladder-fact"><summary>事实卡（先自己算，再展开比对）</summary>
+          <div class="ladder-text">${hlMath(esc(c.fact)).replace(/\n/g, '<br>')}</div></details>
+        <textarea id="ladder-answer" placeholder="基于这个事实，你的下一步判断是？"></textarea>
+        <div class="row" style="margin-top:8px">
+          <button class="btn primary" id="btn-ladder-answer">回答</button>
+        </div>`;
+    } else if (l.level === 3) {
+      body = `
+        <div class="ladder-text">${hlMath(esc(c.lead))}</div>
+        ${(c.blanks || []).map(b => `
+          <div class="ladder-blank">
+            <span class="idx">空${b.index}</span>
+            <span>${hlMath(esc(b.hint))}</span>
+            <input id="ladder-blank-${b.index}" autocomplete="off" spellcheck="false" />
+          </div>`).join('')}
+        <div class="row" style="margin-top:8px">
+          <button class="btn primary" id="btn-ladder-answer">填完提交</button>
+          <span class="muted">三个空由服务端逐空校验，不能粘贴整段代码</span>
+        </div>`;
+    }
+  } else if (l.level === 4) {
+    body = `
+      <div class="muted">L4 需要你先提交过代码（在下方「对抗数据」页提交即可）。
+        ${l.has_submission ? '已检测到你的提交，可以让助教指一处错。' : '还没有提交记录——没有提交就停在 L3。'}</div>
+      <div class="row" style="margin-top:8px">
+        <button class="btn primary" id="btn-ladder-l4" ${l.has_submission ? '' : 'disabled'}>让助教指一处错</button>
+      </div>
+      ${l.l4 ? `<div class="ladder-l4"><span class="pill bad">第 ${l.l4.line} 行</span> ${esc(l.l4.message)}</div>` : ''}`;
+  } else {
+    body = `<div class="row"><button class="btn primary" id="btn-ladder-present">下一步</button></div>`;
+  }
+  const extra = !l.done && l.answered !== false ? `
+    <div class="row" style="margin-top:10px">
+      ${S.tab === 'tutor' && l.level >= 0 && l.level < 4 && l.answered !== false ? `<button class="btn ghost" id="btn-ladder-fail2">测试点连续两次没过，升级提示</button>` : ''}
+    </div>` : '';
+  return `
+    <div class="panel">
+      <h3>五步提示${l.tag ? ` · 考点「${esc(l.tag)}」` : ''}${l.attribution ? `<span class="pill plain">归因：${esc(l.attribution)}</span>` : ''}</h3>
+      <div class="ladder-bar">${levels}</div>
+      ${l.timed_out ? `<div class="notice warn">你在本级停留超过了 ${l.timeout_minutes} 分钟——本级提问重新弹出，级别不推进。</div>` : ''}
+      ${body}
+      ${extra}
+      ${l.reaction ? `<div class="ladder-react"><span class="pill plain">助教反应</span>${esc(l.reaction)}</div>` : ''}
+      ${S.ladderMsg ? `<div class="notice warn" style="margin-top:10px">${esc(S.ladderMsg)}</div>` : ''}
+    </div>`;
+}
+
+function renderExplainReport() {
+  const c = S.explainCheck;
+  if (S.explainMsg) {
+    return `<div class="panel"><h3>样例解释验证</h3>
+      <div class="notice warn">${esc(S.explainMsg)}</div>
+      ${c && c.checked ? renderExplainBody(c) : ''}</div>`;
+  }
+  if (!c || !c.checked) {
+    return `<div class="panel"><h3>样例解释验证</h3>
+      <div class="hint">题面的"样例解释"是手写文字，系统无法自动校对——而探针和提示都从题面生成，
+      解释错了学生的反馈就会错。这个功能会：让模型写参考代码并真跑样例锚定 →
+      把解释抽成可计算断言 → 生成独立验证程序重算事实 → 逐条报告真假。</div>
+      ${S.role === 'admin' ? `<button class="btn primary" id="btn-explain-check">跑代码反推验证</button>
+        <span class="muted" style="font-size:12px">消耗 2 次模型调用（参考代码 + 断言验证）</span>` : '<div class="muted">还没有验证报告，请联系管理员跑一次。</div>'}
+      </div>`;
+  }
+  return `<div class="panel"><h3>样例解释验证</h3>${renderExplainBody(c)}
+    ${S.role === 'admin' ? `<div class="row" style="margin-top:8px"><button class="btn ghost" id="btn-explain-check">重新验证</button></div>` : ''}</div>`;
+}
+
+function renderExplainBody(c) {
+  const statusLine = c.status === 'no_claims'
+    ? `<div class="job done"><span class="job-ico">${ICONS.check}</span><div>${esc(c.note || '解释无可计算断言')}</div></div>`
+    : `<div class="job ${c.ok_count === c.total ? 'done' : ''}"><span class="job-ico">${ICONS.check}</span>
+        <div>断言 ${c.ok_count}/${c.total} 条与代码重算一致${c.note ? `——${esc(c.note)}` : ''}</div></div>`;
+  const rows = (c.report || []).map(item => {
+    const mark = item.ok === true ? '<span class="pill ok">一致</span>'
+      : item.ok === false ? '<span class="pill bad">不一致</span>'
+      : '<span class="pill warn">未覆盖</span>';
+    return `<div class="probe-row"><div class="probe-layer">${mark}<span>${esc(item.claim)}</span></div>
+      <div class="probe-content muted">代码重算：${esc(item.actual || '')}</div></div>`;
+  }).join('');
+  return `${statusLine}${rows ? `<div class="probe-table">${rows}</div>` : ''}`;
+}
+
+function renderTutorTab() {
+  const adminBar = S.role === 'admin' ? `
+    <div class="row" style="justify-content:flex-end; margin-bottom:8px">
+      <button class="btn ghost" id="btn-tutor-reset">重置本题教学记录</button>
+      <button class="btn ghost" id="btn-tutor-reset-full">连包一起重建</button>
+      <span class="muted" style="font-size:12px">演示/复测用；两个学生的账号的档案不受影响</span>
+    </div>` : '';
+  // 样例解释验证是题面质检工具，不再摆到做题辅助页里（API 保留，需要时可直接调
+  // POST /api/problems/<id>/explain-check），学生和管理员都不用看到它
+  return `${adminBar}${renderProbePanel()}${renderLadderPanel()}`;
+}
+
+function bindTutorTab() {
+  // held 后回填草稿：重渲染不该让学生刚打的字凭空消失
+  const box = $('ladder-answer');
+  if (box && S.ladderDraft && S.ladderDraft.level === (S.ladder || {}).level) {
+    box.value = S.ladderDraft.value;
+  }
+  const probeStart = $('btn-probe-start');
+  if (probeStart) probeStart.addEventListener('click', () => tutorAction('probe-start', {}, true));
+  const probeAnswer = $('btn-probe-answer');
+  if (probeAnswer) probeAnswer.addEventListener('click', () => {
+    const layer = Number(($('probe-layer') || {}).value || 0);
+    const type = ($('probe-type') || {}).value || '';
+    if (!layer) { S.probeMsg = '先选是哪一栏的错（也可以直接点表格里那一行）。'; renderDetail(); return; }
+    if (!type) { S.probeMsg = '再选一下错型：缺一项还是多一项。'; renderDetail(); return; }
+    S.probeSaidLayer = layer; S.probeSaidType = type;
+    tutorAction('probe-answer', { layer, error_type: type });
+  });
+  // 点探针表格行 = 快速选层（埋错只开放在当前活跃层，其他层点一下就提示）
+  document.querySelectorAll('.probe-row[data-layer]').forEach(row => {
+    row.addEventListener('click', () => {
+      const layer = Number(row.dataset.layer);
+      const probe = (S.probe || {}).probe || {};
+      if (probe.done) return;
+      if (layer !== probe.active_layer) {
+        S.probeMsg = `探针一次只开放一栏：现在是第 ${probe.active_layer} 栏，先把它找出来。`;
+        renderDetail();
+        return;
+      }
+      S.probeSaidLayer = layer;
+      const sel = $('probe-layer');
+      if (sel) sel.value = String(layer);
+      const typeSel = $('probe-type');
+      if (typeSel) typeSel.focus();
+    });
+  });
+  const explainBtn = $('btn-explain-check');
+  if (explainBtn) explainBtn.addEventListener('click', runExplainCheck);
+  const resetBtn = $('btn-tutor-reset');
+  if (resetBtn) resetBtn.addEventListener('click', () => {
+    if (!confirm('重置本题探针与提示的进度和留痕？档位档案保留。')) return;
+    tutorAction('tutor-reset', { full: false }, true);
+  });
+  const resetFull = $('btn-tutor-reset-full');
+  if (resetFull) resetFull.addEventListener('click', () => {
+    if (!confirm('连探针包/提示包一起删除并重新生成？会消耗一次模型调用。')) return;
+    tutorAction('tutor-reset', { full: true }, true);
+  });
+  const ladderStart = $('btn-ladder-start');
+  if (ladderStart) ladderStart.addEventListener('click', () => tutorAction('ladder-start', {}, true));
+  const present = $('btn-ladder-present');
+  if (present) present.addEventListener('click', () => tutorAction('ladder-present', { trigger: 'self' }));
+  const fail2 = $('btn-ladder-fail2');
+  if (fail2) fail2.addEventListener('click', () => tutorAction('ladder-present', { trigger: 'fail2' }));
+  const l4 = $('btn-ladder-l4');
+  if (l4) l4.addEventListener('click', () => tutorAction('ladder-l4', {}, true));
+  const answer = $('btn-ladder-answer');
+  if (answer) answer.addEventListener('click', () => {
+    let payload;
+    if (S.ladder && S.ladder.level === 3) {
+      payload = { answers: [1, 2, 3].map(i => ($('ladder-blank-' + i) || {}).value || '') };
+    } else {
+      const box = $('ladder-answer');
+      payload = { answer: (box || {}).value || '' };
+      // 重渲染会清空输入框：先记住草稿，held 后回填，否则学生打的字凭空消失
+      S.ladderDraft = { level: (S.ladder || {}).level, value: (box || {}).value || '' };
+    }
+    tutorAction('ladder-answer', payload);
+  });
+}
+
+async function runExplainCheck() {
+  const pid = S.current;
+  if (!pid) return;
+  const btn = $('btn-explain-check');
+  if (btn) { btn.disabled = true; btn.textContent = '验证中（写参考代码→锚定→生成验证程序→真跑）…'; }
+  S.explainMsg = '';
+  try {
+    const result = await post(`/api/problems/${pid}/explain-check`, {});
+    if (result.error) {
+      S.explainMsg = result.error;
+    } else {
+      S.explainCheck = await api(`/api/problems/${pid}/explain-check`);
+    }
+  } catch (error) {
+    S.explainMsg = error.message || '验证失败';
+  }
+  renderDetail();
+}
+
+async function tutorAction(action, body, generating) {
+  const pid = S.current;
+  if (!pid) return;
+  const isProbe = action.startsWith('probe');
+  if (generating) {
+    if (action === 'probe-start') S.probeMsg = '';
+    if (action === 'ladder-start') S.ladderMsg = '';
+  }
+  const path = `/api/problems/${pid}/${action}`;
+  try {
+    const result = await post(path, body);
+    if (result.error) {
+      if (isProbe) S.probeMsg = result.error;
+      else S.ladderMsg = result.error;
+    } else if (action === 'tutor-reset') {
+      // 重置后两个面板都回到初始状态，重新拉取
+      S.probe = await api(`/api/problems/${pid}/probe`);
+      S.ladder = await api(`/api/problems/${pid}/ladder`);
+      S.probeMsg = result.reset === 'full'
+        ? '已连包重置。点「开始探针」重新生成（消耗一次模型调用）。'
+        : '已重置进度。点「开始探针」重新做这道题。';
+      S.ladderMsg = '';
+    } else {
+      // 动作返回值只是"这次动作说了什么"，完整界面状态一律回读状态接口——
+      // answer 的返回不带 content/answered 这些视图字段，直接覆盖会弄断交互。
+      if (isProbe) {
+        S.probe = await api(`/api/problems/${pid}/probe`);
+        if (result.verdict === 'found') S.probeMsg = `正确——${result.should_find || ''}${result.tier === 'exempt' ? '（本层已免检）' : ''}`;
+        else if (result.verdict === 'missed') S.probeMsg = `没找对。追问（第 ${result.round}/3 轮）：${result.followup}`;
+        else if (result.verdict === 'reteach') S.probeMsg = `三轮未过，这栏由助手代填：${result.correct}（${result.explain}）`;
+      } else {
+        S.ladder = await api(`/api/problems/${pid}/ladder`);
+        if (result.verdict === 'held') {
+          const said = (S.ladderDraft || {}).value || '';
+          S.ladderMsg = `${result.message || '没过，再想想。'}${said ? `（你刚才答的是「${said}」）` : ''}`;
+        }
+        else if (result.verdict === 'passed') {
+          // 通过要给明确反馈：不然界面只是静默切换按钮，学生不知道自己答对了
+          S.ladderDraft = null;
+          S.ladderMsg = result.level >= 4
+            ? '全部通过！已解锁 L4——点下方按钮让助教指一处错。'
+            : `回答通过，已推进到 L${result.level}。点「下一步」查看下一级。`;
+        } else if (result.verdict === 'l4') {
+          S.ladderMsg = `助教指认第 ${result.line} 行：${result.message}`;
+        }
+      }
+    }
+  } catch (error) {
+    if (isProbe) S.probeMsg = error.message || '请求失败';
+    else S.ladderMsg = error.message || '请求失败';
+  }
+  renderDetail();
+}
+
 function bindDetail() {
   const gen = $('btn-gen');
   if (gen) gen.addEventListener('click', startDataset);
@@ -2090,8 +2517,7 @@ function bindDetail() {
   if (cancel) cancel.addEventListener('click', cancelJob);
   const del = $('btn-delete');
   if (del) del.addEventListener('click', deleteProblem);
-  const restore = $('btn-restore-stmt');
-  if (restore) restore.addEventListener('click', restoreStatement);
+  bindTutorTab();
   document.querySelectorAll('.tab').forEach(tab => {
     tab.addEventListener('click', () => { S.tab = tab.dataset.tab; renderDetail(); });
   });
@@ -2150,21 +2576,6 @@ async function startDataset() {
   } catch (error) {
     toast(error.message);
     buttons.forEach(button => { button.disabled = false; });
-  }
-}
-
-async function restoreStatement() {
-  if (!S.current) return;
-  if (!confirm('把题面还原成导入时的原文？补全的那段会丢弃，样例与契约一并作废，需要重新生成数据。')) return;
-  const button = $('btn-restore-stmt');
-  if (button) { button.disabled = true; button.textContent = '还原中…'; }
-  try {
-    await post('/api/problems/' + S.current + '/restore-statement', {});
-    toast('已还原为原文');
-    await refreshDetail();
-  } catch (error) {
-    toast(error.message);
-    if (button) { button.disabled = false; button.textContent = '恢复原文'; }
   }
 }
 
@@ -2680,9 +3091,23 @@ function impFail(message, stepIndex) {
   $('imp-note').classList.add('err');
   $('imp-note').textContent = message;
   $('imp-foot').classList.remove('hidden');
-  $('imp-close').onclick = () => $('imp-mask').classList.add('hidden');
   toast(message);
 }
+
+// 关闭通道全部静态绑定，不依赖 impFail 现场赋值（赋值那行没跑到按钮就是死的）。
+// Esc / 点背景只在失败态生效，进行中误触不会把反馈关掉。
+$('imp-close').addEventListener('click', () => $('imp-mask').classList.add('hidden'));
+$('imp-mask').addEventListener('click', (event) => {
+  if (event.target === $('imp-mask') && $('imp-card').classList.contains('bad')) {
+    $('imp-mask').classList.add('hidden');
+  }
+});
+document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape' && !$('imp-mask').classList.contains('hidden')
+      && $('imp-card').classList.contains('bad')) {
+    $('imp-mask').classList.add('hidden');
+  }
+});
 async function uploadFile(file) {
   const isImage = /\.(png|jpe?g|webp|bmp|gif|tiff?|heic|heif)$/i.test(file.name) || String(file.type || '').startsWith('image/');
   $('imp-s2').querySelector('span').textContent = isImage ? '识别图片文字' : '解析文档';

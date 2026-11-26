@@ -78,6 +78,50 @@ VISION = StageSpec(
     "D0", loader.SLIM_VISION, "v1", 0.0, 8192, 180, 1, "slim_vision", thinking="disabled"
 )
 
+# ── 教学层（探针 + 五步提示）────────────────────────────────────────────────
+# 同样不进 STAGES：探针/提示是"做题辅助"链路，与数据生成链各自独立，
+# 计入每日额度但不计入单题数据预算。温度 0.2：建模埋错需要一点措辞自由度，
+# 但错型只有缺/冗两类，不能发散。关思考：产出是结构固定的表，不是推理链。
+PROBE = StageSpec(
+    "T1", loader.SLIM_PROBE, "v1", 0.2, 16384, 180, 1, "slim_probe", thinking="disabled"
+)
+LADDER = StageSpec(
+    "T2", loader.SLIM_LADDER, "v1", 0.2, 8192, 120, 1, "slim_ladder", thinking="disabled"
+)
+#: L4 运行期调用：要看学生代码指一处错，一次一调。
+#: v2：附带弯路回顾——复盘学生此前在梯子上被拦下的回答（review 字段）。
+LADDER_L4 = StageSpec(
+    "T3", loader.SLIM_LADDER_L4, "v2", 0.0, 2048, 90, 1, "slim_ladder_l4",
+    thinking="disabled",
+)
+
+#: T4 样例解释反推验证：把题面"样例解释"抽成断言、生成验证程序并真跑判定。
+#: 温度 0.0——同一题面重复验证必须得到同一结论，解释质检不能有随机性。
+#: v2：数量明细类断言要求归属正确 + 明细不变量自检 + 小样例枚举全部最优方案
+#: （v1 真机撞到"总账对、分站明细错"导致断言误判不一致的活案例）。
+#: v3：加枚举自检——贪心明细必须出现在枚举的最优方案集合中（v2 真机撞到
+#: "贪心算对、枚举漏解，两条路径互相矛盾却没被拦住"的活案例）。
+#: 不进 `STAGES` 预算表：它是题面质检，不是做题链路的一部分。
+EXPLAIN_CHECK = StageSpec(
+    "T4", loader.SLIM_EXPLAIN_CHECK, "v3", 0.0, 8192, 240, 1, "slim_explain_check",
+    thinking="disabled",
+)
+
+#: 判断级回答反应（L0 判断型 / L1 / L2）：学生提交判断后，针对"他那句话"生成一段
+#: 简短回应。判定与级别推进仍由状态机查表决定，模型只写回应文本、无权改变判定；
+#: 调用失败静默降级（没有反应就不显示，放行结果不受影响）。
+REACT = StageSpec(
+    "T2R", loader.SLIM_REACT, "v1", 0.3, 512, 60, 1, "slim_react", thinking="disabled"
+)
+
+#: T2J 回答判定：所有回答字段（L0 判断型 / L1 / L2 判断、L3 填空的等价表述兜底）
+#: 的对错由模型判定，级别推进仍由状态机机械执行（判 passed 才放行）。
+#: 温度 0.0——判定必须可复现，同一个回答不能时过时不过。
+#: 调用失败降级回查表规则（长度门槛 / accept 清单），主流程不因模型故障卡死。
+JUDGE = StageSpec(
+    "T2J", loader.SLIM_JUDGE, "v1", 0.0, 512, 60, 1, "slim_judge", thinking="disabled"
+)
+
 #: 执行规格（D1N）：只在 D2 判"题面没有标准输入格式/答案顺序不唯一"时补跑一次。
 STAGES: Dict[str, StageSpec] = {
     "segment": SEGMENT,

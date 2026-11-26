@@ -605,9 +605,9 @@ def restore_statement(db: Any, problem_id: int) -> Dict[str, Any]:
         conn.execute(
             "UPDATE problems SET statement_md=?, statement_original='', statement_repaired=0,"
             " samples_json='[]', exec_spec_json='', updated_at=? WHERE id=?",
-            (original, _now(), int(problem_id)),
+            (segment.normalize_statement(original), _now(), int(problem_id)),
         )
-    return {"ok": True, "statement": original, "problem_id": int(problem_id)}
+    return {"ok": True, "statement": segment.normalize_math(original), "problem_id": int(problem_id)}
 
 # 反馈相关函数移到了 api_feedback，这里再导出一次，保持 `api.xxx` 的调用方式不变。
 # 必须放在文件末尾：api_feedback 反过来要用本模块的 _page_limit/_now。

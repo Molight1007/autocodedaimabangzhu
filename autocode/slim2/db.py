@@ -52,6 +52,8 @@ _COLUMN_MIGRATIONS = {
         # 导入人：默认题库里非管理员只能删自己导入的题，防止一个学生手滑删掉别人的。
         # 老题回填为空串，按"公共题"处理，不追溯。
         ("created_by", "TEXT NOT NULL DEFAULT ''"),
+        # 难度：导入确认时规则评估（2026-11-26）；空 = 老题，启动时回填一次
+        ("difficulty", "TEXT NOT NULL DEFAULT ''"),
     ),
 }
 
@@ -122,6 +124,39 @@ def _ensure_default_bank(conn: Any) -> None:
     )
 
 
+def _backfill_difficulty(conn: Any) -> None:
+    """老题回填难度：difficulty 列是后加的（2026-11-26），导入时还没这个功能。
+
+    只处理 difficulty='' 的行，回填一次就不再动；规则评估失败就留空，
+    界面对空值不显示颜色，不影响任何业务逻辑。
+    """
+    rows = conn.execute(
+        "SELECT id, statement_md, constraints_json, judge_type"
+        " FROM problems WHERE difficulty=''"
+    ).fetchall()
+    if not rows:
+        return
+    import json
+
+    from .difficulty import estimate
+
+    for row in rows:
+        try:
+            constraints = json.loads(str(row["constraints_json"] or "[]"))
+        except (json.JSONDecodeError, TypeError):
+            constraints = []
+        if not isinstance(constraints, list):
+            constraints = []
+        level = estimate(
+            str(row["statement_md"] or ""), constraints,
+            judge_type=str(row["judge_type"] or ""),
+        )
+        if level:
+            conn.execute(
+                "UPDATE problems SET difficulty=? WHERE id=?", (level, int(row["id"]))
+            )
+
+
 def _init(db: Database) -> None:
     conn = db.connect()
     # 老库先重建再建表：schema.sql 里的 ix_problems_bank 依赖 bank_id，
@@ -131,6 +166,7 @@ def _init(db: Database) -> None:
     else:
         conn.executescript(config.SCHEMA_FILE.read_text(encoding="utf-8"))
     _ensure_columns(conn)
+    _backfill_difficulty(conn)
     _ensure_default_bank(conn)
     conn.execute(
         "INSERT INTO schema_migrations(version, applied_at) VALUES(?, ?)"

@@ -17,7 +17,7 @@ from typing import Any, Dict, Optional
 from urllib.parse import parse_qs, unquote, urlsplit
 
 from . import auth
-from . import api, config, jobs, user_llm
+from . import api, api_tutor, config, explain_check, jobs, user_llm
 from .db import get_db
 from .llm_stage import StageError, StageRunner
 
@@ -59,6 +59,13 @@ _CODE_STATUS = {
     "NO_DOCX_ENGINE": 501,
     "NO_KEY": 400,
     "LLM_UNREACHABLE": 502,
+    # 教学层（探针 / 五步提示）的状态冲突与生成失败
+    "ALREADY_DONE": 409,
+    "NOT_STARTED": 409,
+    "NOT_PRESENTED": 409,
+    "LEVEL_LOCKED": 409,
+    "NO_SUBMISSION": 409,
+    "TUTOR_FAILED": 502,
 }
 
 
@@ -390,6 +397,13 @@ class Handler(BaseHTTPRequestHandler):
                 ))
             if len(parts) == 4 and parts[3] == "adversarial":
                 return self._json(api.list_adversarial(_db(), problem_id))
+            # 教学层：探针 / 五步提示状态（只读，不花额度）
+            if len(parts) == 4 and parts[3] == "probe":
+                return self._json(api_tutor.probe_status(_db(), problem_id, user))
+            if len(parts) == 4 and parts[3] == "ladder":
+                return self._json(api_tutor.ladder_status(_db(), problem_id, user))
+            if len(parts) == 4 and parts[3] == "explain-check":
+                return self._json(explain_check.explain_status(_db(), problem_id))
             if len(parts) == 4 and parts[3] == "export":
                 fmt = str((query.get("format") or ["json"])[0]).lower()
                 result = api.export_problem(_db(), problem_id, fmt)
@@ -587,6 +601,84 @@ class Handler(BaseHTTPRequestHandler):
                 return self._result(api.restore_statement(_db(), problem_id))
             if parts[3] == "cancel":
                 return self._result(api.cancel_job(_db(), payload))
+            # ── 教学层：探针 ──
+            if parts[3] == "probe-start":
+                if not self._cap_left(user):
+                    return self._cap_exhausted()
+                cfg = user_llm.config_for(_db(), user)
+                if cfg is None:
+                    return self._no_key()
+                runner = StageRunner(_db(), problem_id=problem_id, budget=2,
+                                     llm_config=cfg, user=user)
+                self._audit("start_probe", str(problem_id))
+                try:
+                    return self._result(api_tutor.start_probe(_db(), runner, problem_id, user))
+                except StageError as exc:
+                    return self._fail(502, exc.code, str(exc))
+            if parts[3] == "probe-answer":
+                return self._result(api_tutor.probe_answer(_db(), problem_id, user, payload))
+            # ── 教学层：五步提示 ──
+            if parts[3] == "ladder-start":
+                if not self._cap_left(user):
+                    return self._cap_exhausted()
+                cfg = user_llm.config_for(_db(), user)
+                if cfg is None:
+                    return self._no_key()
+                runner = StageRunner(_db(), problem_id=problem_id, budget=2,
+                                     llm_config=cfg, user=user)
+                self._audit("start_ladder", str(problem_id))
+                try:
+                    return self._result(api_tutor.start_ladder(_db(), runner, problem_id, user))
+                except StageError as exc:
+                    return self._fail(502, exc.code, str(exc))
+            if parts[3] == "ladder-present":
+                return self._result(api_tutor.ladder_present(_db(), problem_id, user, payload))
+            if parts[3] == "ladder-answer":
+                # 判断级反应是一次运行期模型调用：有 Key 且有额度才建 runner；
+                # 没有就静默跳过反应，判定与放行结果不受影响。
+                react_runner = None
+                if self._cap_left(user):
+                    cfg = user_llm.config_for(_db(), user)
+                    if cfg is not None:
+                        react_runner = StageRunner(_db(), problem_id=problem_id, budget=1,
+                                                   llm_config=cfg, user=user)
+                return self._result(api_tutor.ladder_answer(
+                    _db(), problem_id, user, payload, react_runner))
+            if parts[3] == "ladder-l4":
+                if not self._cap_left(user):
+                    return self._cap_exhausted()
+                cfg = user_llm.config_for(_db(), user)
+                if cfg is None:
+                    return self._no_key()
+                runner = StageRunner(_db(), problem_id=problem_id, budget=1,
+                                     llm_config=cfg, user=user)
+                try:
+                    return self._result(api_tutor.give_l4(_db(), runner, problem_id, user))
+                except StageError as exc:
+                    return self._fail(502, exc.code, str(exc))
+            if parts[3] == "tutor-reset":
+                if auth.role_of(user) != "admin":
+                    return self._fail(403, "FORBIDDEN", "只有管理员可以重置教学状态")
+                self._audit("tutor_reset", str(problem_id))
+                return self._result(api_tutor.reset_tutor(_db(), problem_id, user, payload))
+            if parts[3] == "explain-check":
+                if auth.role_of(user) != "admin":
+                    return self._fail(403, "FORBIDDEN", "只有管理员可以跑样例解释验证")
+                if not self._cap_left(user):
+                    return self._cap_exhausted()
+                cfg = user_llm.config_for(_db(), user)
+                if cfg is None:
+                    return self._no_key()
+                runner = StageRunner(_db(), problem_id=problem_id, budget=2,
+                                     llm_config=cfg, user=user)
+                self._audit("explain_check", str(problem_id))
+                try:
+                    return self._result(explain_check.run_explain_check(
+                        _db(), runner, problem_id, user))
+                except StageError as exc:
+                    return self._fail(502, exc.code, str(exc))
+                except explain_check.ExplainError as exc:
+                    return self._result({"error": str(exc), "code": exc.code})
         if len(parts) == 4 and parts[:2] == ["api", "jobs"] and parts[3] == "cancel":
             return self._result(api.cancel_job_by_job(_db(), int(parts[2])))
         return self._fail(404, "NOT_FOUND", "接口不存在")
